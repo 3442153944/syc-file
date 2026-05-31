@@ -11,7 +11,7 @@ android {
     defaultConfig {
         applicationId = "com.example.rootinstaller"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 30
         versionCode = 1
         versionName = "1.0"
 

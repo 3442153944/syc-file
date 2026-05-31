@@ -127,6 +127,10 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 true -> {
                     Column(Modifier.fillMaxSize()) {
                         // 快捷路径横向滚动栏
+                        DefaultInstallerBanner(
+                            isDefault = state.isDefaultInstaller,
+                            onSetDefault = vm::setAsDefaultInstaller
+                        )
                         QuickPathBar(
                             currentPath = state.currentPath,
                             onNavigate = { vm.navigateTo(it) }
@@ -464,5 +468,55 @@ private fun ErrorBanner(message: String) {
             .padding(12.dp)
     ) {
         Text(message, color = MaterialTheme.colorScheme.onErrorContainer, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun DefaultInstallerBanner(isDefault: Boolean, onSetDefault: () -> Unit) {
+    if (isDefault) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.primaryContainer)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "✓ 已是默认安装器",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    } else {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.secondaryContainer)
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "点击 APK 文件时可能弹出选择器",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(MaterialTheme.colorScheme.secondary)
+                    .clickable(onClick = onSetDefault)
+                    .padding(horizontal = 12.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    "设为默认",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSecondary,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
     }
 }
