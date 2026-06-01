@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/spf13/viper"
 )
 
@@ -16,6 +18,8 @@ type Config struct {
 	Auth      AuthConfig   `mapstructure:"auth"`
 	Server    ServerConfig `mapstructure:"server"`
 	Redis     RedisConfig  `mapstructure:"redis"`
+	File      FileConfig   `mapstructure:"file"`
+	User      UserCfg      `mapstructure:"user"`
 }
 
 // DBConfig 数据库配置 (注意：这里将 uri 拆分为 host 和 port 以适配 GORM)
@@ -57,6 +61,74 @@ type AuthConfig struct {
 // ServerConfig 服务器配置
 type ServerConfig struct {
 	Port int `mapstructure:"port"`
+}
+
+// FileConfig 文件存储配置
+type FileConfig struct {
+	AllowedPaths []string   `mapstructure:"allowed_paths"`
+	Storage      StorageCfg `mapstructure:"storage"`
+	Upload       UploadCfg  `mapstructure:"upload"`
+}
+
+// StorageCfg 存储目录配置
+type StorageCfg struct {
+	BasePath   string `mapstructure:"base_path"`
+	UploadPath string `mapstructure:"upload_path"`
+	TempPath   string `mapstructure:"temp_path"`
+	TrashPath  string `mapstructure:"trash_path"`
+}
+
+// UploadCfg 上传配置
+type UploadCfg struct {
+	MaxFileSize         int64    `mapstructure:"max_file_size"`
+	MaxFilenameLength   int      `mapstructure:"max_filename_length"`
+	AllowedExtensions   []string `mapstructure:"allowed_extensions"`
+	ForbiddenExtensions []string `mapstructure:"forbidden_extensions"`
+}
+
+// UserCfg 用户配置
+type UserCfg struct {
+	AvatarPath        string   `mapstructure:"avatar_path"`
+	AllowedExtensions []string `mapstructure:"allowed_extensions"`
+	MaxSize           int64    `mapstructure:"max_size"`
+}
+
+// IsExtensionAllowed 检查文件扩展名是否允许上传
+func (c *Config) IsExtensionAllowed(ext string) bool {
+	ext = strings.ToLower(ext)
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	for _, forbidden := range c.File.Upload.ForbiddenExtensions {
+		if strings.ToLower(forbidden) == ext {
+			return false
+		}
+	}
+	if len(c.File.Upload.AllowedExtensions) == 0 {
+		return true
+	}
+	for _, allowed := range c.File.Upload.AllowedExtensions {
+		if strings.ToLower(allowed) == ext {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPathAllowed 检查路径是否在允许列表中
+func (c *Config) IsPathAllowed(path string) bool {
+	path = strings.ToUpper(path)
+	for _, allowed := range c.File.AllowedPaths {
+		if strings.ToUpper(allowed) == path {
+			return true
+		}
+	}
+	return false
+}
+
+// GetAllowedPaths 获取允许的路径列表
+func (c *Config) GetAllowedPaths() []string {
+	return c.File.AllowedPaths
 }
 
 // Init 初始化 Viper 并解析 YAML

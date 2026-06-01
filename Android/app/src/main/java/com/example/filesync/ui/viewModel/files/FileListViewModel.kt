@@ -33,7 +33,7 @@ class FileListViewModel : ViewModel() {
 
             try {
                 Request.post<FileListResponse, TraverseRequest>(
-                    "/files/traverse-directory",
+                    "/file/traverse-directory",
                     TraverseRequest(path)
                 ) { result ->
                     result.onSuccess { response ->
@@ -97,7 +97,6 @@ class FileListViewModel : ViewModel() {
 
 @Serializable
 data class TraverseRequest(
-    @SerialName("Path")
     val path: String
 )
 

@@ -108,7 +108,7 @@ class FileUploadViewModel : ViewModel() {
         withContext(Dispatchers.IO) {
             try {
                 val normalizedPath = normalizePath(path)
-                val url = "${Request.baseUrl}/files/upload-file"
+                val url = "${Request.baseUrl}/file/upload"
                 val token = Request.getToken()
 
                 // 构建 JSON body
@@ -125,7 +125,7 @@ class FileUploadViewModel : ViewModel() {
                 val request = okhttp3.Request.Builder()
                     .url(url)
                     .apply {
-                        token?.let { header("token", it) }
+                        token?.let { header("Token", it) }
                     }
                     .post(
                         requestBody.toRequestBody(
@@ -232,7 +232,7 @@ class FileUploadViewModel : ViewModel() {
             }
 
             val normalizedPath = normalizePath(_targetPath.value)
-            val url = "${Request.baseUrl}/files/upload-file"
+            val url = "${Request.baseUrl}/file/upload"
             val token = Request.getToken()
 
             Log.d("FileUpload", "上传文件: path=$normalizedPath, name=${fileInfo.name}")
@@ -257,7 +257,7 @@ class FileUploadViewModel : ViewModel() {
             val request = okhttp3.Request.Builder()
                 .url(url)
                 .apply {
-                    token?.let { header("token", it) }
+                    token?.let { header("Token", it) }
                 }
                 .post(progressBody)
                 .build()

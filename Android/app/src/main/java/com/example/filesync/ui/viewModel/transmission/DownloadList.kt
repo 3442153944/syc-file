@@ -169,13 +169,13 @@ class DownloadListViewModel : ViewModel() {
 
                 val downloadUrl = buildString {
                     append(Request.baseUrl)
-                    append("/files/get-file")
+                    append("/file/download")
                     append("?path=").append(encodedPath)
                     append("&name=").append(encodedName)
                     if (deviceIdParam.isNotEmpty()) {
                         append(deviceIdParam)
                     }
-                    append("&token=").append(token)  // ← token 不编码
+                    append("&token=").append(token)
                 }
 
                 Log.d(TAG, "下载 URL: $downloadUrl")

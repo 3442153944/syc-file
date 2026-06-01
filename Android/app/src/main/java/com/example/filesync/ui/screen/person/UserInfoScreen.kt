@@ -43,9 +43,9 @@ fun UserInfoScreen(
 
         // 头像
         Box(contentAlignment = Alignment.BottomEnd) {
-            if (user.avatar.isNotBlank()) {
+            if (user.avatar?.isNotBlank() == true) {
                 AsyncImage(
-                    model = "${Request.baseStaticUrl}/${user.avatar}",
+                    model = "${Request.baseStaticUrl}/${user.avatar!!}",
                     contentDescription = "头像",
                     modifier = Modifier
                         .size(100.dp)
@@ -124,9 +124,9 @@ fun UserInfoScreen(
                 HorizontalDivider()
                 InfoRow(icon = Icons.Default.Person, label = "用户名", value = user.username)
                 HorizontalDivider()
-                InfoRow(icon = Icons.Default.Email, label = "邮箱", value = user.email.ifBlank { "未设置" })
+                InfoRow(icon = Icons.Default.Email, label = "邮箱", value = user.email?.ifBlank { "未设置" } ?: "未设置")
                 HorizontalDivider()
-                InfoRow(icon = Icons.Default.Phone, label = "手机号", value = user.phone.ifBlank { "未设置" })
+                InfoRow(icon = Icons.Default.Phone, label = "手机号", value = user.phone?.ifBlank { "未设置" } ?: "未设置")
             }
         }
 

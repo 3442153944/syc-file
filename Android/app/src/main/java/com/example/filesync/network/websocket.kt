@@ -15,7 +15,7 @@ object WebSocketManager {
     private const val TAG = "WebSocketManager"
 
     /** WebSocket 服务器地址 */
-    var serverUrl = "ws://192.168.31.100:9999/api/ws/connect"
+    var serverUrl = "ws://192.168.31.100:8991/v1/ws/connect"
         private set
 
     /** OkHttp 客户端（专用于 WebSocket） */
@@ -100,7 +100,7 @@ object WebSocketManager {
             // 和 Request 一样，在 Header 中携带 token
             val request = okhttp3.Request.Builder()
                 .url(serverUrl)
-                .header("token", token)  // 小写 token，和 Request 保持一致
+                .header("Token", token)  // 大写 Token，和 Request 保持一致
                 .header("User-Agent", "FileSyncApp/1.0.0")
                 .build()
 

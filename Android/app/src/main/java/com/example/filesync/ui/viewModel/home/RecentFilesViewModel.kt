@@ -1,8 +1,10 @@
-// RecentFilesViewModel.kt
-package com.example.filesync.ui.viewmodel.home
+package com.example.filesync.ui.viewModel.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.filesync.dataClass.DownloadHistoryRequest
+import com.example.filesync.dataClass.DownloadHistoryResponse
+import com.example.filesync.network.Request
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,18 +15,38 @@ class RecentFilesViewModel : ViewModel() {
     private val _files = MutableStateFlow<List<RecentFile>>(emptyList())
     val files: StateFlow<List<RecentFile>> = _files.asStateFlow()
 
+    private val _loading = MutableStateFlow(false)
+    val loading: StateFlow<Boolean> = _loading.asStateFlow()
+
     init {
         loadFiles()
     }
 
-    private fun loadFiles() {
+    fun loadFiles() {
         viewModelScope.launch {
+            _loading.value = true
             try {
-                // TODO: 从数据库加载最近文件
-                _files.value = emptyList()
-            } catch (e: Exception) {
-                // 处理错误
+                val request = DownloadHistoryRequest(pageNum = 1, pageSize = 5)
+                Request.postSuspend<DownloadHistoryResponse, DownloadHistoryRequest>(
+                    endpoint = "/file/download-history",
+                    body = request
+                ).onSuccess { response ->
+                    if (response.code == 200 && response.data != null) {
+                        _files.value = response.data.list.map { item ->
+                            RecentFile(
+                                id = item.id.toString(),
+                                name = item.fileName ?: "未知",
+                                path = "",
+                                size = item.fileSize ?: 0L,
+                                lastModified = System.currentTimeMillis(),
+                                fileType = FileType.OTHER
+                            )
+                        }
+                    }
+                }
+            } catch (_: Exception) {
             }
+            _loading.value = false
         }
     }
 

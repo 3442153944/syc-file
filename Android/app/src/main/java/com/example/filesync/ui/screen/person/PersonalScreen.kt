@@ -77,12 +77,12 @@ fun PersonalScreen(modifier: Modifier = Modifier, navController: NavController) 
 private suspend fun checkLoginStatus(): PPersonalState {
     Request.getToken() ?: return PPersonalState.NotLoggedIn
 
-    val result = Request.postSuspend<PVerifyResponse>("/auth/verify")
+    val result = Request.postSuspend<PVerifyResponse>("/user/verify")
 
     return result.fold(
         onSuccess = { response ->
             if (response.code == 200) {
-                PPersonalState.LoggedIn(response.data.user)
+                PPersonalState.LoggedIn(response.data)
             } else {
                 PPersonalState.NotLoggedIn
             }

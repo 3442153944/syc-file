@@ -10,6 +10,7 @@ import (
 	"syc-file/config"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
+	"syc-file/internal/model"
 	"syc-file/pkg/logger"
 	"time"
 )
@@ -55,6 +56,29 @@ func main() {
 		logger.Logger.Error("数据库连接失败", zap.Error(err))
 	}
 	logger.Logger.Info("数据库连接成功")
+
+	// 自动迁移数据库表结构
+	if err := db.AutoMigrate(
+		&model.User{},
+		&model.Device{},
+		&model.File{},
+		&model.FileVersion{},
+		&model.SyncTask{},
+		&model.UploadHistory{},
+		&model.DownloadHistory{},
+		&model.Permission{},
+		&model.Role{},
+		&model.RolePermission{},
+		&model.UserRole{},
+		&model.DictType{},
+		&model.DictData{},
+		&model.OperationLog{},
+		&model.StorageConfig{},
+		&model.ShareRecord{},
+	); err != nil {
+		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
+	}
+	logger.Logger.Info("数据库表迁移完成")
 
 	//建立缓存连接
 	redisClient, err := database.InitRedis(config.Conf.Redis)

@@ -33,7 +33,7 @@ class ActiveDiskViewModel : ViewModel() {
             _error.value = null
 
             try {
-                Request.post<DiskResponse>("/files/available-disks") { result ->
+                Request.post<DiskResponse>("/file/available-disks") { result ->
                     result.onSuccess { response ->
                         if (response.code == 200 && response.data != null) {
                             _diskData.value = response.data

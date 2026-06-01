@@ -8,10 +8,10 @@ import kotlinx.serialization.Serializable
 data class PUser(
     val id: Int = 0,
     val username: String = "",
-    val email: String = "",
-    val phone: String = "",
-    val avatar: String = "",
-    val role: String = "",
+    val email: String? = null,
+    val phone: String? = null,
+    val avatar: String? = null,
+    val role: String? = null,
     val status: Int = 1,
     val last_login: String? = null,
     val created_at: String? = null
@@ -44,13 +44,7 @@ data class PLoginData(
 data class PVerifyResponse(
     val code: Int,
     val message: String,
-    val data: PVerifyData
-)
-
-@Serializable
-data class PVerifyData(
-    val msg: String,
-    val user: PUser
+    val data: PUser
 )
 
 // ==================== 更新用户信息 ====================

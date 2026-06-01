@@ -19,7 +19,7 @@ data class VerifyData(
 data class UserInfo(
     val user_id: Int,
     val username: String,
-    val email: String,
+    val email: String?,
     val issued_at: Long,
     val expires_at: Long
 )
@@ -45,12 +45,12 @@ data class LoginData(
 
 @Serializable
 data class User(
-    val avatar: String,
-    val email: String,
+    val avatar: String? = null,
+    val email: String? = null,
     val id: Int,
-    val last_login: String,
-    val phone: String,
-    val role: String,
+    val last_login: String? = null,
+    val phone: String? = null,
+    val role: String? = null,
     val status: Int,
     val username: String
 )
@@ -61,10 +61,10 @@ data class User(
 data class FullUser(
     val id: Int,
     val username: String,
-    val email: String = "",
-    val phone: String = "",
-    val avatar: String = "",
-    val role: String = "",
+    val email: String? = null,
+    val phone: String? = null,
+    val avatar: String? = null,
+    val role: String? = null,
     val status: Int = 1,
     val last_login: String? = null,
     val created_at: String? = null

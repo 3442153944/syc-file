@@ -145,7 +145,7 @@ fun LoginScreen(
                             errorMsg = ""
 
                             val result = Request.postSuspend<LoginResponse, LoginRequest>(
-                                "/auth/login",
+                                "/user/login",
                                 LoginRequest(username, password)
                             )
 

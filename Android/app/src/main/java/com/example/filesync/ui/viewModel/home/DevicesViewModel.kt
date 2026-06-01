@@ -1,8 +1,9 @@
-// DevicesViewModel.kt
-package com.example.filesync.ui.viewmodel.home
+package com.example.filesync.ui.viewModel.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.filesync.data.sync.WebSocketManager
+import com.example.filesync.data.sync.WsState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,24 +14,35 @@ class DevicesViewModel : ViewModel() {
     private val _devices = MutableStateFlow<List<ConnectedDevice>>(emptyList())
     val devices: StateFlow<List<ConnectedDevice>> = _devices.asStateFlow()
 
+    private val _onlineCount = MutableStateFlow(0)
+    val onlineCount: StateFlow<Int> = _onlineCount.asStateFlow()
+
     init {
-        loadDevices()
+        observeWsState()
     }
 
-    private fun loadDevices() {
+    private fun observeWsState() {
         viewModelScope.launch {
-            try {
-                // TODO: 从网络加载设备列表
-                _devices.value = emptyList()
-            } catch (e: Exception) {
-                // 处理错误
+            WebSocketManager.connectionState.collect { state ->
+                if (state is WsState.Connected) {
+                    // WebSocket connected means at least this device is online
+                    _onlineCount.value = 1
+                    _devices.value = listOf(
+                        ConnectedDevice(
+                            id = "self",
+                            name = "当前设备",
+                            ip = "",
+                            deviceType = DeviceType.SMARTPHONE,
+                            isOnline = true,
+                            lastSeen = System.currentTimeMillis()
+                        )
+                    )
+                }
             }
         }
     }
 
-    fun refresh() {
-        loadDevices()
-    }
+    fun refresh() {}
 }
 
 data class ConnectedDevice(

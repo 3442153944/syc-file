@@ -30,13 +30,13 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 object Request {
 
-    var baseUrl = "http://192.168.31.100:9999/api"
+    var baseUrl = "http://192.168.31.100:8991/v1"
         set(value) {
             field = value.trimEnd('/')
             Log.d(TAG, "基础 URL: $field")
         }
 
-    var baseStaticUrl = "http://192.168.31.100:9999"
+    var baseStaticUrl = "http://192.168.31.100:8991"
         set(value) {
             field = value.trimEnd('/')
             Log.d(TAG, "基础静态 URL: $field")
@@ -50,7 +50,7 @@ object Request {
     private val REMEMBER_PASSWORD_KEY = booleanPreferencesKey("remember_password")
 
     // token 自动提取的接口白名单
-    val TOKEN_ENDPOINTS = setOf("/auth/login", "/auth/verify")
+    val TOKEN_ENDPOINTS = setOf("/user/login", "/user/verify")
 
     val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -133,6 +133,20 @@ object Request {
     // ==================== 回调风格请求 ====================
 
     /**
+     * GET 请求
+     */
+    suspend inline fun <reified T> get(
+        endpoint: String,
+        queryParams: Map<String, String> = emptyMap(),
+        noinline onResult: (Result<T>) -> Unit = {}
+    ) {
+        val result = requestSuspendNoBody<T>("GET", endpoint, queryParams)
+        withContext(Dispatchers.Main) {
+            onResult(result)
+        }
+    }
+
+    /**
      * POST 请求（有请求体）
      */
     suspend inline fun <reified T, reified B> post(
@@ -162,6 +176,16 @@ object Request {
     // ==================== Suspend 风格请求 ====================
 
     /**
+     * GET 请求 - suspend 版本
+     */
+    suspend inline fun <reified T> getSuspend(
+        endpoint: String,
+        queryParams: Map<String, String> = emptyMap()
+    ): Result<T> {
+        return requestSuspendNoBody("GET", endpoint, queryParams)
+    }
+
+    /**
      * POST 请求 - suspend 版本（有请求体）
      */
     suspend inline fun <reified T, reified B> postSuspend(
@@ -181,6 +205,71 @@ object Request {
     }
 
     // ==================== 核心请求方法 ====================
+
+    /**
+     * 通用请求方法，无请求体（用于 GET 等）
+     */
+    suspend inline fun <reified T> requestSuspendNoBody(
+        method: String,
+        endpoint: String,
+        queryParams: Map<String, String> = emptyMap()
+    ): Result<T> = withContext(Dispatchers.IO) {
+        try {
+            var url = "$baseUrl$endpoint"
+            if (queryParams.isNotEmpty()) {
+                val queryString = queryParams.entries.joinToString("&") { (k, v) ->
+                    "$k=${java.net.URLEncoder.encode(v, "UTF-8")}"
+                }
+                url += "?$queryString"
+            }
+            Log.d(TAG, "$method $url")
+
+            val token = getToken()
+
+            val requestBuilder = okhttp3.Request.Builder()
+                .url(url)
+                .apply {
+                    token?.let { header("Token", it) }
+                    get()
+                }
+
+            val response = client.newCall(requestBuilder.build()).execute()
+
+            if (!response.isSuccessful) {
+                if (response.code == 401) {
+                    Log.w(TAG, "认证失败，清除 token 并跳转登录")
+                    clearToken()
+                    AuthManager.notifyTokenExpired()
+                }
+                return@withContext Result.failure(
+                    Exception("HTTP ${response.code}: ${response.message}")
+                )
+            }
+
+            val responseBody = response.body?.string()
+            if (responseBody.isNullOrEmpty()) {
+                return@withContext Result.failure(Exception("响应体为空"))
+            }
+
+            Log.d(TAG, "响应: ${responseBody.take(200)}")
+
+            val jsonObj = json.parseToJsonElement(responseBody).jsonObject
+            val code = jsonObj["code"]?.jsonPrimitive?.intOrNull
+            val message = jsonObj["message"]?.jsonPrimitive?.content ?: "未知错误"
+
+            if (code != 200) {
+                Log.w(TAG, "业务错误: code=$code, message=$message")
+                return@withContext Result.failure(Exception(message))
+            }
+
+            val result = json.decodeFromString<T>(responseBody)
+            Result.success(result)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "请求失败: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
 
     /**
      * 通用请求方法，直接返回 Result<T>
@@ -207,7 +296,7 @@ object Request {
             val requestBuilder = okhttp3.Request.Builder()
                 .url(url)
                 .apply {
-                    token?.let { header("token", it) }
+                    token?.let { header("Token", it) }
                 }
 
             // 构建请求体

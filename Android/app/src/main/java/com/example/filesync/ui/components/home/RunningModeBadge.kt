@@ -15,7 +15,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.filesync.ui.viewModel.home.RootStatus
 import com.example.filesync.ui.viewModel.home.RootStatusViewModel
-import com.example.filesync.ui.viewmodel.home.*
 
 @Composable
 fun RunningModeBadge(

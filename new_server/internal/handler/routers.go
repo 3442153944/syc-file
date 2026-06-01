@@ -5,8 +5,10 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 	"net/http"
+	"syc-file/internal/handler/file"
 	"syc-file/internal/handler/user"
 	"syc-file/internal/middleware"
+	"syc-file/internal/ws"
 )
 
 func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client) {
@@ -24,7 +26,9 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client) {
 	private := v1.Group("")
 	private.Use(middleware.RequireAuth())
 	{
-		// 后续需要登录的路由都注册在这里
-		// file.RegisterFileRouter(private, db, redisClient)
+		// 需要登录的路由都注册在这里
+		file.RegisterFileRouter(private, db, redisClient)
+		private.POST("/user/update-info", user.HandlerFuncUpdateUserInfo(db, redisClient))
+		ws.RegisterWSRouter(private, db)
 	}
 }

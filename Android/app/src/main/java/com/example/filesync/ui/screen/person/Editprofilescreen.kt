@@ -1,5 +1,6 @@
 package com.example.filesync.ui.screen.person
 
+import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,8 +45,8 @@ fun EditProfileScreen(
     onSaveSuccess: () -> Unit
 ) {
     var username by remember { mutableStateOf(user.username) }
-    var email by remember { mutableStateOf(user.email) }
-    var phone by remember { mutableStateOf(user.phone) }
+    var email by remember { mutableStateOf(user.email ?: "") }
+    var phone by remember { mutableStateOf(user.phone ?: "") }
     var selectedAvatarUri by remember { mutableStateOf<Uri?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf("") }
@@ -139,9 +140,9 @@ fun EditProfileScreen(
                             contentScale = ContentScale.Crop
                         )
                     }
-                    user.avatar.isNotBlank() -> {
+                    user.avatar?.isNotBlank() == true -> {
                         AsyncImage(
-                            model = "${Request.baseUrl.removeSuffix("/api")}/${user.avatar}",
+                            model = "${Request.baseStaticUrl}/${user.avatar!!}",
                             contentDescription = "当前头像",
                             modifier = Modifier.fillMaxSize().clip(CircleShape),
                             contentScale = ContentScale.Crop
@@ -192,29 +193,33 @@ fun EditProfileScreen(
                 keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) })
             )
 
-            OutlinedTextField(
-                value = email,
-                onValueChange = { email = it },
-                label = { Text("邮箱") },
-                leadingIcon = { Icon(Icons.Default.Email, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !isLoading,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
-                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) })
-            )
+            email?.let { it1 ->
+                OutlinedTextField(
+                    value = it1,
+                    onValueChange = { email = it },
+                    label = { Text("邮箱") },
+                    leadingIcon = { Icon(Icons.Default.Email, contentDescription = null) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !isLoading,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) })
+                )
+            }
 
-            OutlinedTextField(
-                value = phone,
-                onValueChange = { phone = it },
-                label = { Text("手机号") },
-                leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                enabled = !isLoading,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() })
-            )
+            phone?.let { it1 ->
+                OutlinedTextField(
+                    value = it1,
+                    onValueChange = { phone = it },
+                    label = { Text("手机号") },
+                    leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    enabled = !isLoading,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() })
+                )
+            }
 
             // 错误提示
             if (errorMsg.isNotEmpty()) {
@@ -258,9 +263,9 @@ fun EditProfileScreen(
  */
 private suspend fun uploadUserInfo(
     context: android.content.Context,
-    username: String,
-    email: String,
-    phone: String,
+    username: String?,
+    email: String?,
+    phone: String?,
     avatarUri: Uri?
 ): Result<UpdateUserResponse> = withContext(Dispatchers.IO) {
     try {
@@ -268,9 +273,9 @@ private suspend fun uploadUserInfo(
 
         val multipartBuilder = MultipartBody.Builder().setType(MultipartBody.FORM)
 
-        if (username.isNotBlank()) multipartBuilder.addFormDataPart("username", username)
-        if (email.isNotBlank()) multipartBuilder.addFormDataPart("email", email)
-        if (phone.isNotBlank()) multipartBuilder.addFormDataPart("phone", phone)
+        if (!username.isNullOrBlank()) multipartBuilder.addFormDataPart("username", username)
+        if (!email.isNullOrBlank()) multipartBuilder.addFormDataPart("email", email)
+        if (!phone.isNullOrBlank()) multipartBuilder.addFormDataPart("phone", phone)
 
         if (avatarUri != null) {
             val inputStream = context.contentResolver.openInputStream(avatarUri)
@@ -294,8 +299,8 @@ private suspend fun uploadUserInfo(
         }
 
         val request = okhttp3.Request.Builder()
-            .url("${Request.baseUrl}/user/updateInfo")
-            .apply { token?.let { header("token", it) } }
+            .url("${Request.baseUrl}/user/update-info")
+            .apply { token?.let { header("Token", it) } }
             .post(multipartBuilder.build())
             .build()
 

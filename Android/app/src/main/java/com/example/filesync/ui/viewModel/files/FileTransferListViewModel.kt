@@ -76,7 +76,7 @@ class FileTransferListViewModel : ViewModel() {
         )
 
         val result = Request.postSuspend<DownloadHistoryResponse, DownloadHistoryRequest>(
-            endpoint = "/files/download-history",
+            endpoint = "/file/download-history",
             body = req
         )
 
@@ -233,13 +233,13 @@ private fun parseTimeToMillis(isoTime: String?): Long {
 private fun DownloadHistoryItem.toTransferItem(): FileTransferItem {
     val status = mapDownloadStatus(downloadStatus)
     return FileTransferItem(
-        id = id,
-        name = fileName,
-        size = fileSize,
+        id = id.toInt(),
+        name = fileName ?: "未知文件",
+        size = fileSize ?: 0L,
         isDir = false,
         childrenCount = 0,
         progress = if (status == FileTransferStatus.COMPLETED) 1f else 0f,
-        speed = downloadSpeed,
+        speed = downloadSpeed ?: 0L,
         status = status,
         startTime = parseTimeToMillis(startedAt),
         endTime = parseTimeToMillis(completedAt).takeIf { it > 0 },
