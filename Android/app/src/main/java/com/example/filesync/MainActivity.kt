@@ -3,6 +3,7 @@ package com.example.filesync
 
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -33,9 +34,12 @@ import com.example.filesync.router.AppRoute
 import com.example.filesync.router.navigateAndClearBackStack
 import com.example.filesync.router.navigateToMainTab
 import com.example.filesync.ui.theme.FileSyncTheme
+import com.example.filesync.util.FileLogger
+import com.example.filesync.util.FileLoggerConfig
 import com.example.filesync.util.PermissionHelper
 import com.example.filesync.util.RootHelper
 import kotlinx.coroutines.launch
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
@@ -75,6 +79,9 @@ fun AppInitializer() {
 
     var isChecking by remember { mutableStateOf(true) }
     var startDestination by remember { mutableStateOf<String?>(null) }
+
+    val logDir = File(Environment.getExternalStorageDirectory(), "FileSync/log")
+    FileLogger.init(FileLoggerConfig(logDir = logDir))
 
     LaunchedEffect(Unit) {
         scope.launch {
