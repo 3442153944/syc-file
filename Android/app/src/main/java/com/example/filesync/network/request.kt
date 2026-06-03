@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.filesync.AppConfig.getBaseUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -30,13 +31,13 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 object Request {
 
-    var baseUrl = "http://192.168.31.100:8991/v1"
+    var baseUrl = "${getBaseUrl()}/v1"
         set(value) {
             field = value.trimEnd('/')
             Log.d(TAG, "基础 URL: $field")
         }
 
-    var baseStaticUrl = "http://192.168.31.100:8991"
+    var baseStaticUrl = getBaseUrl()
         set(value) {
             field = value.trimEnd('/')
             Log.d(TAG, "基础静态 URL: $field")
