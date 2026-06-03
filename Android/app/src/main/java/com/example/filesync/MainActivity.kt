@@ -1,4 +1,3 @@
-// MainActivity.kt
 package com.example.filesync
 
 import android.os.Build
@@ -21,18 +20,20 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.navigation.NavDestination.Companion.hasRoute
+import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.get
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import com.downloader.PRDownloader
 import com.downloader.PRDownloaderConfig
 import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.network.AuthManager
 import com.example.filesync.network.Request
-import com.example.filesync.router.AppNavHost
-import com.example.filesync.router.AppRoute
-import com.example.filesync.router.navigateAndClearBackStack
-import com.example.filesync.router.navigateToMainTab
+import com.example.filesync.router.*
+import com.example.filesync.ui.components.serverSetting.ConfigManager
 import com.example.filesync.ui.theme.FileSyncTheme
 import com.example.filesync.util.FileLogger
 import com.example.filesync.util.FileLoggerConfig
@@ -45,17 +46,15 @@ class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ConfigManager.init()
 
-        // 初始化 Request
         Request.init(this)
 
-        // 初始化 PRDownloader
         val config = PRDownloaderConfig.newBuilder()
             .setDatabaseEnabled(true)
             .setReadTimeout(30_000)
             .setConnectTimeout(30_000)
             .build()
-
         PRDownloader.initialize(applicationContext, config)
 
         enableEdgeToEdge()
@@ -67,10 +66,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/**
- * 应用初始化器
- * 负责权限检查和确定起始路由
- */
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 @Composable
 fun AppInitializer() {
@@ -78,7 +73,7 @@ fun AppInitializer() {
     val scope = rememberCoroutineScope()
 
     var isChecking by remember { mutableStateOf(true) }
-    var startDestination by remember { mutableStateOf<String?>(null) }
+    var startDestination by remember { mutableStateOf<Any?>(null) }
 
     val logDir = File(Environment.getExternalStorageDirectory(), "FileSync/log")
     FileLogger.init(FileLoggerConfig(logDir = logDir))
@@ -88,17 +83,12 @@ fun AppInitializer() {
             val hasBasicPermissions = PermissionHelper.hasAllPermissions(context)
             val hasManageStorage = PermissionHelper.hasManageExternalStoragePermission()
             val isRooted = RootHelper.isDeviceRooted()
-            val hasRootAccess = if (isRooted) {
-                RootHelper.checkRootAccess()
-            } else {
-                true
-            }
+            val hasRootAccess = if (isRooted) RootHelper.checkRootAccess() else true
 
             startDestination = when {
-                !Request.hasToken() -> AppRoute.Login.route
-                !(hasBasicPermissions && hasManageStorage && hasRootAccess) ->
-                    AppRoute.Permission.route
-                else -> AppRoute.Home.route
+                !Request.hasToken() -> LoginDestination
+                !(hasBasicPermissions && hasManageStorage && hasRootAccess) -> PermissionDestination
+                else -> HomeDestination
             }
 
             isChecking = false
@@ -106,18 +96,11 @@ fun AppInitializer() {
     }
 
     when {
-        isChecking -> {
-            LoadingScreen()
-        }
-        startDestination != null -> {
-            FileSyncApp(startDestination = startDestination!!)
-        }
+        isChecking -> LoadingScreen()
+        startDestination != null -> FileSyncApp(startDestination = startDestination!!)
     }
 }
 
-/**
- * 加载界面
- */
 @Composable
 private fun LoadingScreen() {
     Box(
@@ -134,29 +117,27 @@ private fun LoadingScreen() {
     }
 }
 
-/**
- * 主应用界面
- * 包含底部导航栏、路由管理和全局认证守卫
- */
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 @Composable
-fun FileSyncApp(startDestination: String) {
+fun FileSyncApp(startDestination: Any) {
     val navController = rememberNavController()
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route
+    val currentDestination = navBackStackEntry?.destination
 
-    // ========== 全局路由守卫：监听 401 事件，跳转登录页 ==========
+    // ========== 全局路由守卫：监听 401 事件 ==========
     LaunchedEffect(Unit) {
         AuthManager.authEvents.collect { event ->
             when (event) {
                 is AuthManager.AuthEvent.TokenExpired -> {
                     Toast.makeText(context, "登录已过期，请重新登录", Toast.LENGTH_SHORT).show()
                     WebSocketManager.disconnect()
-                    navController.navigateAndClearBackStack(AppRoute.Login)
+                    navController.navigate(LoginDestination) {
+                        popUpTo(0) { inclusive = true }
+                    }
                 }
             }
         }
@@ -166,45 +147,50 @@ fun FileSyncApp(startDestination: String) {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> {
-                    scope.launch {
-                        if (Request.hasToken()) {
-                            WebSocketManager.connect()
-                        }
-                    }
+                Lifecycle.Event.ON_START -> scope.launch {
+                    if (Request.hasToken()) WebSocketManager.connect()
                 }
-                Lifecycle.Event.ON_STOP -> {
-                    WebSocketManager.disconnect()
-                }
+                Lifecycle.Event.ON_STOP -> WebSocketManager.disconnect()
                 else -> {}
             }
         }
-
         lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
+    // ========== 是否显示底部导航 ==========
+    val hideRoutes = setOf(
+        LoginDestination::class,
+        PermissionDestination::class
+    )
+    val shouldShowBottomNav = hideRoutes.none {
+        currentDestination?.hasRoute(it) == true
     }
 
     // ========== UI ==========
-    val shouldShowBottomNav = AppRoute.shouldShowBottomNav(currentRoute)
-
     NavigationSuiteScaffold(
         navigationSuiteItems = {
             if (shouldShowBottomNav) {
-                AppRoute.bottomNavRoutes.forEach { item ->
+                TopLevelDestination.entries.forEach { dest ->
                     item(
                         icon = {
                             Icon(
-                                imageVector = item.icon,
-                                contentDescription = item.label
+                                imageVector = dest.icon,
+                                contentDescription = dest.label
                             )
                         },
-                        label = { Text(item.label) },
-                        selected = currentRoute == item.route.route,
+                        label = { Text(dest.label) },
+                        selected = currentDestination?.hierarchy?.any {
+                            it.hasRoute(dest.route)
+                        } == true,
                         onClick = {
-                            navController.navigateToMainTab(item.route.route)
+                            navController.navigate(dest.route.objectInstance!!) {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
                         }
                     )
                 }
@@ -215,7 +201,6 @@ fun FileSyncApp(startDestination: String) {
             AppNavHost(
                 navController = navController,
                 modifier = Modifier.padding(innerPadding),
-                startDestination = startDestination
             )
         }
     }

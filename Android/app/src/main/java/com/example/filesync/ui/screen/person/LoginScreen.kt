@@ -22,6 +22,9 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.example.filesync.network.Request
 import com.example.filesync.router.AppRoute
+import com.example.filesync.router.HomeDestination
+import com.example.filesync.router.ServerSettingsDestination
+import com.example.filesync.router.SettingsDestination
 import com.example.filesync.router.navigateAndClearBackStack
 import kotlinx.coroutines.launch
 
@@ -165,7 +168,7 @@ fun LoginScreen(
                                             last_login = user.last_login
                                         ))
                                     } else {
-                                        navController.navigateAndClearBackStack(AppRoute.Home.route)
+                                        navController.navigate(HomeDestination)
                                     }
                                 } else {
                                     errorMsg = response.message
@@ -197,6 +200,27 @@ fun LoginScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("登录", fontSize = 16.sp)
                     }
+                }
+
+                if (errorMsg.isNotEmpty()) {
+                    Text(text = errorMsg, color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
+                }
+
+                // 分割线
+                HorizontalDivider()
+
+                // 服务器设置入口（新增）
+                OutlinedButton(
+                    onClick = { navController.navigate(SettingsDestination) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Dns,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("服务器设置", fontSize = 14.sp)
                 }
 
                 if (errorMsg.isNotEmpty()) {

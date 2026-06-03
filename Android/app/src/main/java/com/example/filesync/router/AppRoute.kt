@@ -53,6 +53,9 @@ sealed class AppRoute(val route: String) {
 
     data object Login : AppRoute("login")
 
+    //服务器设置
+    data object ServerSetting: AppRoute("serverSetting")
+
     companion object {
         /**
          * 底部导航栏路由列表

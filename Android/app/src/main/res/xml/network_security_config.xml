@@ -8,5 +8,5 @@
     </domain-config>
     
     <!-- 生产环境：只允许 HTTPS -->
-    <base-config cleartextTrafficPermitted="false" />
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

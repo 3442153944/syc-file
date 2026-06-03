@@ -20,7 +20,6 @@ import com.example.filesync.router.AppRoute
 import com.example.filesync.router.navigateToDetail
 import com.example.filesync.ui.components.home.*
 import com.example.filesync.ui.viewModel.home.*
-import com.example.filesync.ui.viewModel.transmission.DownloadListViewModel
 
 @Composable
 fun HomeScreen(
