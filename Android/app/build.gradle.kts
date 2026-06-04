@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.filesync"
+    namespace = "com.sunyuanling.filesync"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.filesync"
+        applicationId = "com.sunyuanling.filesync"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
