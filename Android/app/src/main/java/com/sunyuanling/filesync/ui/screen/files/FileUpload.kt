@@ -28,6 +28,7 @@ import com.sunyuanling.filesync.ui.viewModel.files.FileListViewModel
 import com.sunyuanling.filesync.ui.viewModel.files.FileUploadViewModel
 import com.sunyuanling.filesync.ui.viewModel.files.UploadFileInfo
 import com.sunyuanling.filesync.ui.viewModel.files.UploadState
+import com.sunyuanling.filesync.util.formatFileSize
 import kotlinx.coroutines.delay
 import java.io.File
 
