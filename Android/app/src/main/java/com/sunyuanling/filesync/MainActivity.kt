@@ -42,6 +42,7 @@ import com.sunyuanling.filesync.router.HomeDestination
 import com.sunyuanling.filesync.router.LoginDestination
 import com.sunyuanling.filesync.router.PermissionDestination
 import com.sunyuanling.filesync.router.TopLevelDestination
+import com.sunyuanling.filesync.ui.components.notice.DownloadNotificationHelper
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -49,6 +50,7 @@ class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DownloadNotificationHelper.createChannels(this)
         try {
             ConfigManager.init()
         }

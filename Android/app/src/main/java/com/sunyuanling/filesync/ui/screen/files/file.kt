@@ -45,6 +45,7 @@ import com.sunyuanling.filesync.ui.viewModel.files.FileListViewModel
 import com.sunyuanling.filesync.ui.viewModel.transmission.DownloadListViewModel
 import com.sunyuanling.filesync.util.RootHelper
 import com.sunyuanling.filesync.ui.viewModel.files.FileItem
+import com.sunyuanling.filesync.util.formatFileSize
 import java.io.File
 
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)

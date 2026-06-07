@@ -17,6 +17,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sunyuanling.filesync.dataClass.DownloadItem
 import com.sunyuanling.filesync.dataClass.DownloadStatus
 import com.sunyuanling.filesync.ui.viewModel.transmission.DownloadListViewModel
+import com.sunyuanling.filesync.util.formatFileSize
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -229,11 +230,3 @@ fun getStatusColor(status: DownloadStatus): Color {
     }
 }
 
-fun formatFileSize(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
-        bytes < 1024 * 1024 * 1024 -> "${"%.1f".format(bytes / 1024.0 / 1024.0)} MB"
-        else -> "${"%.2f".format(bytes / 1024.0 / 1024.0 / 1024.0)} GB"
-    }
-}

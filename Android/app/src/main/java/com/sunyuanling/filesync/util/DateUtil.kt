@@ -3,6 +3,7 @@ package com.sunyuanling.filesync.util
 // util/DateUtil.kt
 import android.os.Build
 import androidx.annotation.RequiresApi
+import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -21,5 +22,20 @@ fun formatDate(pattern: String, value: String): String {
         parsed.format(DateTimeFormatter.ofPattern(pattern))
     } catch (e: Exception) {
         value
+    }
+}
+
+/**
+ * 格式化时间戳为可读时间
+ */
+@RequiresApi(Build.VERSION_CODES.O)
+fun formatDate(pattern: String, millis: Long): String {
+    if (millis <= 0) return ""
+    return try {
+        val instant = Instant.ofEpochMilli(millis)
+        val zdt = instant.atZone(ZoneId.systemDefault())
+        zdt.format(DateTimeFormatter.ofPattern(pattern))
+    } catch (e: Exception) {
+        ""
     }
 }

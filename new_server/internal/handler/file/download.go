@@ -213,12 +213,17 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 			"download_status": "completed",
 			"completed_at":    gorm.Expr("NOW()"),
 		})
-		ws.SendToUser(userID, ws.MessageType("file_download"), gin.H{
+		err := ws.SendToUser(userID, ws.MessageType("file_download"), gin.H{
 			"event":      "completed",
 			"file_name":  fileName,
 			"file_size":  fileSize,
 			"history_id": historyID,
 		})
+		if err != nil {
+			logger.Logger.Error("发送 Range 下载完成消息失败", zap.Error(err))
+			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "服务器异常，发送 Range 下载完成消息失败", "data": "failed"})
+			return
+		}
 	}
 
 	logger.Logger.Info("Range 下载完成", zap.Uint("user_id", userID), zap.String("file_name", fileName), zap.Int64("start", start), zap.Int64("end", end), zap.Int64("written", written))
@@ -226,30 +231,29 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 
 func isPathAllowedDownload(path string) bool {
 	cleanPath := filepath.Clean(path)
-	cleanPathUpper := strings.ToUpper(cleanPath)
+
 	if !filepath.IsAbs(cleanPath) {
 		return false
 	}
-	if strings.Contains(path, "..") {
-		return false
-	}
+
 	for _, allowed := range config.Conf.GetAllowedPaths() {
-		allowedUpper := strings.ToUpper(allowed)
-		if len(allowedUpper) >= 2 && allowedUpper[1] == ':' {
-			allowedDrive := allowedUpper[:2]
-			cleanDrive := ""
-			if len(cleanPathUpper) >= 2 && cleanPathUpper[1] == ':' {
-				cleanDrive = cleanPathUpper[:2]
-			}
-			if cleanDrive == allowedDrive {
+		allowedClean := filepath.Clean(allowed)
+		cleanUpper := strings.ToUpper(cleanPath)
+		allowedUpper := strings.ToUpper(allowedClean)
+
+		// 单独处理盘符：D:. 或 D:\ 表示整个盘都允许
+		if len(allowedUpper) <= 3 && len(allowedUpper) >= 2 && allowedUpper[1] == ':' {
+			drive := allowedUpper[:2]
+			if strings.HasPrefix(cleanUpper, drive+`\`) || strings.HasPrefix(cleanUpper, drive+`/`) {
 				return true
 			}
 			continue
 		}
-		allowedClean := filepath.Clean(allowed)
-		allowedCleanUpper := strings.ToUpper(allowedClean)
-		if strings.HasPrefix(cleanPathUpper, allowedCleanUpper) {
-			if len(cleanPath) == len(allowedClean) || cleanPath[len(allowedClean)] == filepath.Separator {
+
+		// 普通目录前缀匹配
+		if strings.HasPrefix(cleanUpper, allowedUpper) {
+			rest := cleanUpper[len(allowedUpper):]
+			if rest == "" || rest[0] == filepath.Separator {
 				return true
 			}
 		}

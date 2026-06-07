@@ -46,7 +46,7 @@ fun HomeScreen(
     val devices by devicesVM.devices.collectAsState()
     val onlineCount by devicesVM.onlineCount.collectAsState()
     val recentFiles by recentFilesVM.files.collectAsState()
-    val syncStatus by syncVM.status.collectAsState()
+    val syncStatus by syncVM.serverOnline.collectAsState()
 
     LazyColumn(
         modifier = modifier
@@ -67,9 +67,9 @@ fun HomeScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (syncStatus is SyncStatus.Failed) "服务器连接失败" else "一切正常运行中",
+                        text = if (!syncStatus) "服务器连接失败" else "一切正常运行中",
                         fontSize = 14.sp,
-                        color = if (syncStatus is SyncStatus.Failed)
+                        color = if (!syncStatus)
                             MaterialTheme.colorScheme.error
                         else
                             MaterialTheme.colorScheme.onSurfaceVariant

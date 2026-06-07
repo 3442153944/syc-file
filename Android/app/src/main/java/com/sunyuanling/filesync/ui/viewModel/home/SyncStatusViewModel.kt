@@ -2,6 +2,9 @@ package com.sunyuanling.filesync.ui.viewModel.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.filesync.data.sync.WebSocketManager
+import com.example.filesync.data.sync.WsState
+import com.sunyuanling.filesync.dataClass.StatsResponse
 import com.sunyuanling.filesync.network.Request
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -10,41 +13,47 @@ import kotlinx.coroutines.launch
 
 class SyncStatusViewModel : ViewModel() {
 
-    private val _status = MutableStateFlow<SyncStatus>(SyncStatus.Idle)
-    val status: StateFlow<SyncStatus> = _status.asStateFlow()
+    private val _serverOnline = MutableStateFlow(false)
+    val serverOnline: StateFlow<Boolean> = _serverOnline.asStateFlow()
+
+    // 直接复用 WebSocketManager 的连接状态
+    val wsState: StateFlow<WsState> = WebSocketManager.connectionState
 
     init {
-        checkServerStatus()
+        observeWsState()
+        WebSocketManager.connect()
     }
 
-    private fun checkServerStatus() {
+    private fun observeWsState() {
         viewModelScope.launch {
-            try {
-                val result = Request.postSuspend<Map<String, Any>>("/ping")
-                result.onSuccess {
-                    _status.value = SyncStatus.Idle
-                }.onFailure {
-                    _status.value = SyncStatus.Failed("无法连接到服务器")
+            WebSocketManager.connectionState.collect { state ->
+                when (state) {
+                    is WsState.Connected -> {
+                        // WS 连上了，顺手拉一次 stats 确认服务器状态
+                        fetchStats()
+                    }
+                    is WsState.Error -> {
+                        _serverOnline.value = false
+                    }
+                    else -> {}
                 }
-            } catch (e: Exception) {
-                _status.value = SyncStatus.Failed("无法连接到服务器")
             }
         }
     }
 
-    fun startSync() {
-        viewModelScope.launch {
-            _status.value = SyncStatus.Syncing(
-                progress = 0,
-                uploadSpeed = 0.0,
-                downloadSpeed = 0.0,
-                activeTaskCount = 0
-            )
-        }
+    private suspend fun fetchStats() {
+        Request.getSuspend<StatsResponse>("/ws/stats")
+            .onSuccess { response ->
+                _serverOnline.value = response.code == 200
+            }
+            .onFailure {
+                _serverOnline.value = false
+            }
     }
 
-    fun stopSync() {
-        _status.value = SyncStatus.Idle
+    override fun onCleared() {
+        super.onCleared()
+        WebSocketManager.disconnect()
     }
 }
 

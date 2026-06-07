@@ -271,6 +271,12 @@ object WebSocketManager {
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
     }
+    /**
+     * 获取ws连接实例
+     * */
+    fun getWebSocket(): WebSocket? {
+        return webSocket
+    }
 }
 
 /**

@@ -214,14 +214,30 @@ data class FileChunk(
         return result
     }
 }
+
+
+/**
+ * 格式化速度
+ */
+fun formatSpeed(bytesPerSecond: Long): String {
+    return when {
+        bytesPerSecond < 1024 -> "$bytesPerSecond B/s"
+        bytesPerSecond < 1024 * 1024 -> "${bytesPerSecond / 1024} KB/s"
+        else -> "%.1f MB/s".format(bytesPerSecond / (1024.0 * 1024.0))
+    }
+}
+
 /**
  * 格式化文件大小
  */
 fun formatFileSize(bytes: Long): String {
-    return when {
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
-        bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)} MB"
-        else -> "${bytes / (1024 * 1024 * 1024)} GB"
+    if (bytes < 1024) return "$bytes B"
+    val units = arrayOf("KB", "MB", "GB", "TB")
+    var value = bytes.toDouble()
+    var unitIndex = -1
+    while (value >= 1024 && unitIndex < units.size - 1) {
+        value /= 1024
+        unitIndex++
     }
+    return "%.2f %s".format(value, units[unitIndex])
 }
