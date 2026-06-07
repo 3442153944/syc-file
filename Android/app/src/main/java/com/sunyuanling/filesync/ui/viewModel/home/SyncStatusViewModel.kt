@@ -4,8 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.data.sync.WsState
-import com.sunyuanling.filesync.dataClass.StatsResponse
-import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.api.ws.WsApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,7 +41,7 @@ class SyncStatusViewModel : ViewModel() {
     }
 
     private suspend fun fetchStats() {
-        Request.getSuspend<StatsResponse>("/ws/stats")
+        WsApi.getStats()
             .onSuccess { response ->
                 _serverOnline.value = response.code == 200
             }

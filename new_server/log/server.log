@@ -435,3 +435,45 @@
 {"level":"error","ts":"2026-06-07T16:32:32.029+0800","caller":"ws/connection.go:93","msg":"WebSocket读取错误","conn_id":"conn-1-82d10dd0","error":"websocket: close 1000 (normal): 创建新连接"}
 {"level":"info","ts":"2026-06-07T16:32:32.029+0800","caller":"ws/hub.go:138","msg":"连接已注销","conn_id":"conn-1-82d10dd0","user_id":1,"remaining_conns":0}
 {"level":"info","ts":"2026-06-07T16:32:32.029+0800","caller":"ws/connection.go:290","msg":"WebSocket连接已关闭","conn_id":"conn-1-82d10dd0","user_id":1,"device_id":"24b581b4-135c-44a8-9b9f-c6dbf0f253a0"}
+{"level":"info","ts":"2026-06-07T17:07:26.678+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:07:26.680+0800","caller":"ws/connection.go:66","msg":"WebSocket连接已建立","conn_id":"conn-1-8cdaa09d","user_id":1,"device_id":"d6ea7780-3625-400c-9474-b014232620e2","device_type":"unknown"}
+{"level":"info","ts":"2026-06-07T17:07:26.680+0800","caller":"ws/hub.go:95","msg":"连接已注册","conn_id":"conn-1-8cdaa09d","user_id":1,"device_id":"d6ea7780-3625-400c-9474-b014232620e2","user_conn_count":1}
+{"level":"info","ts":"2026-06-07T17:07:26.902+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:07:26.962+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:07:27.080+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"error","ts":"2026-06-07T17:07:29.490+0800","caller":"ws/connection.go:93","msg":"WebSocket读取错误","conn_id":"conn-1-8cdaa09d","error":"websocket: close 1000 (normal): 创建新连接"}
+{"level":"info","ts":"2026-06-07T17:07:29.490+0800","caller":"ws/hub.go:138","msg":"连接已注销","conn_id":"conn-1-8cdaa09d","user_id":1,"remaining_conns":0}
+{"level":"info","ts":"2026-06-07T17:07:29.490+0800","caller":"ws/connection.go:290","msg":"WebSocket连接已关闭","conn_id":"conn-1-8cdaa09d","user_id":1,"device_id":"d6ea7780-3625-400c-9474-b014232620e2"}
+{"level":"info","ts":"2026-06-07T17:33:47.178+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:33:47.182+0800","caller":"ws/connection.go:66","msg":"WebSocket连接已建立","conn_id":"conn-1-19253bf0","user_id":1,"device_id":"ab3ce058-d2ed-446a-b51a-a1cec3c3384e","device_type":"unknown"}
+{"level":"info","ts":"2026-06-07T17:33:47.182+0800","caller":"ws/hub.go:95","msg":"连接已注册","conn_id":"conn-1-19253bf0","user_id":1,"device_id":"ab3ce058-d2ed-446a-b51a-a1cec3c3384e","user_conn_count":1}
+{"level":"info","ts":"2026-06-07T17:33:48.429+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"error","ts":"2026-06-07T17:38:25.114+0800","caller":"ws/connection.go:93","msg":"WebSocket读取错误","conn_id":"conn-1-19253bf0","error":"websocket: close 1000 (normal): 创建新连接"}
+{"level":"info","ts":"2026-06-07T17:38:25.115+0800","caller":"ws/hub.go:138","msg":"连接已注销","conn_id":"conn-1-19253bf0","user_id":1,"remaining_conns":0}
+{"level":"info","ts":"2026-06-07T17:38:25.115+0800","caller":"ws/connection.go:290","msg":"WebSocket连接已关闭","conn_id":"conn-1-19253bf0","user_id":1,"device_id":"ab3ce058-d2ed-446a-b51a-a1cec3c3384e"}
+{"level":"info","ts":"2026-06-07T17:38:25.681+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:38:25.682+0800","caller":"ws/connection.go:66","msg":"WebSocket连接已建立","conn_id":"conn-1-9209f12e","user_id":1,"device_id":"27918943-b11a-41e5-b0fa-75e868069b02","device_type":"unknown"}
+{"level":"info","ts":"2026-06-07T17:38:25.682+0800","caller":"ws/hub.go:95","msg":"连接已注册","conn_id":"conn-1-9209f12e","user_id":1,"device_id":"27918943-b11a-41e5-b0fa-75e868069b02","user_conn_count":1}
+{"level":"error","ts":"2026-06-07T17:48:29.107+0800","caller":"ws/connection.go:93","msg":"WebSocket读取错误","conn_id":"conn-1-9209f12e","error":"websocket: close 1000 (normal): 创建新连接"}
+{"level":"info","ts":"2026-06-07T17:48:29.107+0800","caller":"ws/hub.go:138","msg":"连接已注销","conn_id":"conn-1-9209f12e","user_id":1,"remaining_conns":0}
+{"level":"info","ts":"2026-06-07T17:48:29.107+0800","caller":"ws/connection.go:290","msg":"WebSocket连接已关闭","conn_id":"conn-1-9209f12e","user_id":1,"device_id":"27918943-b11a-41e5-b0fa-75e868069b02"}
+{"level":"info","ts":"2026-06-07T17:52:18.199+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:18.200+0800","caller":"ws/connection.go:66","msg":"WebSocket连接已建立","conn_id":"conn-1-0539bab7","user_id":1,"device_id":"461b9b89-749c-45a7-937d-06875b47d180","device_type":"unknown"}
+{"level":"info","ts":"2026-06-07T17:52:18.200+0800","caller":"ws/hub.go:95","msg":"连接已注册","conn_id":"conn-1-0539bab7","user_id":1,"device_id":"461b9b89-749c-45a7-937d-06875b47d180","user_conn_count":1}
+{"level":"info","ts":"2026-06-07T17:52:18.263+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:18.514+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:18.666+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:21.856+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:27.662+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:28.867+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"error","ts":"2026-06-07T17:52:30.305+0800","caller":"ws/connection.go:93","msg":"WebSocket读取错误","conn_id":"conn-1-0539bab7","error":"websocket: close 1000 (normal): 创建新连接"}
+{"level":"info","ts":"2026-06-07T17:52:30.305+0800","caller":"ws/hub.go:138","msg":"连接已注销","conn_id":"conn-1-0539bab7","user_id":1,"remaining_conns":0}
+{"level":"info","ts":"2026-06-07T17:52:30.305+0800","caller":"ws/connection.go:290","msg":"WebSocket连接已关闭","conn_id":"conn-1-0539bab7","user_id":1,"device_id":"461b9b89-749c-45a7-937d-06875b47d180"}
+{"level":"info","ts":"2026-06-07T17:52:30.311+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:30.315+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:30.548+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:31.050+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:31.051+0800","caller":"ws/connection.go:66","msg":"WebSocket连接已建立","conn_id":"conn-1-d2072f5a","user_id":1,"device_id":"f508d343-8dfc-488a-ae28-b9bade6c745d","device_type":"unknown"}
+{"level":"info","ts":"2026-06-07T17:52:31.051+0800","caller":"ws/hub.go:95","msg":"连接已注册","conn_id":"conn-1-d2072f5a","user_id":1,"device_id":"f508d343-8dfc-488a-ae28-b9bade6c745d","user_conn_count":1}
+{"level":"info","ts":"2026-06-07T17:52:31.490+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}
+{"level":"info","ts":"2026-06-07T17:52:31.491+0800","caller":"middleware/auth.go:86","msg":"Token验证成功","user_id":1,"username":"admin"}

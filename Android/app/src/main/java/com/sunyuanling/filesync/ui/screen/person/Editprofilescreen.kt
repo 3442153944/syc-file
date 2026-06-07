@@ -28,8 +28,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.sunyuanling.filesync.api.user.UpdateUserInfoResponse
+import com.sunyuanling.filesync.api.user.UserInfo
 import com.sunyuanling.filesync.network.Request
-import com.sunyuanling.filesync.ui.viewModel.user.PUser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -41,7 +42,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditProfileScreen(
-    user: PUser,
+    user: UserInfo,
     onBackClick: () -> Unit,
     onSaveSuccess: () -> Unit
 ) {
@@ -268,7 +269,7 @@ private suspend fun uploadUserInfo(
     email: String?,
     phone: String?,
     avatarUri: Uri?
-): Result<UpdateUserResponse> = withContext(Dispatchers.IO) {
+): Result<UpdateUserInfoResponse> = withContext(Dispatchers.IO) {
     try {
         val token = Request.getToken()
 
@@ -310,7 +311,7 @@ private suspend fun uploadUserInfo(
         if (response.isSuccessful) {
             val body = response.body?.string()
             if (body != null) {
-                Result.success(Request.json.decodeFromString<UpdateUserResponse>(body))
+                Result.success(Request.json.decodeFromString<UpdateUserInfoResponse>(body))
             } else {
                 Result.failure(Exception("响应体为空"))
             }

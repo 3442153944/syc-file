@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.sunyuanling.filesync.ui.viewModel.files.ActiveDiskViewModel
-import com.sunyuanling.filesync.ui.viewModel.files.Disk
+import com.sunyuanling.filesync.api.file.DiskInfo
 import com.sunyuanling.filesync.ui.viewModel.files.FileListViewModel
 import com.sunyuanling.filesync.ui.viewModel.files.FileUploadViewModel
 import com.sunyuanling.filesync.ui.viewModel.files.UploadFileInfo
@@ -452,7 +452,7 @@ fun PathSelectionDialog(
     onPathSelected: (String) -> Unit,
 ) {
     var showDiskList by remember { mutableStateOf(true) }
-    var selectedDisk by remember { mutableStateOf<Disk?>(null) }
+    var selectedDisk by remember { mutableStateOf<DiskInfo?>(null) }
 
     if (showDiskList) {
         DiskSelectionDialog(
@@ -486,7 +486,7 @@ fun PathSelectionDialog(
 fun DiskSelectionDialog(
     hasRootAccess: Boolean,
     onDismiss: () -> Unit,
-    onDiskSelected: (Disk) -> Unit,
+    onDiskSelected: (DiskInfo) -> Unit,
     onManualPath: () -> Unit
 ) {
     val diskViewModel: ActiveDiskViewModel = viewModel()
@@ -649,7 +649,7 @@ fun DiskSelectionDialog(
 
 @Composable
 fun DiskItem(
-    disk: Disk,
+    disk: DiskInfo,
     onClick: () -> Unit
 ) {
     Card(

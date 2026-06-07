@@ -2,9 +2,8 @@ package com.sunyuanling.filesync.ui.viewModel.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.sunyuanling.filesync.dataClass.DownloadHistoryRequest
-import com.sunyuanling.filesync.dataClass.DownloadHistoryResponse
-import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.api.file.DownloadHistoryParams
+import com.sunyuanling.filesync.api.file.FileApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,11 +25,8 @@ class RecentFilesViewModel : ViewModel() {
         viewModelScope.launch {
             _loading.value = true
             try {
-                val request = DownloadHistoryRequest(pageNum = 1, pageSize = 5)
-                Request.postSuspend<DownloadHistoryResponse, DownloadHistoryRequest>(
-                    endpoint = "/file/download-history",
-                    body = request
-                ).onSuccess { response ->
+                val request = DownloadHistoryParams(pageNum = 1, pageSize = 5)
+                FileApi.getDownloadHistory(request).onSuccess { response ->
                     if (response.code == 200 && response.data != null) {
                         _files.value = response.data.list.map { item ->
                             RecentFile(

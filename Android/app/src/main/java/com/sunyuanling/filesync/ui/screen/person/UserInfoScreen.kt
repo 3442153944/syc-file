@@ -23,13 +23,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.sunyuanling.filesync.network.Request
-import com.sunyuanling.filesync.ui.viewModel.user.PUser
+import com.sunyuanling.filesync.api.user.UserInfo
 import com.sunyuanling.filesync.util.formatDate
 
 @RequiresApi(Build.VERSION_CODES.O)
 @Composable
 fun UserInfoScreen(
-    user: PUser,
+    user: UserInfo,
     onLogout: () -> Unit,
     onEditClick: () -> Unit
 ) {
@@ -161,13 +161,13 @@ fun UserInfoScreen(
                 InfoRow(
                     icon = Icons.AutoMirrored.Filled.Login,
                     label = "最后登录",
-                    value = formatDate("yyyy-MM-dd HH:mm:ss", user.last_login ?: "未知")
+                    value = formatDate("yyyy-MM-dd HH:mm:ss", user.lastLogin ?: "未知")
                 )
                 HorizontalDivider()
                 InfoRow(
                     icon = Icons.Default.CalendarMonth,
                     label = "注册时间",
-                    value = formatDate("yyyy-MM-dd HH:mm:ss", user.created_at ?: "未知")
+                    value = formatDate("yyyy-MM-dd HH:mm:ss", user.createdAt ?: "未知")
                 )
             }
         }

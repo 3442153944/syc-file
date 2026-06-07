@@ -14,11 +14,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sunyuanling.filesync.ui.viewModel.files.Disk
+import com.sunyuanling.filesync.api.file.DiskInfo
 
 @Composable
 fun DiskCard(
-    disk: Disk,
+    disk: DiskInfo,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null
 ) {

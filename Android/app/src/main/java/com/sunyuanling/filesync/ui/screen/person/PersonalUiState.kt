@@ -1,5 +1,7 @@
 package com.sunyuanling.filesync.ui.screen.person
 
+import com.sunyuanling.filesync.api.user.UserInfo
+
 sealed class PersonalUiState {
     object Loading : PersonalUiState()
     object NotLoggedIn : PersonalUiState()

@@ -6,6 +6,9 @@ import android.os.Environment
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.sunyuanling.filesync.api.file.CheckFileData
+import com.sunyuanling.filesync.api.file.FileApi
+import com.sunyuanling.filesync.api.file.UploadParams
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.util.RootHelper
 import kotlinx.coroutines.Dispatchers
@@ -13,8 +16,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -102,60 +103,17 @@ class FileUploadViewModel : ViewModel() {
         _selectedFiles.value = emptyList()
     }
 
-    suspend fun checkFileExists(path: String, fileName: String): CheckFileResult? {
-        var result: CheckFileResult? = null
+    suspend fun checkFileExists(path: String, fileName: String): CheckFileData? {
+        val normalizedPath = normalizePath(path)
+        Log.d("FileUpload", "检查文件: path=$normalizedPath, name=$fileName")
 
-        withContext(Dispatchers.IO) {
-            try {
-                val normalizedPath = normalizePath(path)
-                val url = "${Request.baseUrl}/file/upload"
-                val token = Request.getToken()
+        val result = FileApi.checkFile(UploadParams(
+            path = normalizedPath,
+            name = fileName,
+            action = "check"
+        ))
 
-                // 构建 JSON body
-                val requestBody = """
-                {
-                    "path": "$normalizedPath",
-                    "name": "$fileName",
-                    "action": "check"
-                }
-            """.trimIndent()
-
-                Log.d("FileUpload", "检查文件: path=$normalizedPath, name=$fileName")
-
-                val request = okhttp3.Request.Builder()
-                    .url(url)
-                    .apply {
-                        token?.let { header("Token", it) }
-                    }
-                    .post(
-                        requestBody.toRequestBody(
-                            "application/json".toMediaTypeOrNull()
-                        )
-                    )
-                    .build()
-
-                val response = Request.client.newCall(request).execute()
-
-                if (response.isSuccessful) {
-                    val responseBody = response.body?.string()
-                    if (responseBody != null) {
-                        val checkResponse =
-                            Request.json.decodeFromString<CheckFileResponse>(responseBody)
-                        if (checkResponse.code == 200) {
-                            result = checkResponse.data
-                        } else {
-                            Log.e("FileUpload", "检查失败: ${checkResponse.message}")
-                        }
-                    }
-                } else {
-                    Log.e("FileUpload", "HTTP错误: ${response.code} - ${response.message}")
-                }
-            } catch (e: Exception) {
-                Log.e("FileUpload", "检查文件失败", e)
-            }
-        }
-
-        return result
+        return result.getOrNull()?.data
     }
 
     fun uploadFiles() {
@@ -268,7 +226,7 @@ class FileUploadViewModel : ViewModel() {
                 val responseBody = response.body?.string()
                 if (responseBody != null) {
                     val uploadResponse =
-                        Request.json.decodeFromString<UploadResponse>(responseBody)
+                        Request.json.decodeFromString<com.sunyuanling.filesync.network.Response<com.sunyuanling.filesync.api.file.UploadData>>(responseBody)
                     if (uploadResponse.code == 200) {
                         Log.d("FileUpload", "上传成功: ${uploadResponse.data}")
                         return@withContext true
@@ -354,41 +312,3 @@ sealed class UploadState {
     data class PartialSuccess(val successCount: Int, val failCount: Int) : UploadState()
     data class Error(val message: String) : UploadState()
 }
-
-@Serializable
-data class CheckFileResponse(
-    val code: Int = 0,
-    val message: String = "",
-    val data: CheckFileResult? = null
-)
-
-@Serializable
-data class CheckFileResult(
-    val exists: Boolean = false,
-    @SerialName("can_upload")
-    val canUpload: Boolean = false,
-    @SerialName("file_name")
-    val fileName: String = "",
-    @SerialName("file_size")
-    val fileSize: Long? = null,
-    val path: String = ""
-)
-
-@Serializable
-data class UploadResponse(
-    val code: Int = 0,
-    val message: String = "",
-    val data: UploadResult? = null
-)
-
-@Serializable
-data class UploadResult(
-    @SerialName("history_id")
-    val historyId: Int = 0,
-    @SerialName("file_name")
-    val fileName: String = "",
-    @SerialName("file_size")
-    val fileSize: Long = 0,
-    @SerialName("storage_path")
-    val storagePath: String = ""
-)

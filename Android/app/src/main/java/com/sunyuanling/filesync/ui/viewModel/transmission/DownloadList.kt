@@ -10,7 +10,8 @@ import com.downloader.PRDownloader
 import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.data.sync.WsMessage
 import com.example.filesync.data.sync.WsState
-import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.api.file.DownloadParams
+import com.sunyuanling.filesync.api.file.FileApi
 import com.sunyuanling.filesync.dataClass.DownloadItem
 import com.sunyuanling.filesync.dataClass.DownloadStatus
 import kotlinx.coroutines.flow.filterNotNull
@@ -19,7 +20,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
-import java.net.URLEncoder
 
 class DownloadListViewModel : ViewModel() {
 
@@ -162,21 +162,11 @@ class DownloadListViewModel : ViewModel() {
             try {
 
                 // 构建 GET URL（带参数）
-                val encodedPath = URLEncoder.encode(path, "UTF-8")
-                val encodedName = URLEncoder.encode(name, "UTF-8")
-                val deviceIdParam = deviceId?.let { "&device_id=$it" } ?: ""
-                val token= URLEncoder.encode(Request.getToken(),"UTF-8")
-
-                val downloadUrl = buildString {
-                    append(Request.baseUrl)
-                    append("/file/download")
-                    append("?path=").append(encodedPath)
-                    append("&name=").append(encodedName)
-                    if (deviceIdParam.isNotEmpty()) {
-                        append(deviceIdParam)
-                    }
-                    append("&token=").append(token)
-                }
+                val downloadUrl = FileApi.buildDownloadUrl(DownloadParams(
+                    path = path,
+                    name = name,
+                    deviceId = deviceId?.toString() ?: ""
+                ))
 
                 Log.d(TAG, "下载 URL: $downloadUrl")
 

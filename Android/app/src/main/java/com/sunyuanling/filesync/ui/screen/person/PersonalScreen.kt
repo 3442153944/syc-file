@@ -5,11 +5,12 @@ import androidx.annotation.RequiresApi
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavController
+import com.sunyuanling.filesync.api.user.UserApi
+import com.sunyuanling.filesync.api.user.UserInfo
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.router.LoginDestination
 import com.sunyuanling.filesync.router.navigateAndClearBackStack
 import com.sunyuanling.filesync.ui.viewModel.user.PPersonalState
-import com.sunyuanling.filesync.ui.viewModel.user.PVerifyResponse
 import kotlinx.coroutines.launch
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -80,11 +81,11 @@ fun PersonalScreen(modifier: Modifier = Modifier, navController: NavController) 
 private suspend fun checkLoginStatus(): PPersonalState {
     Request.getToken() ?: return PPersonalState.NotLoggedIn
 
-    val result = Request.postSuspend<PVerifyResponse>("/user/verify")
+    val result = UserApi.verify()
 
     return result.fold(
         onSuccess = { response ->
-            if (response.code == 200) {
+            if (response.code == 200 && response.data != null) {
                 PPersonalState.LoggedIn(response.data)
             } else {
                 PPersonalState.NotLoggedIn

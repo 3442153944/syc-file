@@ -20,6 +20,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
+import com.sunyuanling.filesync.api.user.LoginParams
+import com.sunyuanling.filesync.api.user.UserApi
+import com.sunyuanling.filesync.api.user.UserInfo
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.router.HomeDestination
 import com.sunyuanling.filesync.router.LoginDestination
@@ -30,7 +33,7 @@ import kotlinx.coroutines.launch
 fun LoginScreen(
     navController: NavController,
     modifier: Modifier = Modifier,
-    onLoginSuccess: ((FullUser) -> Unit)? = null
+    onLoginSuccess: ((UserInfo) -> Unit)? = null
 ) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -145,26 +148,28 @@ fun LoginScreen(
                             isLoading = true
                             errorMsg = ""
 
-                            val result = Request.postSuspend<LoginResponse, LoginRequest>(
-                                "/user/login",
-                                LoginRequest(username, password)
-                            )
+                            val result = UserApi.login(LoginParams(
+                                username = username,
+                                password = password
+                            ))
 
                             result.onSuccess { response ->
                                 if (response.code == 200) {
                                     Request.saveCredentials(username, password, rememberPassword)
                                     if (onLoginSuccess != null) {
-                                        val user = response.data.user
-                                        onLoginSuccess(FullUser(
-                                            id = user.id,
-                                            username = user.username,
-                                            email = user.email,
-                                            phone = user.phone,
-                                            avatar = user.avatar,
-                                            role = user.role,
-                                            status = user.status,
-                                            last_login = user.last_login
-                                        ))
+                                        val user = response.data?.user
+                                        if (user != null) {
+                                            onLoginSuccess(UserInfo(
+                                                id = user.id,
+                                                username = user.username,
+                                                email = user.email,
+                                                phone = user.phone,
+                                                avatar = user.avatar,
+                                                role = user.role,
+                                                status = user.status,
+                                                lastLogin = user.lastLogin
+                                            ))
+                                        }
                                     } else {
                                         navController.navigate(HomeDestination) {
                                             popUpTo(0) { inclusive = true }

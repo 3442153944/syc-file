@@ -6,10 +6,9 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.sunyuanling.filesync.dataClass.DownloadHistoryItem
-import com.sunyuanling.filesync.dataClass.DownloadHistoryRequest
-import com.sunyuanling.filesync.dataClass.DownloadHistoryResponse
-import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.api.file.DownloadHistoryParams
+import com.sunyuanling.filesync.api.file.FileApi
+import com.sunyuanling.filesync.api.file.DownloadHistoryItem
 import com.sunyuanling.filesync.ui.viewModel.transmission.FileTransferStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,15 +71,12 @@ class FileTransferListViewModel : ViewModel() {
     }
 
     private suspend fun fetchHistory(isLoadMore: Boolean) {
-        val req = DownloadHistoryRequest(
+        val req = DownloadHistoryParams(
             pageNum = currentPage,
             pageSize = pageSize
         )
 
-        val result = Request.postSuspend<DownloadHistoryResponse, DownloadHistoryRequest>(
-            endpoint = "/file/download-history",
-            body = req
-        )
+        val result = FileApi.getDownloadHistory(req)
 
         result.onSuccess { response ->
             if (response.code == 200 && response.data != null) {

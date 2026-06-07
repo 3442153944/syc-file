@@ -4,17 +4,17 @@ package com.sunyuanling.filesync.ui.viewModel.files
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.api.file.FileApi
+import com.sunyuanling.filesync.api.file.TraverseDirectoryData
+import com.sunyuanling.filesync.api.file.TraverseDirectoryParams
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 
 class FileListViewModel : ViewModel() {
 
-    private val _fileData = MutableStateFlow<FileListData?>(null)
-    val fileData: StateFlow<FileListData?> = _fileData
+    private val _fileData = MutableStateFlow<TraverseDirectoryData?>(null)
+    val fileData: StateFlow<TraverseDirectoryData?> = _fileData
 
     private val _loading = MutableStateFlow(false)
     val loading: StateFlow<Boolean> = _loading
@@ -22,7 +22,6 @@ class FileListViewModel : ViewModel() {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
 
-    // 路径历史栈，用于返回
     private val _pathStack = MutableStateFlow<List<String>>(emptyList())
     val pathStack: StateFlow<List<String>> = _pathStack
 
@@ -32,11 +31,8 @@ class FileListViewModel : ViewModel() {
             _error.value = null
 
             try {
-                Request.post<FileListResponse, TraverseRequest>(
-                    "/file/traverse-directory",
-                    TraverseRequest(path)
-                ) { result ->
-                    result.onSuccess { response ->
+                FileApi.traverseDirectory(TraverseDirectoryParams(path))
+                    .onSuccess { response ->
                         if (response.code == 200 && response.data != null) {
                             _fileData.value = response.data
                             Log.d("FileListVM", "加载成功: ${response.data.totalCount} 项")
@@ -47,8 +43,7 @@ class FileListViewModel : ViewModel() {
                         Log.e("FileListVM", "加载目录失败", e)
                         _error.value = e.message ?: "未知错误"
                     }
-                    _loading.value = false
-                }
+                _loading.value = false
             } catch (e: Exception) {
                 Log.e("FileListVM", "异常", e)
                 _error.value = e.message ?: "未知错误"
@@ -95,44 +90,3 @@ class FileListViewModel : ViewModel() {
     }
 }
 
-@Serializable
-data class TraverseRequest(
-    val path: String
-)
-
-@Serializable
-data class FileListResponse(
-    val code: Int = 0,
-    val message: String = "",
-    val data: FileListData? = null
-)
-
-@Serializable
-data class FileListData(
-    @SerialName("current_path")
-    val currentPath: String = "",
-    @SerialName("parent_path")
-    val parentPath: String = "",
-    val items: List<FileItem>? =null,
-    @SerialName("total_count")
-    val totalCount: Int = 0,
-    @SerialName("dir_count")
-    val dirCount: Int = 0,
-    @SerialName("file_count")
-    val fileCount: Int = 0
-)
-
-@Serializable
-data class FileItem(
-    val name: String = "",
-    val path: String = "",
-    @SerialName("is_dir")
-    val isDir: Boolean = false,
-    val size: Long = 0,
-    @SerialName("mod_time")
-    val modTime: String = "",
-    val mode: String = "",
-    val extension: String = "",
-    @SerialName("children_count")
-    val childrenCount: Int = 0
-)

@@ -1,38 +1,7 @@
 package com.sunyuanling.filesync.dataClass
 
-import kotlinx.serialization.Serializable
-
-/**
- * 下载请求（简化版）
- */
-@Serializable
-data class DownloadRequest(
-    /** 文件路径 */
-    val path: String,
-    /** 文件名 */
-    val name: String,
-    /** 设备ID（可选） */
-    val device_id: Int? = null
-)
-
-/**
- * 下载响应（已简化，不再需要分片信息）
- */
-@Serializable
-data class DownloadResponse(
-    /** 文件名 */
-    val file_name: String,
-    /** 文件相对路径 */
-    val file_path: String,
-    /** 文件大小（字节） */
-    val file_size: Long,
-    /** MIME类型 */
-    val mime_type: String,
-    /** 修改时间戳 */
-    val mod_time: Long,
-    /** 下载历史记录ID */
-    val history_id: Int?
-)
+// @Serializable 数据类已迁移至 api/file/FileParams.kt（DownloadParams）和 api/file/FileResponse.kt。
+// 本文件仅保留前端 UI 模型（非序列化）。
 
 /**
  * 下载状态

@@ -46,7 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sunyuanling.filesync.util.RootHelper
-import com.sunyuanling.filesync.ui.viewModel.files.FileItem
+import com.sunyuanling.filesync.api.file.FileItem
 import com.sunyuanling.filesync.util.formatFileSize
 import java.io.File
 

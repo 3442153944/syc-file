@@ -2,8 +2,7 @@ package com.sunyuanling.filesync.ui.viewModel.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.sunyuanling.filesync.network.Request
-import com.sunyuanling.filesync.ui.viewModel.files.DiskResponse
+import com.sunyuanling.filesync.api.file.FileApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,7 +24,7 @@ class StorageViewModel : ViewModel() {
         viewModelScope.launch {
             _loading.value = true
             try {
-                Request.postSuspend<DiskResponse>("/file/available-disks").onSuccess { response ->
+                FileApi.getAvailableDisks().onSuccess { response ->
                     if (response.code == 200 && response.data != null) {
                         var totalBytes = 0L
                         var usedBytes = 0L

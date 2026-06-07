@@ -13,7 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sunyuanling.filesync.ui.viewModel.files.Disk
+import com.sunyuanling.filesync.api.file.DiskInfo
 
 /**
  * 磁盘列表头部
@@ -84,8 +84,8 @@ fun ErrorCard(
  * LazyColumn 扩展：磁盘列表项
  */
 fun LazyListScope.diskItems(
-    disks: List<Disk>,
-    onDiskClick: ((Disk) -> Unit)? = null
+    disks: List<DiskInfo>,
+    onDiskClick: ((DiskInfo) -> Unit)? = null
 ) {
     items(disks, key = { it.mountpoint }) { disk ->
         DiskCard(
