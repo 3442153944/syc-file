@@ -44,6 +44,7 @@ import com.sunyuanling.filesync.ui.viewModel.files.FileListViewModel
 import com.sunyuanling.filesync.ui.viewModel.transmission.DownloadListViewModel
 import com.sunyuanling.filesync.util.RootHelper
 import com.sunyuanling.filesync.api.file.FileItem
+import com.sunyuanling.filesync.router.TransferDestination
 import com.sunyuanling.filesync.util.formatFileSize
 import java.io.File
 
@@ -117,7 +118,7 @@ fun FileScreen(
                 val parentPath = item.path.substringBeforeLast(File.separator)
 
                 downloadViewModel.addDownload(
-                    path = parentPath,
+                    path = item.path,
                     name = item.name,
                     saveDir = File(selectedPath),
                     deviceId = null
@@ -125,6 +126,9 @@ fun FileScreen(
 
                 showDirectoryPicker = false
                 selectedFileForDownload = null
+                Log.d("FileScreen", "保存目录: $selectedPath")
+                //跳转到传输页
+                navController.navigate(TransferDestination)
             },
             onDismiss = {
                 showDirectoryPicker = false

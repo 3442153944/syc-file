@@ -1,4 +1,3 @@
-// ui/screen/files/FileTransferListScreen.kt
 package com.sunyuanling.filesync.ui.screen.files
 
 import android.os.Build
@@ -27,9 +26,7 @@ import com.sunyuanling.filesync.ui.viewModel.files.SortBy
 import com.sunyuanling.filesync.util.formatDate
 import com.sunyuanling.filesync.util.formatFileSize
 import com.sunyuanling.filesync.util.formatSpeed
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
+
 
 @RequiresApi(Build.VERSION_CODES.O)
 @OptIn(ExperimentalMaterial3Api::class)

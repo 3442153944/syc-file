@@ -62,13 +62,9 @@ fun DirectoryPickerScreen(
     onDirectorySelected: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    // 根据 Root 状态决定初始路径
-    val initialPath = remember(isRooted) {
-        if (isRooted) {
-            "/"
-        } else {
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
-        }
+    // 默认都选择用户空间，Root 模式下可继续往上导航
+    val initialPath = remember {
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath
     }
 
     var currentPath by remember { mutableStateOf(initialPath) }
@@ -245,6 +241,30 @@ fun DirectoryPickerScreen(
                     LazyColumn(
                         modifier = Modifier.fillMaxSize()
                     ) {
+                        // Root 模式下允许往上层路径导航
+                        if (isRooted) {
+                            val parentFile = File(currentPath).parentFile
+                            if (parentFile != null) {
+                                item(key = "__parent__") {
+                                    ListItem(
+                                        headlineContent = { Text("..", fontWeight = FontWeight.Bold) },
+                                        supportingContent = { Text(parentFile.absolutePath) },
+                                        leadingContent = {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                                contentDescription = "上级目录"
+                                            )
+                                        },
+                                        modifier = Modifier.clickable {
+                                            pathStack.add(parentFile.absolutePath)
+                                            currentPath = parentFile.absolutePath
+                                        }
+                                    )
+                                    HorizontalDivider()
+                                }
+                            }
+                        }
+
                         items(directories, key = { it.absolutePath }) { dir ->
                             ListItem(
                                 headlineContent = { Text(dir.name) },

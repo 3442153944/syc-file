@@ -1,15 +1,18 @@
 package com.sunyuanling.filesync.ui.components.notice
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.sunyuanling.filesync.MainActivity
 import com.sunyuanling.filesync.R
 import com.sunyuanling.filesync.util.formatFileSize
@@ -19,6 +22,16 @@ object DownloadNotificationHelper {
 
     private const val CHANNEL_ID_PROGRESS = "download_progress"
     private const val CHANNEL_ID_COMPLETE = "download_complete"
+
+    fun Context.hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true // Android 13 以下不需要运行时权限
+        }
+    }
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -44,16 +57,18 @@ object DownloadNotificationHelper {
     }
 
     // 显示/更新进度通知
-    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    @SuppressLint("MissingPermission")
     fun showProgress(
         context: Context,
         notificationId: Int,
         fileName: String,
-        progress: Int,       // 0-100
+        progress: Int,
         downloadedBytes: Long,
         totalBytes: Long,
-        speed: Long          // bytes/s
+        speed: Long
     ) {
+        if (!context.hasNotificationPermission()) return
+
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_PROGRESS)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(fileName)
@@ -64,12 +79,12 @@ object DownloadNotificationHelper {
             .setSilent(true)        // 进度更新静音
             .build()
 
-        NotificationManagerCompat.from(context)
-            .notify(notificationId, notification)
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
+
     }
 
     // 下载完成通知（有提示音）
-    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    @SuppressLint("MissingPermission")
     fun showComplete(
         context: Context,
         notificationId: Int,
@@ -100,7 +115,7 @@ object DownloadNotificationHelper {
     }
 
     // 下载失败通知
-    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    @SuppressLint("MissingPermission")
     fun showFailed(
         context: Context,
         notificationId: Int,

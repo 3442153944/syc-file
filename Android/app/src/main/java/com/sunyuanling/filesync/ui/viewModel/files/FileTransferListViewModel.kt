@@ -6,13 +6,21 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.filesync.data.sync.WebSocketManager
+import com.example.filesync.data.sync.WsMessage
 import com.sunyuanling.filesync.api.file.DownloadHistoryParams
 import com.sunyuanling.filesync.api.file.FileApi
 import com.sunyuanling.filesync.api.file.DownloadHistoryItem
+import com.sunyuanling.filesync.dataClass.DownloadStatus
+import com.sunyuanling.filesync.ui.viewModel.data.DownloadRepository
 import com.sunyuanling.filesync.ui.viewModel.transmission.FileTransferStatus
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.time.OffsetDateTime
 import java.time.ZonedDateTime
 
@@ -40,8 +48,114 @@ class FileTransferListViewModel : ViewModel() {
     private val pageSize = 20
     private var hasMore = true
 
+    private val json = Json { ignoreUnknownKeys = true }
+
     init {
         loadTransferHistory()
+        observeWebSocketDownloads()
+        observeActiveDownloads()
+    }
+
+    /**
+     * 监听 WebSocket 下载事件，实时同步下载记录
+     */
+    private fun observeWebSocketDownloads() {
+        viewModelScope.launch {
+            WebSocketManager.messageFlow
+                .filterNotNull()
+                .collect { message ->
+                    if (message is WsMessage.Text) {
+                        try {
+                            val jsonElement = json.parseToJsonElement(message.content).jsonObject
+                            val type = jsonElement["type"]?.jsonPrimitive?.content
+                            if (type == "file_download") {
+                                val data = jsonElement["data"]?.jsonObject ?: return@collect
+                                val event = data["event"]?.jsonPrimitive?.content
+                                val fileName = data["file_name"]?.jsonPrimitive?.content ?: ""
+                                val fileSize = data["file_size"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
+                                val historyId = data["history_id"]?.jsonPrimitive?.content?.toIntOrNull() ?: return@collect
+
+                                when (event) {
+                                    "start" -> {
+                                        // 如果已存在（从 API 加载的），更新状态
+                                        val existing = _transferItems.value.find { it.id == historyId }
+                                        if (existing != null) {
+                                            _transferItems.value = _transferItems.value.map { item ->
+                                                if (item.id == historyId) {
+                                                    item.copy(status = FileTransferStatus.TRANSFERRING)
+                                                } else item
+                                            }
+                                        } else {
+                                            val newItem = FileTransferItem(
+                                                id = historyId,
+                                                name = fileName,
+                                                size = fileSize,
+                                                isDir = false,
+                                                childrenCount = 0,
+                                                progress = 0f,
+                                                speed = 0L,
+                                                status = FileTransferStatus.TRANSFERRING,
+                                                startTime = System.currentTimeMillis()
+                                            )
+                                            _transferItems.value = listOf(newItem) + _transferItems.value
+                                            _total.value = _total.value + 1
+                                        }
+                                        Log.d("FileTransferListVM", "WebSocket 下载开始: $fileName (id=$historyId)")
+                                    }
+                                    "completed" -> {
+                                        val now = System.currentTimeMillis()
+                                        _transferItems.value = _transferItems.value.map { item ->
+                                            if (item.id == historyId) {
+                                                item.copy(
+                                                    status = FileTransferStatus.COMPLETED,
+                                                    progress = 1f,
+                                                    endTime = now
+                                                )
+                                            } else item
+                                        }
+                                        Log.d("FileTransferListVM", "WebSocket 下载完成: $fileName (id=$historyId)")
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e("FileTransferListVM", "解析 WebSocket 消息失败", e)
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun observeActiveDownloads() {
+        viewModelScope.launch {
+            DownloadRepository.activeDownloads.collect { activeList ->
+                if (activeList.isEmpty()) return@collect
+
+                val activeItems = activeList.map { download ->
+                    FileTransferItem(
+                        id = download.downloadId.hashCode(),
+                        name = download.fileName,
+                        size = download.totalSize,
+                        isDir = false,
+                        childrenCount = 0,
+                        progress = download.progress.toFloat() / 100f,
+                        speed = download.speed,
+                        status = when (download.status) {
+                            DownloadStatus.Waiting -> FileTransferStatus.WAITING
+                            DownloadStatus.Downloading -> FileTransferStatus.TRANSFERRING
+                            DownloadStatus.Paused -> FileTransferStatus.PAUSED
+                            DownloadStatus.Completed -> FileTransferStatus.COMPLETED
+                            DownloadStatus.Failed -> FileTransferStatus.FAILED
+                        },
+                        startTime = download.createTime
+                    )
+                }
+
+                // 合并：活跃下载优先，历史记录补充
+                val activeIds = activeItems.map { it.id }.toSet()
+                val historyItems = _transferItems.value.filter { it.id !in activeIds }
+                _transferItems.value = activeItems + historyItems
+            }
+        }
     }
 
     /**
@@ -86,7 +200,10 @@ class FileTransferListViewModel : ViewModel() {
                 _transferItems.value = if (isLoadMore) {
                     _transferItems.value + newItems
                 } else {
-                    newItems
+                    // 合并 WebSocket 实时添加的记录（避免覆盖）
+                    val existingIds = newItems.map { it.id }.toSet()
+                    val wsItems = _transferItems.value.filter { it.id !in existingIds }
+                    newItems + wsItems
                 }
 
                 hasMore = _transferItems.value.size < response.data.total
@@ -210,15 +327,19 @@ private fun mapDownloadStatus(status: String): FileTransferStatus {
 /**
  * ISO 时间字符串 → 毫秒时间戳
  */
-@RequiresApi(Build.VERSION_CODES.O)
-private fun parseTimeToMillis(isoTime: String?): Long {
-    if (isoTime.isNullOrEmpty()) return 0L
+private fun parseTimeToMillis(timeStr: String?): Long {
+    if (timeStr.isNullOrBlank()) return 0L
     return try {
-        ZonedDateTime.parse(isoTime).toInstant().toEpochMilli()
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.getDefault())
+            .also { it.timeZone = java.util.TimeZone.getTimeZone("UTC") }
+            .parse(timeStr)?.time ?: 0L
     } catch (e: Exception) {
         try {
-            OffsetDateTime.parse(isoTime).toInstant().toEpochMilli()
-        } catch (e: Exception) {
+            // 兼容带毫秒的格式
+            java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault())
+                .also { it.timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                .parse(timeStr)?.time ?: 0L
+        } catch (e2: Exception) {
             0L
         }
     }
@@ -227,7 +348,6 @@ private fun parseTimeToMillis(isoTime: String?): Long {
 /**
  * 后端 DownloadHistoryItem → 前端 FileTransferItem
  */
-@RequiresApi(Build.VERSION_CODES.O)
 private fun DownloadHistoryItem.toTransferItem(): FileTransferItem {
     val status = mapDownloadStatus(downloadStatus)
     return FileTransferItem(

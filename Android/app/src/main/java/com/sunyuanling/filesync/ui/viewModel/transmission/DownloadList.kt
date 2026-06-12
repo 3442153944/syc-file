@@ -1,9 +1,13 @@
 package com.sunyuanling.filesync.ui.viewModel.transmission
 
+import android.app.Application
+import android.os.Build
 import android.util.Log
+import androidx.annotation.RequiresApi
 import androidx.compose.runtime.mutableStateListOf
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.navigation.Navigator
 import com.downloader.Error
 import com.downloader.OnDownloadListener
 import com.downloader.PRDownloader
@@ -14,6 +18,8 @@ import com.sunyuanling.filesync.api.file.DownloadParams
 import com.sunyuanling.filesync.api.file.FileApi
 import com.sunyuanling.filesync.dataClass.DownloadItem
 import com.sunyuanling.filesync.dataClass.DownloadStatus
+import com.sunyuanling.filesync.ui.components.notice.DownloadNotificationHelper
+import com.sunyuanling.filesync.ui.viewModel.data.DownloadRepository
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -21,7 +27,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 
-class DownloadListViewModel : ViewModel() {
+@RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
+class DownloadListViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "DownloadListVM"
@@ -34,7 +41,15 @@ class DownloadListViewModel : ViewModel() {
     // 活跃下载任务 Map (downloadId -> PRDownloader downloadId)
     private val activeDownloadIds = mutableMapOf<String, Int>()
 
+    // 通知 ID 映射 (downloadId -> notificationId)
+    private val notificationIds = mutableMapOf<String, Int>()
+    private var nextNotificationId = 1000
+
     private val json = Json { ignoreUnknownKeys = true }
+
+    private fun getNotificationId(downloadId: String): Int {
+        return notificationIds.getOrPut(downloadId) { nextNotificationId++ }
+    }
 
     init {
         observeWebSocketMessages()
@@ -139,6 +154,7 @@ class DownloadListViewModel : ViewModel() {
                 )
 
                 _downloadList.add(downloadItem)
+                File(downloadItem.savePath).parentFile?.mkdirs()
 
                 // 2. 开始下载
                 startDownload(downloadItem, path, name, deviceId)
@@ -156,7 +172,8 @@ class DownloadListViewModel : ViewModel() {
         item: DownloadItem,
         path: String,
         name: String,
-        deviceId: Int?
+        deviceId: Int?,
+
     ) {
         viewModelScope.launch {
             try {
@@ -171,6 +188,16 @@ class DownloadListViewModel : ViewModel() {
                 Log.d(TAG, "下载 URL: $downloadUrl")
 
                 // 使用 PRDownloader（自动支持断点续传）
+                val notificationId = getNotificationId(item.downloadId)
+                val context = getApplication<Application>()
+
+                val saveFile = File(item.savePath)
+                val parentDir = saveFile.parentFile
+
+                val mkdirResult = parentDir?.mkdirs()
+
+                var lastUpdateTime = 0L
+
                 val prDownloadId = PRDownloader.download(
                     downloadUrl,
                     File(item.savePath).parent,
@@ -183,8 +210,17 @@ class DownloadListViewModel : ViewModel() {
                             status = DownloadStatus.Downloading,
                             updateTime = System.currentTimeMillis()
                         )}
+                        DownloadNotificationHelper.showProgress(
+                            context, notificationId,
+                            item.fileName, 0, 0, item.totalSize, 0
+                        )
                     }
+
                     .setOnProgressListener { progress ->
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdateTime < 200) return@setOnProgressListener  // 200ms 限频
+                        lastUpdateTime = now
+
                         val percent = if (progress.totalBytes > 0) {
                             ((progress.currentBytes * 100) / progress.totalBytes).toInt()
                         } else 0
@@ -197,22 +233,33 @@ class DownloadListViewModel : ViewModel() {
                             it.copy(
                                 totalSize = progress.totalBytes,
                                 downloadedSize = progress.currentBytes,
-                                progress = percent,
-                                speed = speed,
+                                progress = (percent.toFloat() / 100f).toInt(),  // 注意你的 progress 是 Float 0-1
                                 status = DownloadStatus.Downloading,
                                 updateTime = System.currentTimeMillis()
                             )
                         }
+                        DownloadNotificationHelper.showProgress(
+                            context, notificationId,
+                            item.fileName, percent,
+                            progress.currentBytes, progress.totalBytes, speed
+                        )
                     }
                     .start(object : OnDownloadListener {
                         override fun onDownloadComplete() {
                             Log.d(TAG, "下载完成: ${item.fileName}")
+                            val updated = _downloadList.find { it.downloadId == item.downloadId }
                             updateDownloadItem(item.downloadId) { it.copy(
                                 status = DownloadStatus.Completed,
                                 progress = 100,
                                 updateTime = System.currentTimeMillis()
                             )}
                             activeDownloadIds.remove(item.downloadId)
+                            DownloadNotificationHelper.showComplete(
+                                context, notificationId,
+                                item.fileName,
+                                updated?.totalSize ?: 0,
+                                item.savePath
+                            )
                         }
 
                         override fun onError(error: Error) {
@@ -223,6 +270,11 @@ class DownloadListViewModel : ViewModel() {
                                 updateTime = System.currentTimeMillis()
                             )}
                             activeDownloadIds.remove(item.downloadId)
+                            DownloadNotificationHelper.showFailed(
+                                context, notificationId,
+                                item.fileName,
+                                error.serverErrorMessage ?: error.connectionException?.message ?: "下载失败"
+                            )
                         }
                     })
 
@@ -235,6 +287,12 @@ class DownloadListViewModel : ViewModel() {
                     errorMessage = e.message ?: "启动下载失败",
                     updateTime = System.currentTimeMillis()
                 )}
+                val notificationId = getNotificationId(item.downloadId)
+                DownloadNotificationHelper.showFailed(
+                    getApplication<Application>(), notificationId,
+                    item.fileName,
+                    e.message ?: "启动下载失败"
+                )
             }
         }
     }
@@ -249,6 +307,10 @@ class DownloadListViewModel : ViewModel() {
                 status = DownloadStatus.Paused,
                 updateTime = System.currentTimeMillis()
             )}
+            notificationIds[downloadId]?.let {
+                DownloadNotificationHelper.cancel(getApplication<Application>(), it)
+                notificationIds.remove(downloadId)
+            }
             Log.d(TAG, "暂停下载: $downloadId")
         }
     }
@@ -270,6 +332,13 @@ class DownloadListViewModel : ViewModel() {
                 status = DownloadStatus.Downloading,
                 updateTime = System.currentTimeMillis()
             )}
+            // 恢复时重新显示进度通知
+            val notificationId = getNotificationId(downloadId)
+            DownloadNotificationHelper.showProgress(
+                getApplication<Application>(), notificationId,
+                item.fileName, item.progress,
+                item.downloadedSize, item.totalSize, 0
+            )
             Log.d(TAG, "恢复下载: $downloadId")
         }
     }
@@ -282,6 +351,10 @@ class DownloadListViewModel : ViewModel() {
             PRDownloader.cancel(prDownloadId)
             activeDownloadIds.remove(downloadId)
         }
+        notificationIds[downloadId]?.let {
+            DownloadNotificationHelper.cancel(getApplication<Application>(), it)
+            notificationIds.remove(downloadId)
+        }
         _downloadList.removeIf { it.downloadId == downloadId }
         Log.d(TAG, "取消下载: $downloadId")
     }
@@ -290,6 +363,10 @@ class DownloadListViewModel : ViewModel() {
      * 删除已完成/失败的下载记录
      */
     fun removeDownload(downloadId: String) {
+        notificationIds[downloadId]?.let {
+            DownloadNotificationHelper.cancel(getApplication<Application>(), it)
+            notificationIds.remove(downloadId)
+        }
         _downloadList.removeIf { it.downloadId == downloadId }
     }
 
@@ -302,6 +379,12 @@ class DownloadListViewModel : ViewModel() {
         if (item.status != DownloadStatus.Failed) {
             Log.w(TAG, "只能重试失败的下载")
             return
+        }
+
+        // 清除旧的失败通知
+        notificationIds[downloadId]?.let {
+            DownloadNotificationHelper.cancel(getApplication<Application>(), it)
+            notificationIds.remove(downloadId)
         }
 
         // 重置状态后重新下载
@@ -327,6 +410,7 @@ class DownloadListViewModel : ViewModel() {
         val index = _downloadList.indexOfFirst { it.downloadId == downloadId }
         if (index >= 0) {
             _downloadList[index] = update(_downloadList[index])
+            DownloadRepository.updateDownload(_downloadList[index])  // 同步
         }
     }
 
@@ -335,6 +419,9 @@ class DownloadListViewModel : ViewModel() {
      */
     override fun onCleared() {
         super.onCleared()
-        // PRDownloader 会自动管理资源
+        notificationIds.values.forEach {
+            DownloadNotificationHelper.cancel(getApplication<Application>(), it)
+        }
+        notificationIds.clear()
     }
 }

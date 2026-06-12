@@ -1,8 +1,11 @@
 package com.sunyuanling.filesync
 
+import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -57,6 +60,16 @@ class MainActivity : ComponentActivity() {
         catch(e: Exception){
             Log.w("ConfigManager", "配置文件读取失败: ${e.message}")
             Toast.makeText(this, "配置文件读取失败", Toast.LENGTH_SHORT).show()
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                startActivity(intent)
+            }
         }
         Request.init(this)
 
