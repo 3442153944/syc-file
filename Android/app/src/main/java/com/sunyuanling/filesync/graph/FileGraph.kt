@@ -12,6 +12,7 @@ import com.sunyuanling.filesync.router.FileDetailDestination
 import com.sunyuanling.filesync.router.FileSearchDestination
 import com.sunyuanling.filesync.router.FileUploadDestination
 import com.sunyuanling.filesync.router.TransferDestination
+import com.sunyuanling.filesync.router.TransferListDestination
 import com.sunyuanling.filesync.ui.screen.files.FileTransferListScreen
 import com.sunyuanling.filesync.ui.screen.files.FileUploadScreen
 
@@ -42,6 +43,12 @@ fun NavGraphBuilder.fileGraph(navController: NavHostController) {
             onFileClick = { fileId ->
                 navController.navigate(FileDetailDestination(fileId))
             }
+        )
+    }
+    composable<TransferListDestination> {
+        FileTransferListScreen(
+            onBackClick = { navController.navigateUp() },
+            navController = navController
         )
     }
 }

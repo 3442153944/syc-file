@@ -66,6 +66,7 @@ fun PersonalScreen(modifier: Modifier = Modifier, navController: NavController) 
 
         is PPersonalState.Error -> {
             ErrorScreen(
+                navController = navController,
                 message = state.message,
                 onRetry = {
                     scope.launch {

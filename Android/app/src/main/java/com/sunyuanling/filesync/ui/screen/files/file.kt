@@ -33,7 +33,6 @@ import androidx.navigation.NavController
 import com.sunyuanling.filesync.router.FileUploadDestination
 import com.sunyuanling.filesync.router.navigateToDetail
 import com.sunyuanling.filesync.ui.components.files.DirectoryPickerScreen
-import com.sunyuanling.filesync.ui.components.files.DiskListHeader
 import com.sunyuanling.filesync.ui.components.files.ErrorCard
 import com.sunyuanling.filesync.ui.components.files.FileItemCard
 import com.sunyuanling.filesync.ui.components.files.FileListHeader
@@ -266,7 +265,8 @@ fun FileScreen(
                 DiskListHeader(
                     title = "可用磁盘 (${diskData?.allowedCount ?: 0})",
                     loading = diskLoading,
-                    onRefresh = { diskViewModel.loadDisks() }
+                    onRefresh = { diskViewModel.loadDisks()},
+                    navController = navController
                 )
             }
 

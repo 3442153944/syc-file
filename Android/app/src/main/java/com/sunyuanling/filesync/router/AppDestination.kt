@@ -38,6 +38,8 @@ import kotlinx.serialization.Serializable
 /**文件设置*/
 @Serializable data object FileSettingsDestination
 
+/**文件传输列表*/
+@Serializable data object TransferListDestination
 
 // 特殊页面
 /**权限设置*/

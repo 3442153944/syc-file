@@ -16,34 +16,6 @@ import androidx.compose.ui.unit.sp
 import com.sunyuanling.filesync.api.file.DiskInfo
 
 /**
- * 磁盘列表头部
- */
-@Composable
-fun DiskListHeader(
-    title: String = "可用磁盘",
-    loading: Boolean = false,
-    onRefresh: () -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = title,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold
-        )
-        IconButton(
-            onClick = onRefresh,
-            enabled = !loading
-        ) {
-            Icon(Icons.Default.Refresh, contentDescription = "刷新")
-        }
-    }
-}
-
-/**
  * 加载指示器
  */
 @Composable
