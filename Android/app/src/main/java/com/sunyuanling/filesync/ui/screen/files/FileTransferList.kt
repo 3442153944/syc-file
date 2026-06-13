@@ -1,6 +1,7 @@
 package com.sunyuanling.filesync.ui.screen.files
 
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -8,24 +9,20 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.sunyuanling.filesync.ui.viewModel.transmission.FileTransferStatus
-import com.sunyuanling.filesync.ui.viewModel.files.FileTransferItem
 import com.sunyuanling.filesync.ui.viewModel.files.FileTransferListViewModel
 import com.sunyuanling.filesync.ui.viewModel.files.SortBy
-import com.sunyuanling.filesync.util.formatDate
-import com.sunyuanling.filesync.util.formatFileSize
-import com.sunyuanling.filesync.util.formatSpeed
 
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -42,7 +39,10 @@ fun FileTransferListScreen(
     val sortBy by viewModel.sortBy.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    val successMessage by viewModel.successMessage.collectAsState()
     val total by viewModel.total.collectAsState()
+    val isMultiSelect by viewModel.isMultiSelect.collectAsState()
+    val selectedItems by viewModel.selectedItems.collectAsState()
 
     var showFilterMenu by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
@@ -53,7 +53,6 @@ fun FileTransferListScreen(
 
     val listState = rememberLazyListState()
 
-    // 滚动到底部时加载更多
     val reachedBottom by remember {
         derivedStateOf {
             val lastVisibleItem = listState.layoutInfo.visibleItemsInfo.lastOrNull()
@@ -61,166 +60,139 @@ fun FileTransferListScreen(
         }
     }
     LaunchedEffect(reachedBottom) {
-        if (reachedBottom && !isLoading) {
-            viewModel.loadMore()
-        }
+        if (reachedBottom && !isLoading) viewModel.loadMore()
     }
 
-    // 错误提示 Snackbar
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(errorMessage) {
-        errorMessage?.let {
-            snackbarHostState.showSnackbar(it)
-            viewModel.dismissError()
-        }
+        errorMessage?.let { snackbarHostState.showSnackbar(it); viewModel.dismissError() }
+    }
+    LaunchedEffect(successMessage) {
+        successMessage?.let { snackbarHostState.showSnackbar(it); viewModel.dismissSuccess() }
+    }
+
+    // 物理返回键：多选模式下退出多选而不是返回页面
+    BackHandler(enabled = isMultiSelect) {
+        viewModel.exitMultiSelect()
     }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("传输列表")
-                        if (total > 0) {
-                            Text(
-                                "共 $total 条记录",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+            if (isMultiSelect) {
+                // 多选模式 TopBar
+                TopAppBar(
+                    title = { Text("已选 ${selectedItems.size} 项") },
+                    navigationIcon = {
+                        IconButton(onClick = { viewModel.exitMultiSelect() }) {
+                            Icon(Icons.Default.Close, "退出多选")
                         }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(Icons.Default.ArrowBack, "返回")
-                    }
-                },
-                actions = {
-                    // 筛选按钮
-                    Box {
-                        IconButton(onClick = { showFilterMenu = true }) {
-                            Icon(Icons.Default.FilterList, "筛选")
+                    },
+                    actions = {
+                        TextButton(onClick = { viewModel.selectAll() }) {
+                            Text("全选")
                         }
-                        DropdownMenu(
-                            expanded = showFilterMenu,
-                            onDismissRequest = { showFilterMenu = false }
+                        IconButton(
+                            onClick = { viewModel.deleteSelected() },
+                            enabled = selectedItems.isNotEmpty()
                         ) {
-                            DropdownMenuItem(
-                                text = { Text("全部") },
-                                onClick = {
-                                    viewModel.setFilter(null)
-                                    showFilterMenu = false
-                                },
-                                leadingIcon = {
-                                    if (filterStatus == null) {
-                                        Icon(Icons.Default.Check, null)
-                                    }
-                                }
-                            )
-                            FileTransferStatus.entries.forEach { status ->
+                            Icon(Icons.Default.Delete, "删除选中")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                )
+            } else {
+                // 普通模式 TopBar（原来的不变）
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("传输列表")
+                            if (total > 0) {
+                                Text(
+                                    "共 $total 条记录",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onBackClick) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回")
+                        }
+                    },
+                    actions = {
+                        // 筛选、排序、更多按钮（原来的不变）
+                        Box {
+                            IconButton(onClick = { showFilterMenu = true }) {
+                                Icon(Icons.Default.FilterList, "筛选")
+                            }
+                            DropdownMenu(expanded = showFilterMenu, onDismissRequest = { showFilterMenu = false }) {
                                 DropdownMenuItem(
-                                    text = { Text(status.displayName) },
-                                    onClick = {
-                                        viewModel.setFilter(status)
-                                        showFilterMenu = false
-                                    },
-                                    leadingIcon = {
-                                        if (filterStatus == status) {
-                                            Icon(Icons.Default.Check, null)
-                                        }
-                                    }
+                                    text = { Text("全部") },
+                                    onClick = { viewModel.setFilter(null); showFilterMenu = false },
+                                    leadingIcon = { if (filterStatus == null) Icon(Icons.Default.Check, null) }
+                                )
+                                FileTransferStatus.entries.forEach { status ->
+                                    DropdownMenuItem(
+                                        text = { Text(status.displayName) },
+                                        onClick = { viewModel.setFilter(status); showFilterMenu = false },
+                                        leadingIcon = { if (filterStatus == status) Icon(Icons.Default.Check, null) }
+                                    )
+                                }
+                            }
+                        }
+                        Box {
+                            IconButton(onClick = { showSortMenu = true }) {
+                                Icon(Icons.AutoMirrored.Filled.Sort, "排序")
+                            }
+                            DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                                SortBy.entries.forEach { sort ->
+                                    DropdownMenuItem(
+                                        text = { Text(sort.displayName) },
+                                        onClick = { viewModel.setSortBy(sort); showSortMenu = false },
+                                        leadingIcon = { if (sortBy == sort) Icon(Icons.Default.Check, null) }
+                                    )
+                                }
+                            }
+                        }
+                        Box {
+                            var showClearMenu by remember { mutableStateOf(false) }
+                            IconButton(onClick = { showClearMenu = true }) {
+                                Icon(Icons.Default.MoreVert, "更多")
+                            }
+                            DropdownMenu(expanded = showClearMenu, onDismissRequest = { showClearMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("清空已完成") },
+                                    onClick = { viewModel.clearCompleted(); showClearMenu = false }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("清空全部") },
+                                    onClick = { viewModel.clearAll(); showClearMenu = false }
                                 )
                             }
                         }
                     }
-
-                    // 排序按钮
-                    Box {
-                        IconButton(onClick = { showSortMenu = true }) {
-                            Icon(Icons.Default.Sort, "排序")
-                        }
-                        DropdownMenu(
-                            expanded = showSortMenu,
-                            onDismissRequest = { showSortMenu = false }
-                        ) {
-                            SortBy.entries.forEach { sort ->
-                                DropdownMenuItem(
-                                    text = { Text(sort.displayName) },
-                                    onClick = {
-                                        viewModel.setSortBy(sort)
-                                        showSortMenu = false
-                                    },
-                                    leadingIcon = {
-                                        if (sortBy == sort) {
-                                            Icon(Icons.Default.Check, null)
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    // 更多操作
-                    Box {
-                        var showClearMenu by remember { mutableStateOf(false) }
-                        IconButton(onClick = { showClearMenu = true }) {
-                            Icon(Icons.Default.MoreVert, "更多")
-                        }
-                        DropdownMenu(
-                            expanded = showClearMenu,
-                            onDismissRequest = { showClearMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("清空已完成") },
-                                onClick = {
-                                    viewModel.clearCompleted()
-                                    showClearMenu = false
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("清空全部") },
-                                onClick = {
-                                    viewModel.clearAll()
-                                    showClearMenu = false
-                                }
-                            )
-                        }
-                    }
-                }
-            )
+                )
+            }
         }
     ) { padding ->
         PullToRefreshBox(
             isRefreshing = isLoading && transferItems.isEmpty(),
             onRefresh = { viewModel.loadTransferHistory() },
-            modifier = modifier
-                .fillMaxSize()
-                .padding(padding)
+            modifier = modifier.fillMaxSize().padding(padding)
         ) {
             if (filteredItems.isEmpty() && !isLoading) {
-                // 空状态
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            Icons.Default.CloudQueue,
-                            contentDescription = null,
-                            modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.outline
-                        )
-                        Text(
-                            "暂无传输记录",
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                        TextButton(onClick = { viewModel.loadTransferHistory() }) {
-                            Text("点击刷新")
-                        }
+                        Icon(Icons.Default.CloudQueue, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.outline)
+                        Text("暂无传输记录", color = MaterialTheme.colorScheme.outline)
+                        TextButton(onClick = { viewModel.loadTransferHistory() }) { Text("点击刷新") }
                     }
                 }
             } else {
@@ -230,188 +202,28 @@ fun FileTransferListScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(filteredItems, key = { it.id }) { item ->
+                        val isSelected = selectedItems.any { it.id == item.id }
                         TransferItemCard(
                             item = item,
+                            isMultiSelect = isMultiSelect,
+                            isSelected = isSelected,
+                            onLongClick = { viewModel.enterMultiSelect(item) },
+                            onClick = {
+                                if (isMultiSelect) viewModel.toggleSelectItem(item)
+                            },
                             onRetry = { viewModel.retryTransfer(item.id) },
                             onCancel = { viewModel.cancelTransfer(item.id) },
                             onPause = { viewModel.pauseTransfer(item.id) },
                             onResume = { viewModel.resumeTransfer(item.id) },
-                            onRemove = { viewModel.removeTransferItem(item.id) }
+                            onRemove = { viewModel.deleteDownloadHistory(listOf(item.id)) }
                         )
                     }
-
-                    // 底部加载指示器
                     if (isLoading && transferItems.isNotEmpty()) {
                         item {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
+                            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
                                 CircularProgressIndicator(modifier = Modifier.size(24.dp))
                             }
                         }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@RequiresApi(Build.VERSION_CODES.O)
-@Composable
-fun TransferItemCard(
-    item: FileTransferItem,
-    onRetry: () -> Unit,
-    onCancel: () -> Unit,
-    onPause: () -> Unit,
-    onResume: () -> Unit,
-    onRemove: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // 文件信息行
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    if (item.isDir) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile,
-                    contentDescription = null,
-                    modifier = Modifier.size(40.dp),
-                    tint = when (item.status) {
-                        FileTransferStatus.COMPLETED -> MaterialTheme.colorScheme.tertiary
-                        FileTransferStatus.FAILED -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.primary
-                    }
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        item.name,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1
-                    )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Text(
-                            formatFileSize(item.size),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        if (item.isDir && item.childrenCount > 0) {
-                            Text(
-                                "· ${item.childrenCount} 项",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-
-                TransferStatusChip(item.status)
-            }
-
-            // 时间信息
-            if (item.startTime > 0) {
-                Text(
-                    formatDate("yyyy-MM-dd HH:mm:ss", item.startTime),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // 进度条（传输中或暂停时显示）
-            if (item.status.showProgress) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "${(item.progress * 100).toInt()}%",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                        if (item.status == FileTransferStatus.TRANSFERRING) {
-                            Text(
-                                formatSpeed(item.speed),
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        } else {
-                            Text(
-                                "已暂停",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    LinearProgressIndicator(
-                        progress = { item.progress },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-
-            // 错误信息
-            if (item.status == FileTransferStatus.FAILED && item.errorMessage != null) {
-                Text(
-                    item.errorMessage,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-
-            // 操作按钮
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                when {
-                    item.status.canRetry -> {
-                        TextButton(onClick = onRetry) {
-                            Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("重试")
-                        }
-                    }
-                    item.status == FileTransferStatus.PAUSED -> {
-                        TextButton(onClick = onResume) {
-                            Icon(Icons.Default.PlayArrow, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("恢复")
-                        }
-                    }
-                    item.status.canPause -> {
-                        TextButton(onClick = onPause) {
-                            Icon(Icons.Default.Pause, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("暂停")
-                        }
-                    }
-                }
-
-                if (item.status.canCancel) {
-                    TextButton(onClick = onCancel) {
-                        Icon(Icons.Default.Cancel, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("取消")
-                    }
-                }
-
-                if (item.status.canDelete) {
-                    IconButton(onClick = onRemove) {
-                        Icon(Icons.Default.Delete, "删除记录")
                     }
                 }
             }

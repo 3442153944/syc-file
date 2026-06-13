@@ -10,6 +10,7 @@ import (
 
 	"syc-file/config"
 	"syc-file/pkg/logger"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // InitMySQL 初始化并返回一个 GORM DB 实例
@@ -25,9 +26,10 @@ func InitMySQL(cfg config.DBConfig) (*gorm.DB, error) {
 
 	logger.Logger.Info("正在连接数据库", zap.String("host", cfg.Host), zap.Int("port", cfg.Port))
 
-	// 2. 连接数据库
+	// 2. 连接数据库（注入自定义 Zap 日志适配器）
+	gormLog := logger.NewGormLogger()
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		// 这里可以配置 GORM 的内部日志，后续可以替换为我们的 zap
+		Logger: gormLog,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("连接 MySQL 失败: %w", err)
@@ -45,6 +47,11 @@ func InitMySQL(cfg config.DBConfig) (*gorm.DB, error) {
 	sqlDB.SetMaxOpenConns(100)
 	// 设置了连接可复用的最大时间
 	sqlDB.SetConnMaxLifetime(time.Hour)
+
+	// 设置 GORM 日志级别
+	if logger.IsDebug() {
+		db.Logger = gormLog.LogMode(gormlogger.Info)
+	}
 
 	logger.Logger.Info("MySQL 数据库连接成功！")
 

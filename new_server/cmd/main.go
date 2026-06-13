@@ -10,6 +10,7 @@ import (
 	"syc-file/config"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
+	"syc-file/internal/middleware"
 	"syc-file/internal/model"
 	"syc-file/pkg/logger"
 	"time"
@@ -48,7 +49,7 @@ func main() {
 		AllowCredentials: false,
 		MaxAge:           86400 * time.Second,
 	}))
-	//r.Use(middleware.ZapLogger(), gin.Recovery())
+	r.Use(middleware.ZapLogger(), gin.Recovery())
 
 	//建立数据库连接
 	db, err := database.InitMySQL(config.Conf.DB)

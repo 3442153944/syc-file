@@ -80,4 +80,8 @@ object ApiRoutes {
 
     /** GET /v1/ws/group/:name/users */
     const val WS_GROUP_USERS = "/ws/group/%s/users"
+    /**删除下载记录
+     * post /v1/file/delete-download-history
+     * */
+    const val FILE_DELETE_DOWNLOAD_HISTORY = "/file/delete-download-history"
 }

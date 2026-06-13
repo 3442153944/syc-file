@@ -15,7 +15,7 @@ redis:
 #日志配置
 log:
   path: ./log
-  level: info
+  level: debug
   format: json
   console: true
   file: true

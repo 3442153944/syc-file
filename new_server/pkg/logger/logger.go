@@ -13,6 +13,19 @@ import (
 // Logger 暴露一个全局的 Zap 实例，方便在业务代码中直接 logger.Logger.Info() 调用
 var Logger *zap.Logger
 
+// CurrentLevel 记录当前生效的日志级别
+var CurrentLevel zapcore.Level = zap.InfoLevel
+
+// IsLevel 检查当前日志级别是否满足给定的最低级别
+func IsLevel(l zapcore.Level) bool {
+	return CurrentLevel <= l
+}
+
+// IsDebug 当前是否为 Debug 模式
+func IsDebug() bool {
+	return CurrentLevel <= zapcore.DebugLevel
+}
+
 // Init 初始化日志组件
 func Init(cfg config.LogConfig) error {
 	// 1. 确保日志目录存在
@@ -48,6 +61,7 @@ func Init(cfg config.LogConfig) error {
 	if err != nil {
 		level = zap.InfoLevel // 默认级别
 	}
+	CurrentLevel = level
 
 	// 如果配置了输出到文件
 	if cfg.File {

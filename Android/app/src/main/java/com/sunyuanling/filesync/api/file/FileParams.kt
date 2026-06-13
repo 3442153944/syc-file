@@ -76,3 +76,10 @@ data class DownloadHistoryParams(
     /** 每页数量 */
     val pageSize: Int = 10
 )
+
+@Serializable
+/** 删除下载记录ids */
+data class DeleteDownloadHistoryParams(
+    /** 下载记录 ids 列表 */
+    val ids: List<Int>
+)

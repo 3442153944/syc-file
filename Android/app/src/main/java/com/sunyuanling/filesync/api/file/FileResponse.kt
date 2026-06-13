@@ -127,3 +127,8 @@ data class DownloadHistoryData(
     val pageNum: Int = 0,
     val pageSize: Int = 0
 )
+@Serializable
+/** 删除下载记录ids响应体*/
+data class DeleteDownloadHistoryResponse(
+    val data: Unit? = null
+)

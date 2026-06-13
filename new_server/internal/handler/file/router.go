@@ -13,4 +13,5 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	f.GET("/download", HandlerFuncDownload(db, redisClient))
 	f.POST("/upload", HandlerFuncUpload(db, redisClient))
 	f.POST("/download-history", HandlerFuncDownloadHistory(db, redisClient))
+	f.POST("/delete-download-history", DeleteDownloadHistory(db, redisClient))
 }

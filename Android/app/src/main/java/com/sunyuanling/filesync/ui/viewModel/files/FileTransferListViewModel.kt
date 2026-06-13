@@ -1,13 +1,13 @@
 // ui/viewModel/files/FileTransferListViewModel.kt
 package com.sunyuanling.filesync.ui.viewModel.files
 
-import android.os.Build
 import android.util.Log
-import androidx.annotation.RequiresApi
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.data.sync.WsMessage
+import com.sunyuanling.filesync.api.file.DeleteDownloadHistoryParams
 import com.sunyuanling.filesync.api.file.DownloadHistoryParams
 import com.sunyuanling.filesync.api.file.FileApi
 import com.sunyuanling.filesync.api.file.DownloadHistoryItem
@@ -21,8 +21,6 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import java.time.OffsetDateTime
-import java.time.ZonedDateTime
 
 class FileTransferListViewModel : ViewModel() {
 
@@ -41,6 +39,9 @@ class FileTransferListViewModel : ViewModel() {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
 
+    private val _successMessage = MutableStateFlow<String?>(null)
+    val successMessage: StateFlow<String?> = _successMessage
+
     private val _total = MutableStateFlow(0L)
     val total: StateFlow<Long> = _total
 
@@ -49,6 +50,15 @@ class FileTransferListViewModel : ViewModel() {
     private var hasMore = true
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    //选择的下载项
+    private val _selectedItems = MutableStateFlow<List<FileTransferItem>>(emptyList())
+    val selectedItems: StateFlow<List<FileTransferItem>> = _selectedItems
+
+    //进入多选模式
+    private val _isMultiSelect = MutableStateFlow(false)
+    val isMultiSelect: StateFlow<Boolean> = _isMultiSelect
+
 
     init {
         loadTransferHistory()
@@ -98,7 +108,7 @@ class FileTransferListViewModel : ViewModel() {
                                                 startTime = System.currentTimeMillis()
                                             )
                                             _transferItems.value = listOf(newItem) + _transferItems.value
-                                            _total.value = _total.value + 1
+                                            _total.value += 1
                                         }
                                         Log.d("FileTransferListVM", "WebSocket 下载开始: $fileName (id=$historyId)")
                                     }
@@ -219,6 +229,32 @@ class FileTransferListViewModel : ViewModel() {
         }
     }
 
+    /**
+     * 删除下载记录
+     * @param ids 下载记录 ids 列表
+     * */
+    fun deleteDownloadHistory(ids: List<Int>) {
+        viewModelScope.launch {
+            FileApi.deleteDownloadHistory(DeleteDownloadHistoryParams(ids)).onSuccess { response ->
+                if (response.code == 200 && response.data != null) {
+                    Log.d(TAG, "删除下载记录成功")
+                    for(id in ids){
+                        removeTransferItem(id)
+                    }
+                    loadTransferHistory()
+
+                    //提示
+                    _successMessage.value = "删除成功"
+                } else {
+                    _errorMessage.value = response.message.ifEmpty { "删除失败" }
+                }
+            }.onFailure { e ->
+                Log.e(TAG, "删除下载记录失败: ${e.message}")
+                _errorMessage.value = e.message ?: "网络请求失败"
+            }
+        }
+    }
+
     // ==================== 本地传输管理 ====================
 
     fun addTransferItem(item: FileTransferItem) {
@@ -301,6 +337,48 @@ class FileTransferListViewModel : ViewModel() {
 
     fun dismissError() {
         _errorMessage.value = null
+    }
+
+    fun dismissSuccess() {
+        _successMessage.value = null
+    }
+
+    // 进入多选模式（长按触发）
+    fun enterMultiSelect(item: FileTransferItem) {
+        _isMultiSelect.value = true
+        _selectedItems.value = listOf(item)
+    }
+
+    // 退出多选模式
+    fun exitMultiSelect() {
+        _isMultiSelect.value = false
+        _selectedItems.value = emptyList()
+    }
+
+    // 切换单项选中状态
+    fun toggleSelectItem(item: FileTransferItem) {
+        val current = _selectedItems.value
+        _selectedItems.value = if (current.any { it.id == item.id }) {
+            current.filter { it.id != item.id }
+        } else {
+            current + item
+        }
+        // 如果全部取消选中，退出多选模式
+        if (_selectedItems.value.isEmpty()) {
+            _isMultiSelect.value = false
+        }
+    }
+
+    // 全选
+    fun selectAll() {
+        _selectedItems.value = _transferItems.value.toList()
+    }
+
+    // 删除选中项
+    fun deleteSelected() {
+        val ids = _selectedItems.value.map { it.id }
+        exitMultiSelect()
+        deleteDownloadHistory(ids)
     }
 
     companion object {

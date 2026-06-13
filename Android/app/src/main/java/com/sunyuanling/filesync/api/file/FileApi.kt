@@ -109,4 +109,14 @@ object FileApi {
             ApiRoutes.FILE_DOWNLOAD_HISTORY, params
         )
     }
+
+    /**
+     * 删除下载记录ids
+     * */
+    suspend fun deleteDownloadHistory(parms: DeleteDownloadHistoryParams): Result<ApiResponse<DeleteDownloadHistoryResponse>> {
+        return Request.postSuspend<ApiResponse<DeleteDownloadHistoryResponse>, DeleteDownloadHistoryParams>(
+            ApiRoutes.FILE_DELETE_DOWNLOAD_HISTORY,
+            parms
+        )
+    }
 }
