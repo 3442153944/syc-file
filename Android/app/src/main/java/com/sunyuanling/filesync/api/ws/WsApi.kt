@@ -6,9 +6,11 @@ package com.sunyuanling.filesync.api.ws
 
 import com.sunyuanling.filesync.api.ApiRoutes
 import com.sunyuanling.filesync.network.Request
+import okhttp3.WebSocket
 import com.sunyuanling.filesync.network.Response as ApiResponse
 
 object WsApi {
+
 
     // ==================== WebSocket 连接 ====================
 

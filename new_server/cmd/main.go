@@ -12,6 +12,8 @@ import (
 	"syc-file/internal/handler"
 	"syc-file/internal/middleware"
 	"syc-file/internal/model"
+	"syc-file/internal/ws"
+	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
 	"time"
 )
@@ -91,6 +93,12 @@ func main() {
 	}
 
 	logger.Logger.Info("Redis连接成功")
+
+	//初始化ws
+	ws.InitWS(db)
+
+	//初始化设备状态Redis存储
+	device_store.Init(redisClient)
 
 	// 4. 注册路由
 	r.GET("/ping", func(c *gin.Context) {

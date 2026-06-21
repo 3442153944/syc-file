@@ -1,14 +1,18 @@
 // WebSocketManager.kt
 package com.example.filesync.data.sync
 
+import android.content.Context
 import android.util.Log
 import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.AppConfig.getWsUrl
 import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.util.DeviceInfoUtil
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import kotlinx.serialization.json.Json
 import okhttp3.*
 import okio.ByteString
+import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -46,6 +50,9 @@ object WebSocketManager {
     private var reconnectAttempts = 0
     private val maxReconnectAttempts = 5
 
+    private var deviceInfoJson: String = ""
+    private var deviceQueryParams: String = ""
+
     /** 连接状态 */
     private val _connectionState = MutableStateFlow<WsState>(WsState.Disconnected)
     val connectionState: StateFlow<WsState> = _connectionState.asStateFlow()
@@ -58,16 +65,25 @@ object WebSocketManager {
      * 连接到服务器
      * 自动从 Request.getToken() 获取 Token
      */
-    fun connect() {
-        if (isConnecting.get()) {
-            return
-        }
+    /**
+     * 连接到服务器，携带设备信息
+     */
+    fun connect(context: Context) {
+        if (isConnecting.get()) return
 
         shouldReconnect.set(true)
         reconnectAttempts = 0
 
+        // 收集设备信息（只在首次连接时收集）
+        val info = DeviceInfoUtil.collect(context)
+        deviceInfoJson = Json.encodeToString(info)
+        deviceQueryParams = "?device_id=${info.deviceId}" +
+                "&device_name=${URLEncoder.encode(info.deviceName, "UTF-8")}" +
+                "&device_type=android" +
+                "&platform=android_${URLEncoder.encode(info.osVersion, "UTF-8")}" +
+                "&app_version=${URLEncoder.encode(info.appVersion, "UTF-8")}"
+
         reconnectScope.launch {
-            // 直接使用 Request.getToken()
             val token = Request.getToken()
             if (token.isNullOrBlank()) {
                 Log.e(TAG, "Token 为空，无法连接")
@@ -93,9 +109,10 @@ object WebSocketManager {
 
             // 和 Request 一样，在 Header 中携带 token
             val request = okhttp3.Request.Builder()
-                .url(serverUrl)
-                .header("Token", token)  // 大写 Token，和 Request 保持一致
+                .url(serverUrl + deviceQueryParams)   // ← Query 参数
+                .header("Token", token)
                 .header("User-Agent", "FileSyncApp/1.0.0")
+                .header("X-Device-Info", deviceInfoJson)  // ← 详细信息放 Header
                 .build()
 
             webSocket = client.newWebSocket(request, object : WebSocketListener() {

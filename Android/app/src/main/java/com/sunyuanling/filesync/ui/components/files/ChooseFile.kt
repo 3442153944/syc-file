@@ -73,6 +73,10 @@ fun DirectoryPickerScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val pathStack = remember { mutableStateListOf(initialPath) }
 
+    val userSpaceRoot = remember {
+        Environment.getExternalStorageDirectory().absolutePath  // /storage/emulated/0
+    }
+
     // 返回键处理：返回上级目录或退出
     BackHandler {
         if (pathStack.size > 1) {
@@ -190,8 +194,8 @@ fun DirectoryPickerScreen(
                 }
             }
 
-            // 返回上级按钮
-            if (pathStack.size > 1) {
+            // 返回上级按钮（非root模式，pathStack > 1 时显示）
+            if (pathStack.size > 1 && !isRooted) {
                 TextButton(
                     onClick = {
                         pathStack.removeAt(pathStack.size - 1)
@@ -201,11 +205,7 @@ fun DirectoryPickerScreen(
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "返回",
-                        modifier = Modifier.size(14.dp)
-                    )
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("返回上级目录")
                 }
@@ -215,33 +215,16 @@ fun DirectoryPickerScreen(
             // 目录列表
             when {
                 loading -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 }
                 error != null -> {
-                    Text(
-                        text = error!!,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(16.dp)
-                    )
-                }
-                directories.isEmpty() -> {
-                    Text(
-                        text = "此目录下没有子文件夹",
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text(error!!, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
                 }
                 else -> {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        // Root 模式下允许往上层路径导航
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        // Root 模式：显示 .. 条目（可以一直往上到根）
                         if (isRooted) {
                             val parentFile = File(currentPath).parentFile
                             if (parentFile != null) {
@@ -250,10 +233,7 @@ fun DirectoryPickerScreen(
                                         headlineContent = { Text("..", fontWeight = FontWeight.Bold) },
                                         supportingContent = { Text(parentFile.absolutePath) },
                                         leadingContent = {
-                                            Icon(
-                                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                                contentDescription = "上级目录"
-                                            )
+                                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "上级目录")
                                         },
                                         modifier = Modifier.clickable {
                                             pathStack.add(parentFile.absolutePath)
@@ -265,21 +245,29 @@ fun DirectoryPickerScreen(
                             }
                         }
 
-                        items(directories, key = { it.absolutePath }) { dir ->
-                            ListItem(
-                                headlineContent = { Text(dir.name) },
-                                leadingContent = {
-                                    Icon(
-                                        imageVector = Icons.Default.Folder,
-                                        contentDescription = "文件夹"
-                                    )
-                                },
-                                modifier = Modifier.clickable {
-                                    pathStack.add(dir.absolutePath)
-                                    currentPath = dir.absolutePath
-                                }
-                            )
-                            HorizontalDivider()
+                        if (directories.isEmpty()) {
+                            item {
+                                Text(
+                                    "此目录下没有子文件夹",
+                                    modifier = Modifier.padding(16.dp),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        } else {
+                            items(directories, key = { it.absolutePath }) { dir ->
+                                ListItem(
+                                    headlineContent = { Text(dir.name) },
+                                    leadingContent = {
+                                        Icon(Icons.Default.Folder, "文件夹")
+                                    },
+                                    modifier = Modifier.clickable {
+                                        pathStack.add(dir.absolutePath)
+                                        currentPath = dir.absolutePath
+                                    }
+                                )
+                                HorizontalDivider()
+                            }
                         }
                     }
                 }

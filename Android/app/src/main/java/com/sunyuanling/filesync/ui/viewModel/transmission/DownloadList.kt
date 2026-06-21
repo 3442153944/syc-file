@@ -20,6 +20,7 @@ import com.sunyuanling.filesync.dataClass.DownloadItem
 import com.sunyuanling.filesync.dataClass.DownloadStatus
 import com.sunyuanling.filesync.ui.components.notice.DownloadNotificationHelper
 import com.sunyuanling.filesync.ui.viewModel.data.DownloadRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -218,42 +219,49 @@ class DownloadListViewModel(application: Application) : AndroidViewModel(applica
 
                     .setOnProgressListener { progress ->
                         val now = System.currentTimeMillis()
-                        if (now - lastUpdateTime < 200) return@setOnProgressListener  // 200ms 限频
+                        if (now - lastUpdateTime < 200) return@setOnProgressListener
                         lastUpdateTime = now
 
-                        val percent = if (progress.totalBytes > 0) {
-                            ((progress.currentBytes * 100) / progress.totalBytes).toInt()
-                        } else 0
+                        val percent = if (progress.totalBytes > 0)
+                            ((progress.currentBytes * 100) / progress.totalBytes).toInt() else 0
+                        val speed = progress.currentBytes / ((System.currentTimeMillis() - item.createTime) / 1000 + 1)
 
-                        val elapsedSeconds =
-                            (System.currentTimeMillis() - item.createTime) / 1000 + 1
-                        val speed = progress.currentBytes / elapsedSeconds
+                        // 状态更新走 viewModelScope（主线程）
+                        viewModelScope.launch {
+                            updateDownloadItem(item.downloadId) {
+                                it.copy(
+                                    totalSize = progress.totalBytes,
+                                    downloadedSize = progress.currentBytes,
+                                    progress = percent,
+                                    speed = speed,
+                                    status = DownloadStatus.Downloading,
+                                    updateTime = System.currentTimeMillis()
+                                )
+                            }
+                        }
 
-                        updateDownloadItem(item.downloadId) {
-                            it.copy(
-                                totalSize = progress.totalBytes,
-                                downloadedSize = progress.currentBytes,
-                                progress = (percent.toFloat() / 100f).toInt(),  // 注意你的 progress 是 Float 0-1
-                                status = DownloadStatus.Downloading,
-                                updateTime = System.currentTimeMillis()
+                        // 通知走 IO 线程
+                        viewModelScope.launch(Dispatchers.IO) {
+                            DownloadNotificationHelper.showProgress(
+                                context, notificationId, item.fileName,
+                                percent, progress.currentBytes, progress.totalBytes, speed
                             )
                         }
-                        DownloadNotificationHelper.showProgress(
-                            context, notificationId,
-                            item.fileName, percent,
-                            progress.currentBytes, progress.totalBytes, speed
-                        )
                     }
                     .start(object : OnDownloadListener {
                         override fun onDownloadComplete() {
                             Log.d(TAG, "下载完成: ${item.fileName}")
                             val updated = _downloadList.find { it.downloadId == item.downloadId }
-                            updateDownloadItem(item.downloadId) { it.copy(
-                                status = DownloadStatus.Completed,
-                                progress = 100,
-                                updateTime = System.currentTimeMillis()
-                            )}
+                            updateDownloadItem(item.downloadId) {
+                                it.copy(
+                                    status = DownloadStatus.Completed,
+                                    progress = 100,
+                                    updateTime = System.currentTimeMillis()
+                                )
+                            }
                             activeDownloadIds.remove(item.downloadId)
+                            // 完成后从 Repository 移除（不再是活跃下载）
+                            DownloadRepository.removeDownload(item.downloadId)
                             DownloadNotificationHelper.showComplete(
                                 context, notificationId,
                                 item.fileName,

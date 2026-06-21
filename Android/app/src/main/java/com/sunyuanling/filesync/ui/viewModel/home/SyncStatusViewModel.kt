@@ -20,7 +20,6 @@ class SyncStatusViewModel : ViewModel() {
 
     init {
         observeWsState()
-        WebSocketManager.connect()
     }
 
     private fun observeWsState() {

@@ -29,6 +29,6 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client) {
 		// 需要登录的路由都注册在这里
 		file.RegisterFileRouter(private, db, redisClient)
 		private.POST("/user/update-info", user.HandlerFuncUpdateUserInfo(db, redisClient))
-		ws.RegisterWSRouter(private, db)
+		ws.RegisterWSRouter(private, db, redisClient)
 	}
 }

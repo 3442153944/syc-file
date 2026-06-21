@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
+	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 )
@@ -50,6 +52,7 @@ func (h *HTTPHandler) Connect(c *gin.Context) {
 		return
 	}
 
+	// Query 参数：基础设备信息
 	var req struct {
 		DeviceID   string `form:"device_id"`
 		DeviceType string `form:"device_type"`
@@ -58,6 +61,20 @@ func (h *HTTPHandler) Connect(c *gin.Context) {
 		AppVersion string `form:"app_version"`
 	}
 	_ = c.ShouldBindQuery(&req)
+
+	// Header 里取详细设备信息（JSON 格式，客户端序列化后放进去）
+	// 或者直接从 Query 里单独取每个字段也行
+	var driverDetailInfo device_store.DriverDetailInfo
+	if raw := c.GetHeader("X-Device-Info"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &driverDetailInfo)
+	}
+
+	// 升级 WebSocket
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		logger.Logger.Error("WebSocket升级失败", zap.Uint("user_id", userID), zap.Error(err))
+		return
+	}
 
 	deviceInfo := &DeviceInfo{
 		DeviceID:   req.DeviceID,
@@ -68,17 +85,24 @@ func (h *HTTPHandler) Connect(c *gin.Context) {
 		Status:     DeviceStatusOnline,
 	}
 
-	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		logger.Logger.Error("WebSocket升级失败", zap.Uint("user_id", userID), zap.Error(err))
-		return
-	}
-
 	connection := NewConnection(userID, conn, h.hub, deviceInfo)
 	connection.IP = c.ClientIP()
 	connection.SetMetadata("username", user.Username)
 	connection.SetMetadata("role", user.Role)
-	connection.Start()
+
+	// 服务端填充，不从客户端取
+	driverDetailInfo.ConnID = connection.ID
+	driverDetailInfo.UserID = userID
+	driverDetailInfo.DeviceID = req.DeviceID // 以 Query 参数为准
+	driverDetailInfo.DeviceName = req.DeviceName
+	driverDetailInfo.AppVersion = req.AppVersion
+
+	// 存 Redis
+	if err := device_store.Global.Online(context.Background(), driverDetailInfo); err != nil {
+		logger.Logger.Error("设备上线记录失败", zap.Error(err))
+	}
+
+	connection.Start() // 放最后，开始阻塞读写
 }
 
 func (h *HTTPHandler) GetOnlineUsers(c *gin.Context) {

@@ -2,12 +2,12 @@ package ws
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
-func RegisterWSRouter(rg *gin.RouterGroup, db *gorm.DB) {
+func RegisterWSRouter(rg *gin.RouterGroup, db *gorm.DB, r *redis.Client) {
 	h := NewHTTPHandler(db)
-	InitWS(db)
 
 	ws := rg.Group("/ws")
 	ws.GET("/connect", h.Connect)

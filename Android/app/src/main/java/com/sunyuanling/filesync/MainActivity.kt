@@ -176,7 +176,7 @@ fun FileSyncApp(startDestination: Any) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> scope.launch {
-                    if (Request.hasToken()) WebSocketManager.connect()
+                    if (Request.hasToken()) WebSocketManager.connect(context)
                 }
                 Lifecycle.Event.ON_STOP -> WebSocketManager.disconnect()
                 else -> {}

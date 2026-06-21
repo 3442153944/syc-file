@@ -63,7 +63,7 @@ fun HomeScreen(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "文件同步",
-                        fontSize = 28.sp,
+                        fontSize = 24.sp,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
