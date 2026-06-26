@@ -1,22 +1,13 @@
-import {request} from "@syl/base-request"
+import { login as apiLogin, verify as apiVerify } from '@/api/user/userApi'
 
 export const useLogin = () => {
-    async function login(data: any) {
-        return await request.post("user/login", data, {
-            showError: true,
-            rethrow: true
-        })
+    async function login(data: { username: string; password: string }) {
+        return await apiLogin(data.username, data.password)
     }
 
     async function verify() {
-        return await request.post("user/verify", {}, {
-            showError: true,
-            rethrow: true
-        })
+        return await apiVerify()
     }
 
-    return {
-        login,
-        verify
-    }
+    return { login, verify }
 }

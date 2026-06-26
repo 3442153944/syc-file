@@ -1,4 +1,12 @@
-use crate::sync_config::SharedSyncConfig;
+// upload_worker.rs
+// 职责：文件上传 worker 池。
+// 只做调度：从 channel 取任务 → 调 api::file + api::sync，不含路由字符串。
+use crate::api::{
+    client::ApiClient,
+    file::{api as file_api, params::{CheckFileParams, DownloadParams}},
+    sync::{api as sync_api, params::NotifyParams},
+};
+use crate::config::SharedSyncConfig;
 use reqwest::multipart;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -37,32 +45,29 @@ pub fn start_upload_workers(
         let app = app.clone();
         tokio::spawn(async move {
             loop {
-                let task = {
-                    let mut guard = rx.lock().await;
-                    guard.recv().await
-                };
+                let task = { rx.lock().await.recv().await };
                 match task {
                     None => break,
-                    Some(t) => upload_file(&t, &config, &app).await,
+                    Some(t) => upload_file(t, &config, &app).await,
                 }
             }
         });
     }
-
     tx
 }
 
-async fn upload_file(task: &UploadTask, config: &SharedSyncConfig, app: &AppHandle) {
+async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandle) {
     let path_str = task.local_path.to_string_lossy().to_string();
 
     let (server_url, token, device_id) = {
         let cfg = config.read();
         (cfg.server_url.clone(), cfg.token.clone(), cfg.device_id.clone())
     };
-
     if server_url.is_empty() || token.is_empty() {
         return;
     }
+
+    let client = ApiClient::new(&server_url, &token);
 
     let file_name = match task.local_path.file_name() {
         Some(n) => n.to_string_lossy().to_string(),
@@ -77,83 +82,63 @@ async fn upload_file(task: &UploadTask, config: &SharedSyncConfig, app: &AppHand
             return;
         }
     };
-
     let file_hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(&data);
-        hex::encode(hasher.finalize())
+        let mut h = Sha256::new();
+        h.update(&data);
+        hex::encode(h.finalize())
     };
     let file_size = data.len() as i64;
 
     emit_progress(app, &path_str, "uploading", None);
 
-    // 1. 先上传文件字节
-    let file_part = multipart::Part::bytes(data.clone())
+    // 1. 上传文件字节（multipart）
+    let file_part = multipart::Part::bytes(data)
         .file_name(file_name.clone())
         .mime_str("application/octet-stream")
         .unwrap();
-
     let form = multipart::Form::new()
         .text("path", task.remote_dir.clone())
         .text("name", file_name.clone())
         .text("action", "upload")
         .part("file", file_part);
 
-    let client = reqwest::Client::new();
-    let upload_url = format!("{}/v1/file/upload", server_url);
-
-    let upload_ok = match client
-        .post(&upload_url)
-        .header("Token", &token)
-        .multipart(form)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => true,
+    match file_api::upload_file(&client, form).await {
+        Ok(resp) if resp.is_ok() => {}
         Ok(resp) => {
-            emit_progress(app, &path_str, "error", Some(format!("HTTP {}", resp.status())));
-            false
+            emit_progress(app, &path_str, "error", Some(resp.message));
+            return;
         }
         Err(e) => {
-            emit_progress(app, &path_str, "error", Some(e.to_string()));
-            false
+            emit_progress(app, &path_str, "error", Some(e));
+            return;
         }
-    };
-
-    if !upload_ok {
-        return;
     }
 
-    // 2. 上传成功后，上报 file_changed（WS 或 HTTP /sync/notify 回退）
+    // 2. 上传成功后上报 file_changed（HTTP 回退）
     let mtime = task
         .local_path
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+        .map(|d| d.as_secs() as i64);
 
-    let notify_body = serde_json::json!({
-        "device_id": device_id,
-        "folder_id": task.folder_id,
-        "relative_path": task.relative_path,
-        "file_name": file_name,
-        "action": "modify",
-        "file_size": file_size,
-        "file_hash": file_hash,
-        "is_dir": false,
-        "mtime": mtime,
-    });
-
-    let notify_url = format!("{}/v1/sync/notify", server_url);
-    client
-        .post(&notify_url)
-        .header("Token", &token)
-        .json(&notify_body)
-        .send()
-        .await
-        .ok();
+    sync_api::notify(
+        &client,
+        NotifyParams {
+            device_id,
+            folder_id: task.folder_id,
+            relative_path: task.relative_path,
+            file_name,
+            action: "modify".into(),
+            file_size: Some(file_size),
+            file_hash: Some(file_hash),
+            is_dir: false,
+            mtime,
+        },
+    )
+    .await
+    .ok();
 
     emit_progress(app, &path_str, "done", None);
 }

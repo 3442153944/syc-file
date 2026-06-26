@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import {ref, onMounted} from "vue"
-import {request} from "@syl/base-request"
+import {getAvailableDisks} from "@/api/file/fileApi"
+import type {DiskInfo} from "@/api/file/fileTypes"
 import {
   NSpin, NGrid, NGi, NCard, NProgress,
-  NSpace, NTag, NButton, NEmpty
+  NSpace, NButton, NEmpty
 } from "naive-ui"
-import {DiskInfo} from "@syl/models"
 import {useRouter} from "vue-router"
 
 const router = useRouter()
@@ -15,12 +15,8 @@ const loading = ref(false)
 onMounted(async () => {
   loading.value = true
   try {
-    // 调用封装好的 request 获取数据
-    const res = await request.post("/files/available-disks")
-    // 渲染所有的磁盘 (all_disks)
-    if (res && res.all_disks) {
-      disk_list.value = res.all_disks
-    }
+    const res = await getAvailableDisks()
+    disk_list.value = res.all_disks
   } catch (error) {
     console.error("获取磁盘列表失败", error)
   } finally {
@@ -68,12 +64,7 @@ const getProgressColor = (percent: number) => {
                 <span class="disk-path">本地磁盘 ({{ disk.path }})</span>
               </div>
               <n-space size="small">
-                <n-tag size="small" :type="disk.is_ssd ? 'success' : 'info'" :bordered="false">
-                  {{ disk.is_ssd ? 'SSD' : 'HDD' }}
-                </n-tag>
-                <n-tag size="small" type="default" :bordered="false">
-                  {{ disk.fstype }}
-                </n-tag>
+                <n-button size="tiny" quaternary>{{ disk.mountpoint }}</n-button>
               </n-space>
             </div>
 

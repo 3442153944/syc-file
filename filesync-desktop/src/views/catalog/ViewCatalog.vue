@@ -3,9 +3,9 @@ import {onMounted, h} from "vue"
 import {useRoute, useRouter} from "vue-router"
 import {storeToRefs} from "pinia"
 import {useCatalogStore} from "./composeables/useCatalogStore"
-import {NDataTable, NButton, NSpace, NEmpty, NTag, useMessage} from "naive-ui"
+import {NDataTable, NButton, NSpace, NEmpty, useMessage} from "naive-ui"
 import type {DataTableColumns} from "naive-ui"
-import type {FileItem} from "@syl/models"
+import type {FileItem} from "@/api/file/fileTypes"
 
 const route = useRoute()
 const router = useRouter()
@@ -100,26 +100,26 @@ const columns: DataTableColumns<FileItem> = [
       return formatTime(row.mod_time)
     }
   },
-  {
-    title: "属性",
-    key: "mode",
-    render(row) {
-      const perms = catalogStore.parseMode(row.mode)
-      return h(
-          NSpace,
-          {size: 'small'},
-          {
-            default: () => perms.map(p =>
-                h(
-                    NTag,
-                    {size: "small", type: p.type as any, bordered: false},
-                    {default: () => p.label}
-                )
-            )
-          }
-      )
-    }
-  },
+  // {
+  //   title: "属性",
+  //   key: "mode",
+  //   render(row) {
+  //     const perms = catalogStore.parseMode(row.mode)
+  //     return h(
+  //         NSpace,
+  //         {size: 'small'},
+  //         {
+  //           default: () => perms.map(p =>
+  //               h(
+  //                   NTag,
+  //                   {size: "small", type: p.type as any, bordered: false},
+  //                   {default: () => p.label}
+  //               )
+  //           )
+  //         }
+  //     )
+  //   }
+  // },
   {
     title: "包含项",
     key: "children_count",

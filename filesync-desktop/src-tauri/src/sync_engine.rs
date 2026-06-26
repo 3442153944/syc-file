@@ -1,4 +1,5 @@
-use crate::sync_config::SharedSyncConfig;
+use crate::config::SharedSyncConfig;
+use crate::api::{client::ApiClient, sync::api as sync_api};
 use crate::upload_worker::{start_upload_workers, UploadTask};
 use crate::ws_client::start_ws_client;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -163,6 +164,8 @@ async fn report_delete(
     path: &PathBuf,
     app: &AppHandle,
 ) {
+    use crate::api::sync::params::NotifyParams;
+
     let (server_url, token, device_id) = {
         let cfg = config.read();
         (cfg.server_url.clone(), cfg.token.clone(), cfg.device_id.clone())
@@ -171,36 +174,25 @@ async fn report_delete(
         return;
     }
 
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let client = ApiClient::new(&server_url, &token);
 
-    let body = serde_json::json!({
-        "device_id": device_id,
-        "folder_id": folder_id,
-        "relative_path": relative_path,
-        "file_name": file_name,
-        "action": "delete",
-        "is_dir": false,
-    });
+    sync_api::notify(&client, NotifyParams {
+        device_id,
+        folder_id,
+        relative_path: relative_path.to_string(),
+        file_name,
+        action: "delete".into(),
+        file_size: None,
+        file_hash: None,
+        is_dir: false,
+        mtime: None,
+    }).await.ok();
 
-    reqwest::Client::new()
-        .post(format!("{}/v1/sync/notify", server_url))
-        .header("Token", &token)
-        .json(&body)
-        .send()
-        .await
-        .ok();
-
-    app.emit(
-        "sync-event",
-        SyncEvent {
-            path: path.to_string_lossy().to_string(),
-            kind: "delete".into(),
-        },
-    )
-    .ok();
+    app.emit("sync-event", SyncEvent {
+        path: path.to_string_lossy().to_string(),
+        kind: "delete".into(),
+    }).ok();
 }
 
 pub fn engine_watch_path(engine: &SharedSyncEngine, path: PathBuf) -> Result<(), String> {

@@ -1,29 +1,17 @@
 import {ref} from 'vue'
-import {request} from '@syl/base-request'
+import {register as apiRegister} from '@/api/user/userApi'
 
 export const useRegister = () => {
     const loading = ref(false)
 
-    async function register(data: {
-        username?: string
-        password: string
-        email?: string
-        phone?: string
-        avatar?: string
-    }) {
+    async function register(data: { username: any; password: any; email: any; phone: any }) {
         loading.value = true
         try {
-            return await request.post('user/register', data, {
-                showError: true,
-                rethrow: true,
-            })
+            return await apiRegister(data.username, data.password, data.email)
         } finally {
             loading.value = false
         }
     }
 
-    return {
-        loading,
-        register,
-    }
+    return {loading, register}
 }

@@ -1,5 +1,6 @@
 import {defineConfig, loadEnv} from "vite";
 import vue from "@vitejs/plugin-vue";
+import {resolve} from "path";
 import VueDevTools from 'vite-plugin-vue-devtools'
 import VueSetupExtend from 'vite-plugin-vue-setup-extend'
 import checker from 'vite-plugin-checker'
@@ -30,6 +31,12 @@ export default defineConfig(async ({mode}) => {
             }),
             VueSetupExtend()
         ],
+
+        resolve: {
+            alias: {
+                '@': resolve(__dirname, './src'),
+            },
+        },
 
         // Vite options tailored for Tauri development
         clearScreen: false,

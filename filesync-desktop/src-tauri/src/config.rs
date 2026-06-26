@@ -1,6 +1,9 @@
+// config.rs
+// 职责：SyncConfig 状态定义与 Tauri managed state 初始化。
+// 不含业务逻辑，不含 device_id 生成（见 device.rs）。
+use crate::device;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,7 +11,6 @@ pub struct SyncConfig {
     pub server_url: String,
     pub ws_url: String,
     pub token: String,
-    /// 机器唯一标识（sha256[:16]），WS 连接时带上，用于任务定向派发
     pub device_id: String,
     pub device_name: String,
     pub folder_mappings: Vec<FolderMapping>,
@@ -28,35 +30,16 @@ pub struct FolderMapping {
 impl Default for SyncConfig {
     fn default() -> Self {
         SyncConfig {
-            server_url: String::new(),
-            ws_url: String::new(),
+            server_url: "http://localhost:8991".into(),
+            ws_url: "ws://localhost:8991".into(),
             token: String::new(),
-            device_id: generate_device_id(),
-            device_name: hostname(),
+            device_id: device::generate_device_id(),
+            device_name: device::hostname(),
             folder_mappings: vec![],
             upload_workers: 2,
             debounce_ms: 500,
         }
     }
-}
-
-/// 生成稳定设备 ID：机器名 + 用户名 → sha256 前 16 字符
-pub fn generate_device_id() -> String {
-    let raw = format!("{}-{}", hostname(), username());
-    let hash = Sha256::digest(raw.as_bytes());
-    hex::encode(&hash[..8]) // 16 hex chars
-}
-
-fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "unknown-host".into())
-}
-
-fn username() -> String {
-    std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "unknown-user".into())
 }
 
 pub type SharedSyncConfig = Arc<RwLock<SyncConfig>>;

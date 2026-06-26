@@ -43,10 +43,11 @@ const handleReset = async () => {
   }
 
   await resetPassword({
+    old_password: "",
     username: form.value.username || undefined,
     email: form.value.email || undefined,
     phone: form.value.phone || undefined,
-    new_password: form.value.new_password,
+    new_password: form.value.new_password
   })
 
   message.success('密码重置成功')
