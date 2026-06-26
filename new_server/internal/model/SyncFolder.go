@@ -7,7 +7,7 @@ type SyncFolder struct {
 	UserID        uint      `gorm:"not null;index" json:"user_id"`
 	Name          string    `gorm:"size:100" json:"name"`
 	LocalPath     string    `gorm:"size:1000;not null" json:"local_path"`
-	RemotePath    string    `gorm:"size:1000;not null;index" json:"remote_path"`
+	RemotePath    string    `gorm:"size:1000;not null" json:"remote_path"`
 	Direction     string    `gorm:"size:20;not null;default:two_way" json:"direction"`
 	Enabled       bool      `gorm:"not null;default:true;index" json:"enabled"`
 	Excludes      string    `gorm:"type:text" json:"excludes"`

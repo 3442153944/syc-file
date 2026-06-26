@@ -58,7 +58,7 @@ Header: Token: <jwt>   (可选，query token 为主)
 
 ### 2.2 消息信封
 ```json
-{"id":"<uuid>","type":"file_sync","content":{...},"timestamp":1700000000}
+{"id":"<uuid>","type":"file_sync","content":{"..."},"timestamp":1700000000}
 ```
 Rust 只需解析 `type` 与 `content`。`type=="file_sync"` 走同步协议，其它忽略。
 
