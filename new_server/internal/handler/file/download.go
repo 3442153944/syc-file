@@ -230,35 +230,7 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 }
 
 func isPathAllowedDownload(path string) bool {
-	cleanPath := filepath.Clean(path)
-
-	if !filepath.IsAbs(cleanPath) {
-		return false
-	}
-
-	for _, allowed := range config.Conf.GetAllowedPaths() {
-		allowedClean := filepath.Clean(allowed)
-		cleanUpper := strings.ToUpper(cleanPath)
-		allowedUpper := strings.ToUpper(allowedClean)
-
-		// 单独处理盘符：D:. 或 D:\ 表示整个盘都允许
-		if len(allowedUpper) <= 3 && len(allowedUpper) >= 2 && allowedUpper[1] == ':' {
-			drive := allowedUpper[:2]
-			if strings.HasPrefix(cleanUpper, drive+`\`) || strings.HasPrefix(cleanUpper, drive+`/`) {
-				return true
-			}
-			continue
-		}
-
-		// 普通目录前缀匹配
-		if strings.HasPrefix(cleanUpper, allowedUpper) {
-			rest := cleanUpper[len(allowedUpper):]
-			if rest == "" || rest[0] == filepath.Separator {
-				return true
-			}
-		}
-	}
-	return false
+	return config.Conf.IsPathAllowed(path)
 }
 
 func getMimeType(filename string) string {

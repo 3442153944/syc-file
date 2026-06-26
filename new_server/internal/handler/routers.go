@@ -8,10 +8,11 @@ import (
 	"syc-file/internal/handler/file"
 	"syc-file/internal/handler/user"
 	"syc-file/internal/middleware"
+	"syc-file/internal/sync"
 	"syc-file/internal/ws"
 )
 
-func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client) {
+func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engine *sync.Engine) {
 	v1 := r.Group("/v1")
 	v1.Use(middleware.AuthToken())
 	public := v1.Group("")
@@ -30,5 +31,6 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client) {
 		file.RegisterFileRouter(private, db, redisClient)
 		private.POST("/user/update-info", user.HandlerFuncUpdateUserInfo(db, redisClient))
 		ws.RegisterWSRouter(private, db, redisClient)
+		sync.RegisterSyncRouter(private, engine)
 	}
 }

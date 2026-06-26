@@ -12,6 +12,7 @@ import (
 	"syc-file/internal/handler"
 	"syc-file/internal/middleware"
 	"syc-file/internal/model"
+	"syc-file/internal/sync"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
@@ -78,6 +79,7 @@ func main() {
 		&model.OperationLog{},
 		&model.StorageConfig{},
 		&model.ShareRecord{},
+		&model.SyncFolder{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
@@ -100,13 +102,16 @@ func main() {
 	//初始化设备状态Redis存储
 	device_store.Init(redisClient)
 
+	//初始化文件同步引擎（Redis队列 + worker）
+	syncEngine := sync.InitSync(db, redisClient, config.Conf.Sync)
+
 	// 4. 注册路由
 	r.GET("/ping", func(c *gin.Context) {
 		// 在业务代码里打印日志的正确姿势
 		logger.Logger.Info("收到 ping 请求")
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
-	handler.RegisterRouters(r, db, redisClient)
+	handler.RegisterRouters(r, db, redisClient, syncEngine)
 
 	// 5. 启动服务
 	addr := fmt.Sprintf(":%d", config.Conf.Server.Port)

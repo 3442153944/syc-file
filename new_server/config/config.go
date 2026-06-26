@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -20,6 +21,7 @@ type Config struct {
 	Redis     RedisConfig  `mapstructure:"redis"`
 	File      FileConfig   `mapstructure:"file"`
 	User      UserCfg      `mapstructure:"user"`
+	Sync      SyncConfig   `mapstructure:"sync"`
 }
 
 // DBConfig 数据库配置 (注意：这里将 uri 拆分为 host 和 port 以适配 GORM)
@@ -93,6 +95,16 @@ type UserCfg struct {
 	MaxSize           int64    `mapstructure:"max_size"`
 }
 
+// SyncConfig 文件同步引擎配置
+type SyncConfig struct {
+	WorkerConcurrency   int    `mapstructure:"worker_concurrency"`
+	MaxRetry            int    `mapstructure:"max_retry"`
+	LockTTLSeconds      int    `mapstructure:"lock_ttl_seconds"`
+	QueueTimeoutSeconds int    `mapstructure:"queue_timeout_seconds"`
+	TaskTimeoutSeconds  int    `mapstructure:"task_timeout_seconds"`
+	ConflictSuffix      string `mapstructure:"conflict_suffix"`
+}
+
 // IsExtensionAllowed 检查文件扩展名是否允许上传
 func (c *Config) IsExtensionAllowed(ext string) bool {
 	ext = strings.ToLower(ext)
@@ -115,12 +127,28 @@ func (c *Config) IsExtensionAllowed(ext string) bool {
 	return false
 }
 
-// IsPathAllowed 检查路径是否在允许列表中
+// IsPathAllowed 检查路径是否落在允许的盘符/目录前缀内（大小写不敏感）
 func (c *Config) IsPathAllowed(path string) bool {
-	path = strings.ToUpper(path)
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		return false
+	}
 	for _, allowed := range c.File.AllowedPaths {
-		if strings.ToUpper(allowed) == path {
-			return true
+		allowedClean := filepath.Clean(allowed)
+		cleanUpper := strings.ToUpper(cleanPath)
+		allowedUpper := strings.ToUpper(allowedClean)
+		if len(allowedUpper) <= 3 && len(allowedUpper) >= 2 && allowedUpper[1] == ':' {
+			drive := allowedUpper[:2]
+			if strings.HasPrefix(cleanUpper, drive+`\`) || strings.HasPrefix(cleanUpper, drive+`/`) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(cleanUpper, allowedUpper) {
+			rest := cleanUpper[len(allowedUpper):]
+			if rest == "" || rest[0] == filepath.Separator {
+				return true
+			}
 		}
 	}
 	return false

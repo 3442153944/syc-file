@@ -76,3 +76,12 @@ user:
     - ".png"
     - ".gif"
   max_size: 50485760              # 最大头像大小 50MB（字节）
+
+# 文件同步引擎配置
+sync:
+  worker_concurrency: 4          # worker goroutine 数量
+  max_retry: 3                   # 任务最大重试次数
+  lock_ttl_seconds: 300          # 文件锁 TTL（秒）
+  queue_timeout_seconds: 5       # BRPOP 阻塞超时（秒）
+  task_timeout_seconds: 600      # 单任务执行超时（秒），超时后重试
+  conflict_suffix: "conflict"    # 冲突文件保留后缀

@@ -53,6 +53,13 @@ func InitWS(db *gorm.DB) *WSHandler {
 func registerDefaultHandlers(hub *Hub) {
 	hub.RegisterHandler(MessageTypeFileSync, func(conn *Connection, msg *Message) {
 		logger.Logger.Debug("收到文件同步消息", zap.String("conn_id", conn.ID), zap.Uint("user_id", conn.UserID))
+		var content map[string]interface{}
+		if err := json.Unmarshal(msg.Content, &content); err == nil {
+			if event, ok := content["event"].(string); ok && event != "" && fileSyncHandler != nil {
+				fileSyncHandler(conn, msg, event, content)
+				return
+			}
+		}
 		if msg.Target != nil {
 			hub.RouteMessage(conn, msg)
 		}

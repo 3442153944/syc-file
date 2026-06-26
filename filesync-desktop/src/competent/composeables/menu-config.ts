@@ -30,6 +30,20 @@ export const useMenuConfig=()=>{
             ]
         },
         {
+            name: "同步监听",
+            path: "/sync",
+            icon: "sync",
+            click: () => router.push("/sync"),
+            children: [
+                {
+                    name: "目录监听",
+                    path: "/sync/watch",
+                    icon: "sync",
+                    click: () => router.push("/sync/watch"),
+                }
+            ]
+        },
+        {
             name: "系统监控",
             path: "/monitor",
             icon: "setting",

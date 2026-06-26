@@ -15,6 +15,7 @@
     "@syl/icon": "workspace:*",
     "@syl/models": "workspace:*",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
     "@vue/devtools": "^8.0.5",
     "element-plus": "^2.13.0",

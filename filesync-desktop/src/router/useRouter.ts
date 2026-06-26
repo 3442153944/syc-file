@@ -8,7 +8,7 @@ export const router = createRouter({
             path: "/",
             name: "Home",
             component: () => import("../competent/home.vue"),
-            redirect: "/dashboard", // 默认重定向
+            redirect: "/dashboard",
             children: [
                 {
                     path: "dashboard",
@@ -39,6 +39,11 @@ export const router = createRouter({
                     path: "monitor/network",
                     name: "MonitorNetwork",
                     component: () => import("../views/monitor/Network.vue")
+                },
+                {
+                    path: "sync/watch",
+                    name: "SyncWatch",
+                    component: () => import("../views/sync/SyncWatch.vue")
                 }
             ]
         },
@@ -57,8 +62,6 @@ export const router = createRouter({
             name: "ResetPassword",
             component: () => import("../competent/resetPassword/resetPassword.vue")
         },
-
-        // 捕获所有未匹配路由，重定向到首页
         {
             path: "/:pathMatch(.*)*",
             name: "NotFound",
@@ -67,16 +70,12 @@ export const router = createRouter({
     ]
 })
 
-//路由守卫增强
 router.beforeEach(async (to, _from, next) => {
     const token = localStorage.getItem("token")
-
-    // 不需要登录的页面
     const publicPages = ['/login', '/register', '/reset']
 
     if (publicPages.includes(to.path)) {
         if (token) {
-            // 已登录就直接去首页
             next('/')
         } else {
             next()
@@ -84,7 +83,6 @@ router.beforeEach(async (to, _from, next) => {
         return
     }
 
-    // 其余页面需要登录
     if (!token) {
         next('/login')
         return
@@ -93,9 +91,7 @@ router.beforeEach(async (to, _from, next) => {
     next()
 })
 
-// 路由错误处理
 router.onError(async (error) => {
     console.error("路由错误:", error)
-    // 路由加载失败，回到首页
     await router.push("/")
 })
