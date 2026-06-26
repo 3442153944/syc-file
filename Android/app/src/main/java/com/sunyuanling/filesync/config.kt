@@ -65,6 +65,14 @@ object AppConfig {
     /** 同步时是否只在 Wi-Fi 下进行 */
     var syncOnWifiOnly = true
 
+    /**
+     * 持久化续传总开关（默认关）。
+     * 开启后：未完成下载任务持久化到本地，app 被结束/重启后自动恢复续传
+     * （基于 PRDownloader 的 resume DB）。仅 Root 模式下在设置页可见。
+     * 这也是后续"定时同步/文件夹实时同步"引擎的地基。
+     */
+    var persistentDownloadEnabled = false
+
     // ==================== 日志 ====================
 
     /** 本地日志记录级别 */

@@ -207,7 +207,7 @@ fun HomeScreen(
                                 Icon(
                                     imageVector = when (device.deviceType) {
                                         DeviceType.COMPUTER -> Icons.Default.Computer
-                                        DeviceType.SMARTPHONE -> Icons.Default.PhoneAndroid
+                                        DeviceType.SMARTPHONE -> Icons.Default.Phone
                                         else -> Icons.Default.Devices
                                     },
                                     contentDescription = null,

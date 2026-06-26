@@ -36,6 +36,7 @@ import com.sunyuanling.filesync.network.AuthManager
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.ui.components.serverSetting.ConfigManager
 import com.sunyuanling.filesync.ui.theme.FileSyncTheme
+import com.sunyuanling.filesync.ui.viewModel.data.DownloadController
 import com.sunyuanling.filesync.util.FileLogger
 import com.sunyuanling.filesync.util.FileLoggerConfig
 import com.sunyuanling.filesync.util.PermissionHelper
@@ -80,6 +81,8 @@ class MainActivity : ComponentActivity() {
             .setConnectTimeout(30_000)
             .build()
         PRDownloader.initialize(applicationContext, config)
+        // 下载控制单例接入 Application Context（WS 观察与通知初始化）
+        DownloadController.attach(this)
 
         enableEdgeToEdge()
         setContent {

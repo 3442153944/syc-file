@@ -1,5 +1,7 @@
 package com.sunyuanling.filesync.dataClass
 
+import kotlinx.serialization.Serializable
+
 // @Serializable 数据类已迁移至 api/file/FileParams.kt（DownloadParams）和 api/file/FileResponse.kt。
 // 本文件仅保留前端 UI 模型（非序列化）。
 
@@ -22,6 +24,7 @@ enum class DownloadStatus {
 /**
  * 前端下载列表项（简化版）
  */
+@Serializable
 data class DownloadItem(
     /** 下载ID（使用 historyId 或生成唯一ID） */
     val downloadId: String,
@@ -52,6 +55,9 @@ data class DownloadItem(
 
     /** MIME 类型 */
     val mimeType: String,
+
+    /** 远端设备 ID（用于下载 URL 的 device_id，重试时复用，修原 historyId 误用） */
+    val deviceId: String? = null,
 
     /** 下载历史记录ID */
     val historyId: Int? = null,

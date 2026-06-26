@@ -9,12 +9,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.sunyuanling.filesync.MainActivity
-import com.sunyuanling.filesync.R
+import com.sunyuanling.filesync.dataClass.DownloadItem
+import com.sunyuanling.filesync.dataClass.DownloadStatus
+import com.sunyuanling.filesync.service.DownloadService
 import com.sunyuanling.filesync.util.formatFileSize
 import com.sunyuanling.filesync.util.formatSpeed
 
@@ -29,26 +30,22 @@ object DownloadNotificationHelper {
                 this, Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
         } else {
-            true // Android 13 以下不需要运行时权限
+            true
         }
     }
 
     fun createChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(NotificationManager::class.java)
-
-            // 进度通知频道：静音
             NotificationChannel(
                 CHANNEL_ID_PROGRESS,
                 "下载进度",
-                NotificationManager.IMPORTANCE_LOW  // 静音，不打扰
+                NotificationManager.IMPORTANCE_LOW
             ).also { manager.createNotificationChannel(it) }
-
-            // 完成通知频道：有提示音
             NotificationChannel(
                 CHANNEL_ID_COMPLETE,
                 "下载完成",
-                NotificationManager.IMPORTANCE_DEFAULT  // 默认声音
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "文件下载完成时通知"
                 enableVibration(true)
@@ -56,7 +53,78 @@ object DownloadNotificationHelper {
         }
     }
 
-    // 显示/更新进度通知
+    /** 前台服务启动时立即使用的基线通知（避免 5s 未 startForeground 崩溃） */
+    fun buildForegroundBase(context: Context) =
+        NotificationCompat.Builder(context, CHANNEL_ID_PROGRESS)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle("云梯下载")
+            .setContentText("下载服务运行中")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .build()
+
+    /** 根据活跃下载列表更新前台通知（含通知栏操作按钮） */
+    @SuppressLint("MissingPermission")
+    fun notifyForeground(context: Context, notificationId: Int, active: List<DownloadItem>) {
+        if (!context.hasNotificationPermission()) return
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID_PROGRESS)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+
+        if (active.size == 1) {
+            val item = active[0]
+            val speedText = if (item.status == DownloadStatus.Downloading && item.speed > 0)
+                "  ${formatSpeed(item.speed)}" else ""
+            builder.setContentTitle(item.fileName)
+                .setContentText("${formatFileSize(item.downloadedSize)} / ${formatFileSize(item.totalSize)}$speedText")
+                .setProgress(100, item.progress, item.totalSize <= 0)
+
+            when (item.status) {
+                DownloadStatus.Downloading -> {
+                    builder.addAction(0, "暂停", actionPI(context, DownloadService.ACTION_PAUSE, item.downloadId))
+                    builder.addAction(0, "取消", actionPI(context, DownloadService.ACTION_CANCEL, item.downloadId))
+                }
+                DownloadStatus.Paused -> {
+                    builder.addAction(0, "恢复", actionPI(context, DownloadService.ACTION_RESUME, item.downloadId))
+                    builder.addAction(0, "取消", actionPI(context, DownloadService.ACTION_CANCEL, item.downloadId))
+                }
+                DownloadStatus.Waiting -> {
+                    builder.addAction(0, "取消", actionPI(context, DownloadService.ACTION_CANCEL, item.downloadId))
+                }
+                else -> {}
+            }
+        } else {
+            builder.setContentTitle("正在下载 ${active.size} 个文件")
+                .setContentText("点查看传输列表")
+                .setProgress(0, 0, true)
+            val open = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            builder.setContentIntent(
+                PendingIntent.getActivity(
+                    context, 0, open,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            )
+        }
+        NotificationManagerCompat.from(context).notify(notificationId, builder.build())
+    }
+
+    private fun actionPI(context: Context, action: String, downloadId: String): PendingIntent {
+        val intent = DownloadService.commandIntent(context, action, downloadId)
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        else PendingIntent.FLAG_UPDATE_CURRENT
+        return PendingIntent.getService(
+            context, downloadId.hashCode() xor action.hashCode(), intent, flags
+        )
+    }
+
+    // 显示/更新进度通知（保留兼容；前台通知由 notifyForeground 负责）
     @SuppressLint("MissingPermission")
     fun showProgress(
         context: Context,
@@ -68,22 +136,18 @@ object DownloadNotificationHelper {
         speed: Long
     ) {
         if (!context.hasNotificationPermission()) return
-
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_PROGRESS)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(fileName)
             .setContentText("${formatFileSize(downloadedBytes)} / ${formatFileSize(totalBytes)}  ${formatSpeed(speed)}")
-            .setProgress(100, progress, totalBytes <= 0)  // totalBytes<=0 时显示不确定进度条
-            .setOngoing(true)       // 不可手动划掉
-            .setOnlyAlertOnce(true) // 只在第一次出现时响
-            .setSilent(true)        // 进度更新静音
+            .setProgress(100, progress, totalBytes <= 0)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
             .build()
-
         NotificationManagerCompat.from(context).notify(notificationId, notification)
-
     }
 
-    // 下载完成通知（有提示音）
     @SuppressLint("MissingPermission")
     fun showComplete(
         context: Context,
@@ -92,7 +156,6 @@ object DownloadNotificationHelper {
         fileSize: Long,
         filePath: String
     ) {
-        // 点击通知打开文件所在目录（或直接打开文件）
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("open_file", filePath)
@@ -101,20 +164,16 @@ object DownloadNotificationHelper {
             context, notificationId, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
         val notification = NotificationCompat.Builder(context, CHANNEL_ID_COMPLETE)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("下载完成")
             .setContentText("$fileName  ${formatFileSize(fileSize)}")
             .setContentIntent(pendingIntent)
-            .setAutoCancel(true)    // 点击后自动消失
+            .setAutoCancel(true)
             .build()
-
-        NotificationManagerCompat.from(context)
-            .notify(notificationId, notification)
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
     }
 
-    // 下载失败通知
     @SuppressLint("MissingPermission")
     fun showFailed(
         context: Context,
@@ -128,12 +187,9 @@ object DownloadNotificationHelper {
             .setContentText("$fileName：$reason")
             .setAutoCancel(true)
             .build()
-
-        NotificationManagerCompat.from(context)
-            .notify(notificationId, notification)
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
     }
 
-    // 取消通知（下载取消时移除进度条）
     fun cancel(context: Context, notificationId: Int) {
         NotificationManagerCompat.from(context).cancel(notificationId)
     }

@@ -1,5 +1,6 @@
 package com.sunyuanling.filesync.ui.screen
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -16,6 +17,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.router.MonitorListDestination
+import com.sunyuanling.filesync.router.PermissionDestination
 import com.sunyuanling.filesync.ui.viewModel.home.DevicesViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.StorageViewModel
 
@@ -58,16 +61,26 @@ fun MonitorScreen(
                 }
             }
             item {
-                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                OutlinedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { navController.navigate(MonitorListDestination) }
+                ) {
                     Row(
-                        modifier = Modifier.padding(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Icon(Icons.Default.People, contentDescription = null)
-                        Column {
+                        Icon(Icons.Default.People, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Column(modifier = Modifier.weight(1f)) {
                             Text("在线设备", fontWeight = FontWeight.Bold)
-                            Text("${onlineCount} 台", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "${onlineCount} 台",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }

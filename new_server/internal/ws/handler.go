@@ -106,6 +106,16 @@ func (h *HTTPHandler) Connect(c *gin.Context) {
 }
 
 func (h *HTTPHandler) GetOnlineUsers(c *gin.Context) {
+	claimsAny, exists := c.Get("UserInfo")
+	if !exists || claimsAny == nil {
+		c.JSON(http.StatusOK, gin.H{"code": 401, "message": "未授权", "data": nil})
+		return
+	}
+	userClaims := claimsAny.(*token.Claims)
+	if !isAdmin(userClaims.Roles) {
+		c.JSON(http.StatusOK, gin.H{"code": 403, "message": "权限不足，仅管理员可查看所有在线设备", "data": nil})
+		return
+	}
 	users := h.hub.GetOnlineUsers()
 	var userList []gin.H
 	for _, uid := range users {
@@ -289,6 +299,38 @@ func (h *HTTPHandler) GetGroupUsers(c *gin.Context) {
 	groupName := c.Param("name")
 	users := h.hub.GetGroupUsers(groupName)
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"group_name": groupName, "users": users, "count": len(users)}})
+}
+
+// GetMyDevices 返回当前用户自己的在线设备连接（所有登录用户可用）。
+// 对应前端"我的在线设备"模块。
+func (h *HTTPHandler) GetMyDevices(c *gin.Context) {
+	claimsAny, exists := c.Get("UserInfo")
+	if !exists || claimsAny == nil {
+		c.JSON(http.StatusOK, gin.H{"code": 401, "message": "未授权", "data": nil})
+		return
+	}
+	userClaims := claimsAny.(*token.Claims)
+	userID := uint(userClaims.UserID)
+	info := h.hub.GetUserConnectionsInfo(userID)
+	if info == nil {
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": &UserConnectionsInfo{
+			UserID:      userID,
+			Connections: []*ConnectionInfo{},
+			TotalCount:  0,
+		}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": info})
+}
+
+// isAdmin 判断 roles 中是否含 "admin"
+func isAdmin(roles []string) bool {
+	for _, r := range roles {
+		if r == "admin" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseDeviceType(s string) DeviceType {

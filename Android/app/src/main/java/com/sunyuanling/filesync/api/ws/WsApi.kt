@@ -25,10 +25,17 @@ object WsApi {
     // ==================== 在线用户 ====================
 
     /**
-     * 获取在线用户列表。
+     * 获取在线用户列表（所有用户及其设备连接）。仅管理员可用，后端按 role 校验。
      */
     suspend fun getOnlineUsers(): Result<ApiResponse<OnlineUsersData>> {
         return Request.getSuspend<ApiResponse<OnlineUsersData>>(ApiRoutes.WS_ONLINE)
+    }
+
+    /**
+     * 获取当前用户自己的在线设备连接。所有登录用户可用。
+     */
+    suspend fun getMyDevices(): Result<ApiResponse<UserConnectionsData>> {
+        return Request.getSuspend<ApiResponse<UserConnectionsData>>(ApiRoutes.WS_MY_DEVICES)
     }
 
     /**

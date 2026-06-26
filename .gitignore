@@ -1,1 +1,42 @@
 /new_server/venv/
+
+# 日志
+/new_server/log/
+**/server.log
+*.log
+
+# IDE - IntelliJ/Android Studio
+**/.idea/
+*.iml
+
+# IDE - VSCode
+.vscode/
+
+# Kotlin 编译器会话
+**/.kotlin/
+
+# Gradle
+**/.gradle/
+/local.properties
+**/local.properties
+org.gradle/
+
+# 构建产物
+**/build/
+**/release/
+*.apk
+*.aab
+*.dex
+*.class
+
+# Android NDK
+**/.cxx/
+**/.externalNativeBuild/
+/captures
+
+# macOS / Windows 杂项
+.DS_Store
+Thumbs.db
+
+# 动态库（误入仓库根的）
+/*.dll

@@ -27,6 +27,7 @@ import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.router.HomeDestination
 import com.sunyuanling.filesync.router.LoginDestination
 import com.sunyuanling.filesync.router.SettingsDestination
+import com.sunyuanling.filesync.ui.viewModel.user.UserStore
 import kotlinx.coroutines.launch
 
 @Composable
@@ -156,6 +157,7 @@ fun LoginScreen(
                             result.onSuccess { response ->
                                 if (response.code == 200) {
                                     Request.saveCredentials(username, password, rememberPassword)
+                                    response.data?.user?.let { UserStore.setCurrent(it) }
                                     if (onLoginSuccess != null) {
                                         val user = response.data?.user
                                         if (user != null) {

@@ -12,6 +12,7 @@ func RegisterWSRouter(rg *gin.RouterGroup, db *gorm.DB, r *redis.Client) {
 	ws := rg.Group("/ws")
 	ws.GET("/connect", h.Connect)
 	ws.GET("/online", h.GetOnlineUsers)
+	ws.GET("/my-devices", h.GetMyDevices)
 	ws.GET("/user/:id/connections", h.GetUserConnections)
 	ws.GET("/stats", h.GetStats)
 	ws.POST("/send", h.SendMessage)

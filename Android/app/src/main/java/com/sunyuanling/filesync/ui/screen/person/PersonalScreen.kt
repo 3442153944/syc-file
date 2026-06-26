@@ -11,6 +11,7 @@ import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.router.LoginDestination
 import com.sunyuanling.filesync.router.navigateAndClearBackStack
 import com.sunyuanling.filesync.ui.viewModel.user.PPersonalState
+import com.sunyuanling.filesync.ui.viewModel.user.UserStore
 import kotlinx.coroutines.launch
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -55,6 +56,7 @@ fun PersonalScreen(modifier: Modifier = Modifier, navController: NavController) 
                     onLogout = {
                         scope.launch {
                             Request.clearToken()
+                            UserStore.clear()
                             uiState = PPersonalState.NotLoggedIn
                             navController.navigateAndClearBackStack(LoginDestination)
                         }
@@ -87,6 +89,7 @@ private suspend fun checkLoginStatus(): PPersonalState {
     return result.fold(
         onSuccess = { response ->
             if (response.code == 200 && response.data != null) {
+                UserStore.setCurrent(response.data)
                 PPersonalState.LoggedIn(response.data)
             } else {
                 PPersonalState.NotLoggedIn

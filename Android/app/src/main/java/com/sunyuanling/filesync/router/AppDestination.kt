@@ -46,3 +46,8 @@ import kotlinx.serialization.Serializable
 @Serializable data object PermissionDestination
 /**登录*/
 @Serializable data object LoginDestination
+
+/**
+ * 设备监控列表*/
+
+@Serializable data object MonitorListDestination

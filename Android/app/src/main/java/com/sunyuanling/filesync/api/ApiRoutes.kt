@@ -51,6 +51,9 @@ object ApiRoutes {
     /** GET /v1/ws/online */
     const val WS_ONLINE = "/ws/online"
 
+    /** GET /v1/ws/my-devices （当前用户自己的在线设备） */
+    const val WS_MY_DEVICES = "/ws/my-devices"
+
     /** GET /v1/ws/user/:id/connections */
     const val WS_USER_CONNECTIONS = "/ws/user/%s/connections"
 

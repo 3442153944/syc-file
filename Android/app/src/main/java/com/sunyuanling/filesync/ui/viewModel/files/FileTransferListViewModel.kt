@@ -12,7 +12,7 @@ import com.sunyuanling.filesync.api.file.DownloadHistoryParams
 import com.sunyuanling.filesync.api.file.FileApi
 import com.sunyuanling.filesync.api.file.DownloadHistoryItem
 import com.sunyuanling.filesync.dataClass.DownloadStatus
-import com.sunyuanling.filesync.ui.viewModel.data.DownloadRepository
+import com.sunyuanling.filesync.ui.viewModel.data.DownloadController
 import com.sunyuanling.filesync.ui.viewModel.transmission.FileTransferStatus
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -137,36 +137,41 @@ class FileTransferListViewModel : ViewModel() {
 
     private fun observeActiveDownloads() {
         viewModelScope.launch {
-            DownloadRepository.activeDownloads.collect { activeList ->
-                if (activeList.isEmpty()) return@collect
+            DownloadController.downloads.collect { activeList ->
+                // 活跃下载映射（非终态），带 sourceDownloadId 以便操作转发回 Controller
+                val activeItems = activeList
+                    .filter { !it.status.isTerminal() }
+                    .map { download ->
+                        FileTransferItem(
+                            id = download.downloadId.hashCode(),
+                            name = download.fileName,
+                            size = download.totalSize,
+                            isDir = false,
+                            childrenCount = 0,
+                            progress = download.progress.toFloat() / 100f,
+                            speed = download.speed,
+                            status = when (download.status) {
+                                DownloadStatus.Waiting -> FileTransferStatus.WAITING
+                                DownloadStatus.Downloading -> FileTransferStatus.TRANSFERRING
+                                DownloadStatus.Paused -> FileTransferStatus.PAUSED
+                                DownloadStatus.Completed -> FileTransferStatus.COMPLETED
+                                DownloadStatus.Failed -> FileTransferStatus.FAILED
+                            },
+                            startTime = download.createTime,
+                            sourceDownloadId = download.downloadId
+                        )
+                    }
 
-                val activeItems = activeList.map { download ->
-                    FileTransferItem(
-                        id = download.downloadId.hashCode(),
-                        name = download.fileName,
-                        size = download.totalSize,
-                        isDir = false,
-                        childrenCount = 0,
-                        progress = download.progress.toFloat() / 100f,
-                        speed = download.speed,
-                        status = when (download.status) {
-                            DownloadStatus.Waiting -> FileTransferStatus.WAITING
-                            DownloadStatus.Downloading -> FileTransferStatus.TRANSFERRING
-                            DownloadStatus.Paused -> FileTransferStatus.PAUSED
-                            DownloadStatus.Completed -> FileTransferStatus.COMPLETED
-                            DownloadStatus.Failed -> FileTransferStatus.FAILED
-                        },
-                        startTime = download.createTime
-                    )
-                }
-
-                // 合并：活跃下载优先，历史记录补充
+                // 合并：活跃下载优先，历史记录补充（历史项无 sourceDownloadId）
                 val activeIds = activeItems.map { it.id }.toSet()
                 val historyItems = _transferItems.value.filter { it.id !in activeIds }
                 _transferItems.value = activeItems + historyItems
             }
         }
     }
+
+    private fun DownloadStatus.isTerminal() =
+        this == DownloadStatus.Completed || this == DownloadStatus.Failed
 
     /**
      * 加载下载历史（首次/刷新）
@@ -319,20 +324,40 @@ class FileTransferListViewModel : ViewModel() {
     // ==================== 传输操作 ====================
 
     fun retryTransfer(id: Int) {
-        updateTransferStatus(id, FileTransferStatus.WAITING)
-        // TODO: 重新发起下载
+        val item = _transferItems.value.find { it.id == id } ?: return
+        val sid = item.sourceDownloadId
+        if (sid != null) {
+            DownloadController.retryDownload(sid)
+        } else {
+            updateTransferStatus(id, FileTransferStatus.WAITING)
+            // 历史记录项缺 path/savePath 等信息，无法直接重试，留待后续补全
+        }
     }
 
     fun cancelTransfer(id: Int) {
-        updateTransferStatus(id, FileTransferStatus.CANCELLED)
+        val item = _transferItems.value.find { it.id == id } ?: return
+        val sid = item.sourceDownloadId
+        if (sid != null) {
+            DownloadController.cancelDownload(sid)
+        } else {
+            updateTransferStatus(id, FileTransferStatus.CANCELLED)
+        }
     }
 
     fun pauseTransfer(id: Int) {
-        updateTransferStatus(id, FileTransferStatus.PAUSED)
+        val item = _transferItems.value.find { it.id == id } ?: return
+        val sid = item.sourceDownloadId ?: return
+        DownloadController.pauseDownload(sid)
     }
 
     fun resumeTransfer(id: Int) {
-        updateTransferStatus(id, FileTransferStatus.WAITING)
+        val item = _transferItems.value.find { it.id == id } ?: return
+        val sid = item.sourceDownloadId
+        if (sid != null) {
+            DownloadController.resumeDownload(sid)
+        } else {
+            updateTransferStatus(id, FileTransferStatus.WAITING)
+        }
     }
 
     fun dismissError() {
@@ -458,7 +483,9 @@ data class FileTransferItem(
     val targetPath: String = "",
     val startTime: Long = System.currentTimeMillis(),
     val endTime: Long? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /** 活跃下载对应的 Controller downloadId；历史记录项为 null。用于操作转发回 Controller。 */
+    val sourceDownloadId: String? = null
 )
 
 enum class SortBy(val displayName: String) {

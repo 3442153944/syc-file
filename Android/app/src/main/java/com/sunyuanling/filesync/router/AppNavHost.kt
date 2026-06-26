@@ -10,6 +10,7 @@ import com.sunyuanling.filesync.graph.authGraph
 import com.sunyuanling.filesync.graph.fileGraph
 import com.sunyuanling.filesync.graph.mainGraph
 import com.sunyuanling.filesync.graph.settingsGraph
+import com.sunyuanling.filesync.graph.monitorGraph
 
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 @Composable
@@ -26,5 +27,6 @@ fun AppNavHost(
         fileGraph(navController)
         settingsGraph(navController)
         authGraph(navController)
+        monitorGraph(navController)
     }
 }
