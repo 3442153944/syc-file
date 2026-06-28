@@ -44,6 +44,11 @@ export const router = createRouter({
                     path: "sync/watch",
                     name: "SyncWatch",
                     component: () => import("../views/sync/SyncWatch.vue")
+                },
+                {
+                    path: "sync/manage",
+                    name: "SyncManage",
+                    component: () => import("../views/sync/SyncManage.vue")
                 }
             ]
         },
