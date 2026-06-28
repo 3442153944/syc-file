@@ -96,8 +96,8 @@ async fn run_ws_loop(config: SharedSyncConfig, app: AppHandle) {
 
         // 协议 §2.1：连接时带 device_id/device_type/platform
         let url = format!(
-            "{}?token={}&device_id={}&device_type=desktop&device_name={}&platform=windows",
-            ws_url, token, device_id, urlenc(&device_name)
+            "{}/v1/ws/connect?token={}&device_id={}&device_type=desktop&device_name={}&platform=windows",
+            ws_url.trim_end_matches('/'), token, device_id, urlenc(&device_name)
         );
 
         match connect_async(&url).await {
