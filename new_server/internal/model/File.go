@@ -5,10 +5,10 @@ import "time"
 // File 文件表
 type File struct {
 	ID          uint64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID      uint       `gorm:"not null;index" json:"user_id"`
+	UserID      uint       `gorm:"not null;index:uk_file_user_path,unique,priority:1" json:"user_id"`
 	ParentID    *uint64    `gorm:"index" json:"parent_id"`
 	FileName    string     `gorm:"size:255;not null" json:"file_name"`
-	FilePath    string     `gorm:"size:1000;not null" json:"file_path"`
+	FilePath    string     `gorm:"size:700;not null;index:uk_file_user_path,unique,priority:2" json:"file_path"`
 	FileType    *string    `gorm:"size:20" json:"file_type"`
 	FileSize    *int64     `json:"file_size"`
 	FileHash    *string    `gorm:"size:64;index" json:"file_hash"`

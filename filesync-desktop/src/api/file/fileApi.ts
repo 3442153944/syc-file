@@ -29,6 +29,11 @@ export async function uploadFile(localPathOrFile: string | File, remoteDir: stri
     return httpPostForm<UploadData>('/file/upload', form)
 }
 
+export async function deleteFile(path: string, name: string): Promise<void> {
+    if (isTauri()) return invoke('delete_file', {path, name})
+    await httpPost('/file/delete', {path, name})
+}
+
 export async function buildDownloadUrl(path: string, name: string, deviceId: string): Promise<string> {
     if (isTauri()) return invoke<string>('build_download_url', {path, name, deviceId})
     return buildGetUrl('/file/download', {path, name, ...(deviceId ? {device_id: deviceId} : {})})

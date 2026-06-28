@@ -68,6 +68,7 @@ func main() {
 		&model.File{},
 		&model.FileVersion{},
 		&model.SyncTask{},
+		&model.SyncConflict{},
 		&model.UploadHistory{},
 		&model.DownloadHistory{},
 		&model.Permission{},

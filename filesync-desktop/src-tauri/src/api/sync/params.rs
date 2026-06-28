@@ -32,6 +32,8 @@ pub struct FileChangeReport {
     pub action: String,
     pub file_size: Option<i64>,
     pub file_hash: Option<String>,
+    /// 修改前看到的 trunk hash（CAS 用）；新文件为空
+    pub base_hash: Option<String>,
     pub is_dir: bool,
     pub mtime: Option<i64>,
 }
@@ -64,6 +66,7 @@ pub struct NotifyParams {
     pub action: String,
     pub file_size: Option<i64>,
     pub file_hash: Option<String>,
+    pub base_hash: Option<String>,
     pub is_dir: bool,
     pub mtime: Option<i64>,
 }
@@ -78,4 +81,16 @@ pub struct TaskCompleteParams {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskFailedParams {
     pub error: String,
+}
+
+/// 任务被占用回调（§3.1.x）：目标文件被本地程序锁定，转 waiting_unlock
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskBlockedParams {
+    pub reason: String,
+}
+
+/// 解决冲突（§4）：accept_server / keep_local
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResolveConflictParams {
+    pub resolution: String,
 }

@@ -127,6 +127,8 @@ async fn flush_debounce(
                 // 上报删除事件给服务端（不上传文件）
                 if let Some((folder_id, rel)) = find_mapping(config, &path) {
                     report_delete(config, folder_id, &rel, &path, app).await;
+                } else {
+                    crate::logger::debug("watch", format!("删除不在同步目录内，已忽略: {}", path.display()));
                 }
             }
             "create" | "modify" => {
@@ -134,6 +136,7 @@ async fn flush_debounce(
                     continue;
                 }
                 if let Some((folder_id, rel, remote_dir)) = find_mapping_with_remote(config, &path) {
+                    crate::logger::info("watch", format!("检测到变更，准备上传: {}", rel));
                     app.emit(
                         "sync-event",
                         SyncEvent {
@@ -150,6 +153,8 @@ async fn flush_debounce(
                     })
                     .await
                     .ok();
+                } else {
+                    crate::logger::warn("watch", format!("变更不在任何同步目录内，已忽略: {}", path.display()));
                 }
             }
             _ => {}
@@ -185,9 +190,12 @@ async fn report_delete(
         action: "delete".into(),
         file_size: None,
         file_hash: None,
+        base_hash: None,
         is_dir: false,
         mtime: None,
     }).await.ok();
+    crate::base_store::remove(folder_id, relative_path);
+    crate::logger::info("watch", format!("已上报删除: {}", relative_path));
 
     app.emit("sync-event", SyncEvent {
         path: path.to_string_lossy().to_string(),
@@ -206,6 +214,99 @@ pub fn engine_watch_path(engine: &SharedSyncEngine, path: PathBuf) -> Result<(),
 pub fn stop_sync_engine(engine: &SharedSyncEngine) {
     let mut guard = engine.lock();
     *guard = None;
+}
+
+// ── 首次全量同步 ─────────────────────────────────────────────────────────────
+
+/// 遍历所有映射目录下、尚无同步基线的文件，逐个入上传队列。
+/// 上传由 worker 池并发处理（数量 = upload_workers）；上传后各文件上报 file_changed，
+/// 服务端据此把本地内容并入 trunk 并派发给其它设备。
+/// 已有 base 基线的文件视为已同步而跳过，避免每次启动重复全量上传。
+pub fn engine_enqueue_initial_sync(engine: &SharedSyncEngine, config: &SharedSyncConfig) {
+    let tx = {
+        let guard = engine.lock();
+        match guard.as_ref() {
+            Some(e) => e.upload_tx.clone(),
+            None => return,
+        }
+    };
+    let mappings: Vec<(u64, PathBuf, String)> = config
+        .read()
+        .folder_mappings
+        .iter()
+        .map(|m| (m.folder_id, PathBuf::from(&m.local_path), m.remote_path.clone()))
+        .collect();
+
+    tokio::spawn(async move {
+        let mut count = 0usize;
+        for (folder_id, root, remote_root) in mappings {
+            count += walk_and_enqueue(&tx, folder_id, &root, &remote_root).await;
+        }
+        crate::logger::info("sync", format!("首次全量同步已入队 {} 个文件", count));
+    });
+}
+
+/// 递归遍历目录，把「无 base 基线」的文件入上传队列；返回入队数量。
+async fn walk_and_enqueue(
+    tx: &mpsc::Sender<UploadTask>,
+    folder_id: u64,
+    root: &PathBuf,
+    remote_root: &str,
+) -> usize {
+    let mut count = 0usize;
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            if should_ignore(&path) {
+                continue;
+            }
+            let ft = match entry.file_type().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                if let Some((rel, remote_dir)) = rel_and_remote(root, remote_root, &path) {
+                    // 已有基线视为已同步，跳过，避免重复上传
+                    if crate::base_store::get(folder_id, &rel).is_some() {
+                        continue;
+                    }
+                    let task = UploadTask {
+                        local_path: path,
+                        remote_dir,
+                        folder_id,
+                        relative_path: rel,
+                    };
+                    if tx.send(task).await.is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+fn rel_and_remote(root: &PathBuf, remote_root: &str, path: &PathBuf) -> Option<(String, String)> {
+    let rel = path.strip_prefix(root).ok()?;
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    let rel_dir = rel
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let base = remote_root.trim_end_matches('/');
+    let remote_dir = if rel_dir.is_empty() {
+        base.to_string()
+    } else {
+        format!("{}/{}", base, rel_dir)
+    };
+    Some((rel_str, remote_dir))
 }
 
 // ── 路径解析 ─────────────────────────────────────────────────────────────────

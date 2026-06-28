@@ -52,3 +52,10 @@ pub struct DownloadHistoryParams {
 pub struct DeleteDownloadHistoryParams {
     pub ids: Vec<i64>,
 }
+
+/// 删除远端文件参数（文件管理用）
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteFileParams {
+    pub path: String,
+    pub name: String,
+}

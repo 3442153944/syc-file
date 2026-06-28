@@ -26,14 +26,30 @@ pub struct TaskCreatedContent {
     pub remote_dir: Option<String>,
 }
 
-/// S→C conflict content（§3.2.2）
+/// S→C conflict content（§3.2.2）：要求源设备隔离本地副本并收敛到 server_hash
 #[derive(Debug, Deserialize)]
 pub struct ConflictContent {
+    #[serde(default)]
+    pub conflict_id: u64,
     pub folder_id: u64,
     pub relative_path: String,
     pub file_name: String,
     pub server_hash: String,
+    #[serde(default)]
+    pub server_version: u32,
+    #[serde(default)]
+    pub base_hash: Option<String>,
     pub local_hash: String,
+}
+
+/// S→C conflict_resolved content（§3.2.3）：待办处理结果回执
+#[derive(Debug, Deserialize)]
+pub struct ConflictResolvedContent {
+    pub conflict_id: u64,
+    /// accept_server / keep_local
+    pub resolution: String,
+    #[serde(default)]
+    pub server_hash: String,
 }
 
 /// C→S file_changed content（§3.1.1），由 sync engine 构造后走 WS 发送
@@ -46,6 +62,7 @@ pub struct FileChangedContent {
     pub action: String,
     pub file_size: Option<i64>,
     pub file_hash: Option<String>,
+    pub base_hash: Option<String>,
     pub is_dir: bool,
     pub mtime: Option<i64>,
 }

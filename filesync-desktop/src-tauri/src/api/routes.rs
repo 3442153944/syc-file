@@ -20,6 +20,7 @@ pub const FILE_TRAVERSE_DIRECTORY: &str = "/file/traverse-directory";
 pub const FILE_DOWNLOAD: &str = "/file/download";
 /// POST multipart
 pub const FILE_UPLOAD: &str = "/file/upload";
+pub const FILE_DELETE: &str = "/file/delete";
 pub const FILE_DOWNLOAD_HISTORY: &str = "/file/download-history";
 pub const FILE_DELETE_DOWNLOAD_HISTORY: &str = "/file/delete-download-history";
 
@@ -56,6 +57,10 @@ pub const SYNC_TASKS_PENDING: &str = "/sync/tasks/pending";
 /// 路径参数：task_id
 pub const SYNC_TASK_COMPLETE: &str = "/sync/tasks/{}/complete";
 pub const SYNC_TASK_FAILED: &str = "/sync/tasks/{}/failed";
+/// 路径参数：task_id；目标文件被占用 → 转 waiting_unlock
+pub const SYNC_TASK_BLOCKED: &str = "/sync/tasks/{}/blocked";
 pub const SYNC_CONFLICTS: &str = "/sync/conflicts";
 /// 路径参数：conflict_id
 pub const SYNC_CONFLICT_BY_ID: &str = "/sync/conflicts/{}";
+/// 路径参数：conflict_id；解决冲突 accept_server / keep_local
+pub const SYNC_CONFLICT_RESOLVE: &str = "/sync/conflicts/{}/resolve";

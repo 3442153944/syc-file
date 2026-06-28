@@ -6,7 +6,8 @@ type FileChangeReport struct {
 	FileName     string `json:"file_name"`
 	Action       string `json:"action"`
 	FileSize     int64  `json:"file_size"`
-	FileHash     string `json:"file_hash"`
+	FileHash     string `json:"file_hash"` // 新内容 sha256
+	BaseHash     string `json:"base_hash"` // 修改前客户端看到的 trunk hash（CAS 用）
 	IsDir        bool   `json:"is_dir"`
 	Mtime        int64  `json:"mtime"`
 }

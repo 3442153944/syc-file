@@ -17,6 +17,8 @@ type SyncTask struct {
 	FileSize       int64      `gorm:"not null;default:0" json:"file_size"`
 	FileHash       *string    `gorm:"size:64;index" json:"file_hash"`
 	SourceHash     *string    `gorm:"size:64" json:"source_hash"`
+	BaseHash       *string    `gorm:"size:64" json:"base_hash"` // 源端修改前看到的 trunk hash（CAS 用）
+	LockToken      *string    `gorm:"size:64" json:"-"`         // 文件锁令牌，用于安全释放（compare-and-del）
 	Conflict       bool       `gorm:"not null;default:false;index" json:"conflict"`
 	Progress       int        `gorm:"not null;default:0" json:"progress"`
 	Priority       int        `gorm:"not null;default:0" json:"priority"`

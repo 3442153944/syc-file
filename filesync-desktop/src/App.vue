@@ -1,16 +1,29 @@
 <script setup lang="ts">
-import {NMessageProvider, NDialogProvider, NNotificationProvider} from 'naive-ui'
+import { NMessageProvider, NDialogProvider, NNotificationProvider } from 'naive-ui'
+import { isTauri } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import LogViewer from './views/logs/LogViewer.vue'
+
+// 日志窗口（label === 'logs'）只渲染 LogViewer，跳过主应用路由。
+let isLogWindow = false
+if (isTauri()) {
+  try {
+    isLogWindow = getCurrentWindow().label === 'logs'
+  } catch {
+    isLogWindow = false
+  }
+}
 </script>
 
 <template>
-  <n-message-provider>
+  <LogViewer v-if="isLogWindow" />
+
+  <n-message-provider v-else>
     <n-notification-provider>
       <n-dialog-provider>
-
         <div class="main">
-          <router-view/>
+          <router-view />
         </div>
-
       </n-dialog-provider>
     </n-notification-provider>
   </n-message-provider>

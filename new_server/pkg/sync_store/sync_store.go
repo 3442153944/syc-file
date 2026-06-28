@@ -2,6 +2,7 @@ package sync_store
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -54,16 +55,61 @@ func (s *SyncStore) DequeueTask(ctx context.Context, timeout time.Duration) (uin
 	return id, nil
 }
 
-func (s *SyncStore) AcquireFileLock(ctx context.Context, path string, ttl time.Duration) (bool, error) {
-	ok, err := s.rdb.SetNX(ctx, fileLockKey(path), "1", ttl).Result()
+// releaseLockScript 仅当锁的值等于自己持有的令牌时才删除，避免误删他人重新获取的锁。
+var releaseLockScript = redis.NewScript(`
+if redis.call("get", KEYS[1]) == ARGV[1] then
+	return redis.call("del", KEYS[1])
+else
+	return 0
+end`)
+
+// AcquireFileLock 以唯一令牌抢占文件锁（SetNX）。key 为逻辑键（如 "user:folder:relpath"）。
+// 返回的 token 需随任务持久化，释放/续租时凭令牌操作。
+func (s *SyncStore) AcquireFileLock(ctx context.Context, key string, ttl time.Duration) (string, bool, error) {
+	token, err := newLockToken()
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	return ok, nil
+	ok, err := s.rdb.SetNX(ctx, fileLockKey(key), token, ttl).Result()
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	return token, true, nil
 }
 
-func (s *SyncStore) ReleaseFileLock(ctx context.Context, path string) error {
-	return s.rdb.Del(ctx, fileLockKey(path)).Err()
+// ReleaseFileLock 凭令牌安全释放文件锁；token 为空或不匹配时不做任何删除。
+func (s *SyncStore) ReleaseFileLock(ctx context.Context, key, token string) error {
+	if token == "" {
+		return nil
+	}
+	return releaseLockScript.Run(ctx, s.rdb, []string{fileLockKey(key)}, token).Err()
+}
+
+// RenewFileLock 凭令牌续租文件锁 TTL（长任务防止锁中途过期）。
+func (s *SyncStore) RenewFileLock(ctx context.Context, key, token string, ttl time.Duration) error {
+	if token == "" {
+		return nil
+	}
+	return renewLockScript.Run(ctx, s.rdb, []string{fileLockKey(key)}, token, int(ttl.Seconds())).Err()
+}
+
+// renewLockScript 仅当令牌匹配时才续租，避免续到他人的锁。
+var renewLockScript = redis.NewScript(`
+if redis.call("get", KEYS[1]) == ARGV[1] then
+	return redis.call("expire", KEYS[1], ARGV[2])
+else
+	return 0
+end`)
+
+func newLockToken() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func (s *SyncStore) UpdateProgress(ctx context.Context, taskID uint64, progress int, bytesTransferred int64) error {

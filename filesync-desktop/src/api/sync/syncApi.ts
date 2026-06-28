@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { httpPost, httpGet, httpDelete } from '../http'
 import { getDeviceId } from '../platform'
-import type { SyncFolder, SyncTask } from './syncTypes'
+import type { SyncFolder, SyncTask, SyncConflict, ConflictResolution } from './syncTypes'
 
 export async function createSyncFolder(
   name: string,
@@ -32,9 +32,14 @@ export async function listPendingTasks(): Promise<SyncTask[]> {
   return httpGet<SyncTask[]>('/sync/tasks/pending', { device_id: getDeviceId() })
 }
 
-export async function listConflicts(): Promise<SyncTask[]> {
-  if (isTauri()) return invoke<SyncTask[]>('list_conflicts')
-  return httpGet<SyncTask[]>('/sync/conflicts')
+export async function listConflicts(): Promise<SyncConflict[]> {
+  if (isTauri()) return invoke<SyncConflict[]>('list_conflicts')
+  return httpGet<SyncConflict[]>('/sync/conflicts')
+}
+
+export async function resolveConflict(conflictId: number, resolution: ConflictResolution): Promise<void> {
+  if (isTauri()) return invoke('resolve_conflict', { conflictId, resolution })
+  await httpPost(`/sync/conflicts/${conflictId}/resolve`, { resolution })
 }
 
 export async function deleteConflict(conflictId: number): Promise<void> {

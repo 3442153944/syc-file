@@ -80,10 +80,30 @@ pub async fn fail_task(
     client.post(&path, &TaskFailedParams { error: error.to_string() }).await
 }
 
+/// 目标文件被占用：转 waiting_unlock（不消耗重试次数）。
+pub async fn block_task(
+    client: &ApiClient,
+    task_id: u64,
+    reason: &str,
+) -> Result<ApiResponse<serde_json::Value>, String> {
+    let path = routes::SYNC_TASK_BLOCKED.replace("{}", &task_id.to_string());
+    client.post(&path, &TaskBlockedParams { reason: reason.to_string() }).await
+}
+
 // ── 冲突管理 ─────────────────────────────────────────────────────────────
 
-pub async fn list_conflicts(client: &ApiClient) -> Result<ApiResponse<Vec<SyncTask>>, String> {
+pub async fn list_conflicts(client: &ApiClient) -> Result<ApiResponse<Vec<SyncConflict>>, String> {
     client.get(routes::SYNC_CONFLICTS, None).await
+}
+
+/// 解决冲突：accept_server / keep_local
+pub async fn resolve_conflict(
+    client: &ApiClient,
+    conflict_id: u64,
+    resolution: &str,
+) -> Result<ApiResponse<serde_json::Value>, String> {
+    let path = routes::SYNC_CONFLICT_RESOLVE.replace("{}", &conflict_id.to_string());
+    client.post(&path, &ResolveConflictParams { resolution: resolution.to_string() }).await
 }
 
 pub async fn delete_conflict(

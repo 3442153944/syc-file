@@ -15,6 +15,8 @@ func RegisterSyncRouter(rg *gin.RouterGroup, engine *Engine) {
 	s.GET("/tasks/pending", h.PendingTasks)
 	s.POST("/tasks/:id/complete", h.CompleteTask)
 	s.POST("/tasks/:id/failed", h.FailTask)
+	s.POST("/tasks/:id/blocked", h.BlockTask)
 	s.GET("/conflicts", h.ListConflicts)
-	s.DELETE("/conflicts/:id", h.ResolveConflict)
+	s.POST("/conflicts/:id/resolve", h.ResolveConflict)
+	s.DELETE("/conflicts/:id", h.DeleteConflict)
 }

@@ -103,6 +103,7 @@ type SyncConfig struct {
 	QueueTimeoutSeconds int    `mapstructure:"queue_timeout_seconds"`
 	TaskTimeoutSeconds  int    `mapstructure:"task_timeout_seconds"`
 	ConflictSuffix      string `mapstructure:"conflict_suffix"`
+	SyncCatalogue       string `mapstructure:"sync_catalogue"`
 }
 
 // IsExtensionAllowed 检查文件扩展名是否允许上传

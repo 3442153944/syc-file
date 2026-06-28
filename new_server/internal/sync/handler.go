@@ -236,10 +236,56 @@ func (h *APIHandler) ResolveConflict(c *gin.Context) {
 		jsonErr(c, 400, "无效的记录ID")
 		return
 	}
-	if err := h.engine.ResolveConflict(userID, id); err != nil {
+	var req struct {
+		Resolution string `json:"resolution" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		jsonErr(c, 400, "参数解析失败")
+		return
+	}
+	if err := h.engine.ResolveConflict(userID, id, req.Resolution); err != nil {
 		jsonErr(c, 400, err.Error())
 		return
 	}
+	jsonOK(c, nil)
+}
+
+func (h *APIHandler) DeleteConflict(c *gin.Context) {
+	userID, ok := requireUser(c)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		jsonErr(c, 400, "无效的记录ID")
+		return
+	}
+	if err := h.engine.DeleteConflict(userID, id); err != nil {
+		jsonErr(c, 400, err.Error())
+		return
+	}
+	jsonOK(c, nil)
+}
+
+func (h *APIHandler) BlockTask(c *gin.Context) {
+	userID, ok := requireUser(c)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		jsonErr(c, 400, "无效的任务ID")
+		return
+	}
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if !h.engineOwnsTask(userID, id) {
+		jsonErr(c, 403, "无权操作该任务")
+		return
+	}
+	h.engine.BlockTask(id, req.Reason)
 	jsonOK(c, nil)
 }
 

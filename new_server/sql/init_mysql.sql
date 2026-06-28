@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS `file` (
     user_id      INT           NOT NULL,
     parent_id    BIGINT        NULL,
     file_name    VARCHAR(255)  NOT NULL,
-    file_path    VARCHAR(1000) NOT NULL,
+    file_path    VARCHAR(700)  NOT NULL,
     file_type    VARCHAR(20)   NULL COMMENT '文件类型：doc/image/video/audio/other',
     file_size    BIGINT        NULL,
     file_hash    VARCHAR(64)   NULL COMMENT '文件哈希值（SHA256）',
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS `file` (
     INDEX idx_file_hash (file_hash),
     INDEX idx_file_deleted (is_deleted),
     INDEX idx_file_share (share_code),
-    INDEX idx_file_user_path (user_id, file_path(255)),
+    UNIQUE INDEX uk_file_user_path (user_id, file_path) COMMENT '同一用户下文件路径唯一，trunk 主键约束',
     CONSTRAINT fk_file_user FOREIGN KEY (user_id) REFERENCES `user`(id) ON DELETE CASCADE,
     CONSTRAINT fk_file_parent FOREIGN KEY (parent_id) REFERENCES `file`(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文件表';
@@ -98,29 +98,95 @@ CREATE TABLE IF NOT EXISTS `file_version` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文件版本历史表';
 
 -- ============================================
--- 5. 同步任务表
+-- 5. 同步文件夹配置表
 -- ============================================
+-- 客户端无本地持久化，sync_folder 是同步映射的权威数据源。
+CREATE TABLE IF NOT EXISTS `sync_folder` (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id         INT           NOT NULL,
+    name            VARCHAR(100)  NULL,
+    local_path      VARCHAR(1000) NOT NULL COMMENT '客户端本地目录',
+    remote_path     VARCHAR(1000) NOT NULL COMMENT '服务端远端根目录',
+    direction       VARCHAR(20)   NOT NULL DEFAULT 'two_way' COMMENT '方向：two_way/upload_only/download_only',
+    enabled         TINYINT(1)    NOT NULL DEFAULT 1,
+    excludes        TEXT          NULL COMMENT '忽略规则（含 .synctmp/.syncpending/~$*）',
+    owner_device_id VARCHAR(100)  NULL,
+    created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_folder_user (user_id),
+    INDEX idx_folder_enabled (enabled),
+    CONSTRAINT fk_folder_user FOREIGN KEY (user_id) REFERENCES `user`(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='同步文件夹配置表';
+
+-- ============================================
+-- 6. 同步任务表
+-- ============================================
+-- 由引擎编排：源设备上报变更 → 给其它在线设备生成 download/delete/mkdir 任务。
 CREATE TABLE IF NOT EXISTS `sync_task` (
-    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
-    user_id       INT         NOT NULL,
-    device_id     INT         NOT NULL,
-    file_id       BIGINT      NOT NULL,
-    task_type     VARCHAR(20) NOT NULL COMMENT '任务类型：upload/download/delete',
-    sync_status   VARCHAR(20) NOT NULL DEFAULT 'pending' COMMENT '同步状态：pending/syncing/completed/failed',
-    progress      INT         NOT NULL DEFAULT 0 COMMENT '进度（0-100）',
-    error_message TEXT        NULL,
-    started_at    DATETIME    NULL,
-    completed_at  DATETIME    NULL,
-    created_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id          INT           NOT NULL,
+    source_device_id VARCHAR(100)  NOT NULL COMMENT '变更来源设备（server=服务端发起）',
+    target_device_id VARCHAR(100)  NOT NULL COMMENT '任务执行目标设备',
+    folder_id        BIGINT        NOT NULL DEFAULT 0,
+    file_id          BIGINT        NOT NULL DEFAULT 0,
+    task_type        VARCHAR(20)   NOT NULL COMMENT '任务类型：download/delete/mkdir/upload',
+    sync_status      VARCHAR(20)   NOT NULL DEFAULT 'pending' COMMENT 'pending/syncing/completed/failed/skipped/conflict/waiting_unlock',
+    direction        VARCHAR(20)   NOT NULL DEFAULT 'download',
+    relative_path    VARCHAR(1000) NOT NULL,
+    file_name        VARCHAR(255)  NOT NULL,
+    file_size        BIGINT        NOT NULL DEFAULT 0,
+    file_hash        VARCHAR(64)   NULL,
+    source_hash      VARCHAR(64)   NULL,
+    base_hash        VARCHAR(64)   NULL COMMENT '源端修改前看到的 trunk hash（CAS 用）',
+    lock_token       VARCHAR(64)   NULL COMMENT '文件锁令牌，用于安全释放',
+    conflict         TINYINT(1)    NOT NULL DEFAULT 0,
+    progress         INT           NOT NULL DEFAULT 0 COMMENT '进度（0-100）',
+    priority         INT           NOT NULL DEFAULT 0,
+    retry_count      INT           NOT NULL DEFAULT 0,
+    max_retry        INT           NOT NULL DEFAULT 3,
+    error_message    TEXT          NULL,
+    started_at       DATETIME      NULL,
+    completed_at     DATETIME      NULL,
+    created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_sync_user (user_id),
-    INDEX idx_sync_device (device_id),
+    INDEX idx_sync_source (source_device_id),
+    INDEX idx_sync_target (target_device_id),
+    INDEX idx_sync_folder (folder_id),
+    INDEX idx_sync_file (file_id),
+    INDEX idx_sync_hash (file_hash),
     INDEX idx_sync_status (sync_status),
-    INDEX idx_sync_created (created_at),
-    INDEX idx_sync_user_status (user_id, sync_status),
-    CONSTRAINT fk_sync_user FOREIGN KEY (user_id) REFERENCES `user`(id) ON DELETE CASCADE,
-    CONSTRAINT fk_sync_device FOREIGN KEY (device_id) REFERENCES `device`(id) ON DELETE CASCADE,
-    CONSTRAINT fk_sync_file FOREIGN KEY (file_id) REFERENCES `file`(id) ON DELETE CASCADE
+    INDEX idx_sync_conflict (conflict),
+    CONSTRAINT fk_sync_user FOREIGN KEY (user_id) REFERENCES `user`(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='同步任务表';
+
+-- ============================================
+-- 7. 同步冲突待办表
+-- ============================================
+-- base CAS 失败（并发分叉）时落库的待办；冲突副本字节保留在出冲突的客户端本地（.syncpending）。
+CREATE TABLE IF NOT EXISTS `sync_conflict` (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id        INT           NOT NULL,
+    device_id      VARCHAR(100)  NOT NULL COMMENT '出冲突的源设备',
+    folder_id      BIGINT        NOT NULL DEFAULT 0,
+    file_id        BIGINT        NOT NULL DEFAULT 0,
+    relative_path  VARCHAR(1000) NOT NULL,
+    file_name      VARCHAR(255)  NOT NULL,
+    server_hash    VARCHAR(64)   NULL COMMENT '冲突时 trunk 当前 hash',
+    local_hash     VARCHAR(64)   NULL COMMENT '客户端分叉版本 hash',
+    base_hash      VARCHAR(64)   NULL COMMENT '客户端修改前的 base',
+    server_version INT           NOT NULL DEFAULT 0,
+    status         VARCHAR(20)   NOT NULL DEFAULT 'pending' COMMENT 'pending/resolved',
+    resolution     VARCHAR(20)   NULL COMMENT 'accept_server/keep_local',
+    resolved_at    DATETIME      NULL,
+    created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_conflict_user (user_id),
+    INDEX idx_conflict_device (device_id),
+    INDEX idx_conflict_folder (folder_id),
+    INDEX idx_conflict_status (status),
+    CONSTRAINT fk_conflict_user FOREIGN KEY (user_id) REFERENCES `user`(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='同步冲突待办表';
 
 -- ============================================
 -- 6. 上传统计表

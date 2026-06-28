@@ -3,7 +3,7 @@
 // 只做调度：从 channel 取任务 → 调 api::file + api::sync，不含路由字符串。
 use crate::api::{
     client::ApiClient,
-    file::{api as file_api, params::{CheckFileParams, DownloadParams}},
+    file::api as file_api,
     sync::{api as sync_api, params::NotifyParams},
 };
 use crate::config::SharedSyncConfig;
@@ -105,16 +105,18 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     match file_api::upload_file(&client, form).await {
         Ok(resp) if resp.is_ok() => {}
         Ok(resp) => {
+            crate::logger::error("upload", format!("上传失败 {}: {}", path_str, resp.message));
             emit_progress(app, &path_str, "error", Some(resp.message));
             return;
         }
         Err(e) => {
+            crate::logger::error("upload", format!("上传失败 {}: {}", path_str, e));
             emit_progress(app, &path_str, "error", Some(e));
             return;
         }
     }
 
-    // 2. 上传成功后上报 file_changed（HTTP 回退）
+    // 2. 上传成功后上报 file_changed（带 base_hash 供服务端 CAS）
     let mtime = task
         .local_path
         .metadata()
@@ -123,22 +125,31 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64);
 
+    let folder_id = task.folder_id;
+    let rel = task.relative_path.clone();
+    let base_hash = crate::base_store::get(folder_id, &rel);
+
     sync_api::notify(
         &client,
         NotifyParams {
             device_id,
-            folder_id: task.folder_id,
-            relative_path: task.relative_path,
+            folder_id,
+            relative_path: rel.clone(),
             file_name,
             action: "modify".into(),
             file_size: Some(file_size),
-            file_hash: Some(file_hash),
+            file_hash: Some(file_hash.clone()),
+            base_hash,
             is_dir: false,
             mtime,
         },
     )
     .await
     .ok();
+
+    // 上传被接受后，trunk hash 即为本次内容；更新基线（若实际冲突，conflict 处理会再纠正）。
+    crate::base_store::set(folder_id, &rel, &file_hash);
+    crate::logger::info("upload", format!("已上传并上报: {} ({} bytes)", rel, file_size));
 
     emit_progress(app, &path_str, "done", None);
 }

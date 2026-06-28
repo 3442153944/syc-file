@@ -1,18 +1,22 @@
 mod api;
+mod app_paths;
 mod config;
 mod device;
+mod logger;
 mod sync_engine;
 mod upload_worker;
 mod watcher;
 mod ws_client;
+mod base_store;
 
 use std::path::PathBuf;
 use api::client::ApiClient;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use api::user::{api as user_api, params::*, response::*};
 use api::file::{api as file_api, params::*, response::*};
 use api::sync::{api as sync_api, params::*, response::*};
 use config::{FolderMapping, SharedSyncConfig, SyncConfig, init_sync_config};
-use sync_engine::{SharedSyncEngine, engine_watch_path, init_sync_engine, start_sync_engine, stop_sync_engine};
+use sync_engine::{SharedSyncEngine, engine_enqueue_initial_sync, engine_watch_path, init_sync_engine, start_sync_engine, stop_sync_engine};
 use tauri::State;
 use watcher::{SharedWatcherState, add_watch_path, init_watcher_state, list_watch_paths, remove_watch_path};
 
@@ -65,6 +69,7 @@ fn set_sync_config(
     ws_url: String,
     token: String,
     upload_workers: Option<usize>,
+    download_workers: Option<usize>,
     debounce_ms: Option<u64>,
     config: State<SharedSyncConfig>,
 ) {
@@ -73,7 +78,33 @@ fn set_sync_config(
     cfg.ws_url = ws_url;
     cfg.token = token;
     if let Some(w) = upload_workers { cfg.upload_workers = w; }
+    if let Some(w) = download_workers { cfg.download_workers = w; }
     if let Some(d) = debounce_ms { cfg.debounce_ms = d; }
+    cfg.save(); // 持久化到 config/config.yml（token 不写入）
+    logger::info("config", "同步配置已更新并保存");
+}
+
+// ── 日志窗口 ─────────────────────────────────────────────────────────────────
+
+/// 打开（或聚焦）专用日志窗口，label = "logs"，渲染前端 LogViewer。
+fn open_log_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("logs") {
+        let _ = w.set_focus();
+        return;
+    }
+    match WebviewWindowBuilder::new(app, "logs", WebviewUrl::App("index.html".into()))
+        .title("云梯 - 日志")
+        .inner_size(960.0, 560.0)
+        .build()
+    {
+        Ok(_) => logger::info("app", "已打开日志窗口"),
+        Err(e) => logger::error("app", format!("打开日志窗口失败: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn open_log_window_cmd(app: tauri::AppHandle) {
+    open_log_window(&app);
 }
 
 /// 返回当前配置（token 脱敏）
@@ -125,18 +156,50 @@ fn remove_folder_mapping(local_path: String, config: State<SharedSyncConfig>) {
     config.write().folder_mappings.retain(|m| m.local_path != local_path);
 }
 
+/// 启动同步引擎：先从服务器拉取 sync_folders 填充内存缓存，再启动引擎和文件监听
 #[tauri::command]
-fn start_sync(
-    engine: State<SharedSyncEngine>,
-    config: State<SharedSyncConfig>,
+async fn start_sync(
+    engine: State<'_, SharedSyncEngine>,
+    config: State<'_, SharedSyncConfig>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    // 1. 从服务器拉最新 folder 列表，刷新内存缓存
+    let client = make_client(&config.read())?;
+    let resp = sync_api::list_folders(&client).await?;
+    if resp.is_ok() {
+        if let Some(folders) = resp.data {
+            let mut cfg = config.write();
+            cfg.folder_mappings = folders
+                .into_iter()
+                .filter(|f| f.enabled)
+                .map(|f| FolderMapping {
+                    local_path: f.local_path,
+                    remote_path: f.remote_path,
+                    folder_id: f.id,
+                })
+                .collect();
+        }
+    }
+
+    // 2. 启动引擎
     start_sync_engine(&engine, config.inner().clone(), app_handle)?;
+
+    // 3. 监听所有本地路径
     let paths: Vec<PathBuf> = config.read().folder_mappings
         .iter().map(|m| PathBuf::from(&m.local_path)).collect();
-    for p in paths {
-        engine_watch_path(&engine, p).ok();
+    if paths.is_empty() {
+        logger::warn("sync", "未配置任何同步目录，引擎已启动但不会监听任何文件。请先在「同步管理」创建同步文件夹。");
     }
+    for p in &paths {
+        match engine_watch_path(&engine, p.clone()) {
+            Ok(_) => logger::info("sync", format!("开始监听同步目录: {}", p.display())),
+            Err(e) => logger::error("sync", format!("监听目录失败 {}: {}", p.display(), e)),
+        }
+    }
+
+    // 4. 首次全量同步：把尚无基线的本地文件入上传队列（多线程上传）
+    engine_enqueue_initial_sync(&engine, config.inner());
+    logger::info("sync", format!("同步引擎已启动，监听 {} 个目录", paths.len()));
     Ok(())
 }
 
@@ -247,6 +310,18 @@ async fn upload_file(
     api_data(resp, "upload_file")
 }
 
+/// 删除远端文件（文件管理用）
+#[tauri::command]
+async fn delete_file(
+    path: String,
+    name: String,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let resp = file_api::delete_file(&client, api::file::params::DeleteFileParams { path, name }).await?;
+    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+}
+
 /// 构建带 token 的完整下载 URL，前端可直接用于下载
 #[tauri::command]
 fn build_download_url(
@@ -289,14 +364,33 @@ async fn create_sync_folder(
     remote_path: String,
     direction: String,
     config: State<'_, SharedSyncConfig>,
+    engine: State<'_, SharedSyncEngine>,
 ) -> Result<SyncFolder, String> {
     let (device_id, client) = {
         let cfg = config.read();
         (cfg.device_id.clone(), make_client(&cfg)?)
     };
-    let params = CreateFolderParams { name, local_path, remote_path, direction, owner_device_id: device_id };
+    let params = CreateFolderParams { name, local_path: local_path.clone(), remote_path: remote_path.clone(), direction, owner_device_id: device_id };
     let resp = sync_api::create_folder(&client, params).await?;
-    api_data(resp, "create_sync_folder")
+    let folder = api_data(resp, "create_sync_folder")?;
+
+    // 自动更新内存缓存
+    {
+        let mut cfg = config.write();
+        if !cfg.folder_mappings.iter().any(|m| m.local_path == local_path) {
+            cfg.folder_mappings.push(FolderMapping {
+                local_path: local_path.clone(),
+                remote_path,
+                folder_id: folder.id,
+            });
+        }
+    }
+    // 如果引擎已在运行，立即开始监听新目录
+    if engine.lock().is_some() {
+        engine_watch_path(&engine, PathBuf::from(&local_path)).ok();
+    }
+
+    Ok(folder)
 }
 
 #[tauri::command]
@@ -313,7 +407,10 @@ async fn delete_sync_folder(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::delete_folder(&client, folder_id).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    if !resp.is_ok() { return Err(resp.message); }
+    // 从内存缓存移除（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
+    config.write().folder_mappings.retain(|m| m.folder_id != folder_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -327,10 +424,22 @@ async fn list_pending_tasks(config: State<'_, SharedSyncConfig>) -> Result<Vec<S
 }
 
 #[tauri::command]
-async fn list_conflicts(config: State<'_, SharedSyncConfig>) -> Result<Vec<SyncTask>, String> {
+async fn list_conflicts(config: State<'_, SharedSyncConfig>) -> Result<Vec<SyncConflict>, String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::list_conflicts(&client).await?;
     api_data(resp, "list_conflicts")
+}
+
+/// 解决冲突：resolution = accept_server / keep_local
+#[tauri::command]
+async fn resolve_conflict(
+    conflict_id: u64,
+    resolution: String,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let resp = sync_api::resolve_conflict(&client, conflict_id, &resolution).await?;
+    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
 }
 
 #[tauri::command]
@@ -353,22 +462,48 @@ pub fn run() {
         .manage(init_watcher_state())
         .manage(init_sync_config())
         .manage(init_sync_engine())
+        .setup(|app| {
+            // 绑定全局日志（事件 + 文件），任意模块即可 logger::info(...)
+            logger::init(app.handle().clone());
+            base_store::init(); // 载入 base_hash 基线
+            logger::info(
+                "app",
+                format!("应用启动，配置目录: {}", app_paths::config_dir().display()),
+            );
+
+            // 顶部菜单栏：一级菜单「工具」→「打开日志窗口」(Ctrl+Alt+T)
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+            let open_logs = MenuItemBuilder::with_id("open_logs", "打开日志窗口")
+                .accelerator("CmdOrCtrl+Alt+T")
+                .build(app)?;
+            let tools = SubmenuBuilder::new(app, "工具").item(&open_logs).build()?;
+            let menu = MenuBuilder::new(app).item(&tools).build()?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "open_logs" {
+                open_log_window(app);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // 基础监听
             add_watch, remove_watch, list_watches,
             // 配置
             set_sync_config, get_sync_config, get_device_id,
+            // 日志
+            open_log_window_cmd,
             // 同步引擎
             add_folder_mapping, remove_folder_mapping,
             start_sync, stop_sync, is_sync_running,
             // 用户域
             login, verify, register, reset_password,
             // 文件域
-            get_available_disks, traverse_directory, upload_file,
+            get_available_disks, traverse_directory, upload_file, delete_file,
             build_download_url, get_download_history, delete_download_history,
             // 同步域
             create_sync_folder, list_sync_folders, delete_sync_folder,
-            list_pending_tasks, list_conflicts, delete_conflict,
+            list_pending_tasks, list_conflicts, resolve_conflict, delete_conflict,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -47,6 +47,14 @@ pub async fn upload_file(
     client.post_multipart(routes::FILE_UPLOAD, form).await
 }
 
+/// 删除远端文件（文件管理用）
+pub async fn delete_file(
+    client: &ApiClient,
+    params: DeleteFileParams,
+) -> Result<ApiResponse<serde_json::Value>, String> {
+    client.post(routes::FILE_DELETE, &params).await
+}
+
 pub async fn get_download_history(
     client: &ApiClient,
     params: DownloadHistoryParams,

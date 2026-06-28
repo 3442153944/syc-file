@@ -85,3 +85,4 @@ sync:
   queue_timeout_seconds: 5       # BRPOP 阻塞超时（秒）
   task_timeout_seconds: 600      # 单任务执行超时（秒），超时后重试
   conflict_suffix: "conflict"    # 冲突文件保留后缀
+  sync_catalogue: "F:/同步目录/"  # 执行实时同步的目录

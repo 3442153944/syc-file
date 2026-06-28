@@ -1,14 +1,15 @@
 # 云梯 (FileSync) 架构说明文档
 
-> 本文档用于描述 `Android/app`（前端）与 `new_server`（后端）的整体架构、技术栈、模块关系与已知问题，作为后续对话的统一背景参考，避免重复解释。
+> 本文档描述三端（Android / Go 后端 / Windows 桌面端）的整体架构、技术栈、模块关系与已知问题，作为后续对话的统一背景参考，避免重复解释。
 > 维护原则：描述「代码现状」而非「期望状态」，已定义但未实现的能力会明确标注为 **[仅 schema/未接线]**。
 
 ---
 
 ## 0. 一句话定位
 
-这是一个**个人自托管文件传输/同步系统**：Android 客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/消息）与 Go 后端交互，后端用 MySQL 存账户与传输记录、Redis 记在线设备、本地磁盘存文件、WS 推送实时事件。
-⚠ 名为「FileSync / 同步」，但当前实现**没有持续同步引擎**（无文件监听、无后台任务调度器、无冲突解决），实际是「按需上传/下载 + 实时事件推送」模型。下文凡涉及「同步」均指这一现状。
+这是一个**个人自托管文件传输/同步系统**，三端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
+
+⚠ **同步链路现状**：Go 后端同步引擎已全链路实现（Redis 队列 + worker 调度 + base CAS 冲突检测 + WS 派发，见 §4.11）。**Windows 桌面端同步上报/执行链路已接通**（`file_changed` 带 `base_hash` 上报、`task_created` 原子发布执行、冲突隔离、`waiting_unlock`、多线程全量同步、日志窗口，见 §3B.6）。**但桌面端 WS 连接存在认证问题（🔴 P1，下轮解决）**，整条链路尚未实机跑通验证。Android 端仍无文件监听守护。
 
 ---
 
@@ -16,6 +17,24 @@
 
 ```mermaid
 flowchart LR
+    subgraph Desktop["Windows 桌面端 (Tauri 2 + Vue 3)"]
+        VUE["Vue 3 视图层<br/>Naive UI 组件"]
+        TSAPI["src/api/*Api.ts<br/>isTauri() 路由"]
+        HTTP_TS["http.ts<br/>fetch fallback (Web)"]
+        INVOKE["invoke() → Rust commands"]
+        RUST_CMD["lib.rs commands<br/>用户/文件/同步域 ~25个"]
+        RUST_API["api/ (ApiClient/reqwest)<br/>user|file|sync|ws"]
+        CFG["SyncConfig<br/>server_url+token+folder_mappings"]
+        ENGINE["sync_engine<br/>notify watcher + 防抖 + 上传调度"]
+        WS_C["ws_client<br/>WebSocket"]
+        VUE --> TSAPI
+        TSAPI -->|Tauri| INVOKE --> RUST_CMD --> RUST_API
+        TSAPI -->|Web| HTTP_TS
+        RUST_CMD --> CFG
+        RUST_CMD --> ENGINE
+        ENGINE --> WS_C
+    end
+
     subgraph Android["Android 客户端 (Kotlin/Compose)"]
         UI["UI 层<br/>Screen/Component Composable"]
         VM["ViewModel (StateFlow)"]
@@ -32,19 +51,29 @@ flowchart LR
         R["/v1 路由 + 中间件<br/>AuthToken/RequireAuth"]
         H["Handler (胖函数)"]
         WS["ws/ Hub+Connection"]
-        DS2[("Redis<br/>在线设备")]
-        DB[("MySQL<br/>User/UploadHistory/DownloadHistory<br/>+13个未用模型")]
+        SYNC["sync/<br/>引擎+Worker+API"]
+        DS2[("Redis<br/>在线设备+同步队列/锁/进度")]
+        DB[("MySQL<br/>User/UploadHistory/DownloadHistory/SyncTask/SyncFolder/...")]
         DISK[("本地磁盘<br/>D:/E:/F:/G: 任意路径")]
         R --> H
         R --> WS
+        R --> SYNC
         H --> DB
         H --> DISK
         WS --> DS2
+        SYNC --> DB
+        SYNC --> DS2
+        WS -.-> SYNC
     end
 
     NET -- "HTTP REST (Token header)" --> R
     NET -- "WebSocket (Token header/查询)" --> WS
     WS -. "file_upload/file_download 事件推回客户端" .-> NET
+
+    RUST_API -- "HTTP REST (reqwest, Token header)" --> R
+    WS_C -- "WebSocket (token query)" --> WS
+    WS -. "task_created/conflict 推回桌面端" .-> WS_C
+    HTTP_TS -- "HTTP REST (fetch, Token header)" --> R
 ```
 
 数据流要点：
@@ -56,21 +85,21 @@ flowchart LR
 
 ## 2. 技术栈速览
 
-| 维度 | Android 前端 | Go 后端 (`new_server`) |
-|---|---|---|
-| 语言 | Kotlin 2.4.0 / JVM 11 | Go 1.25.3 (module `syc-file`) |
-| UI / 框架 | Jetpack Compose (BOM 2025.12) + Material3 + Navigation-Compose | Gin 1.12 + gin-contrib/cors |
-| 网络 | OkHttp 5.3（手写封装，无 Retrofit） | Gin + gorilla/websocket |
-| 序列化 | kotlinx-serialization-json 1.9 | encoding/json |
-| 持久化 | DataStore Preferences（无 Room/无 SQL） | GORM + MySQL；Redis 仅在线设备 |
-| 认证 | Token 头 / 下载用 query token | JWT-HS256 (golang-jwt/v5) + bcrypt |
-| 下载 | PRDownloader 0.6（可断点续传、自带 DB） | HTTP Range / 206 Partial |
-| 日志 | 自写 FileLogger（轮转） | zap + lumberjack + 自写 GORM 适配器 |
-| 配置 | 外部存储 config.conf (Properties) | Viper 读取 config.yaml + 环境变量 |
-| DI | 无框架，`object` 单例 + `viewModel()` | 无，构造器闭包手动注入 `*gorm.DB`/`*redis.Client` |
-| 测试 | 仅模板 ExampleTest，无真实覆盖 | 无测试 |
+| 维度 | Android 前端 | Windows 桌面端 | Go 后端 (`new_server`) |
+|---|---|---|---|
+| 语言 | Kotlin 2.4.0 / JVM 11 | Rust (src-tauri) + TypeScript (Vue) | Go 1.25.3 |
+| UI / 框架 | Jetpack Compose (BOM 2025.12) + Material3 | Tauri 2 + Vue 3 + Naive UI | Gin 1.12 + gin-contrib/cors |
+| 网络 | OkHttp 5.3（手写封装） | reqwest 0.12（Rust）/ fetch（Web fallback） | Gin + gorilla/websocket |
+| 序列化 | kotlinx-serialization-json 1.9 | serde_json (Rust) / TypeScript interface | encoding/json |
+| 持久化 | DataStore Preferences | 无本地 DB；运行期 SyncConfig 内存缓存 | GORM + MySQL；Redis 在线设备+同步队列 |
+| 认证 | Token 头 / 下载用 query token | Token 写 Rust SyncConfig（Tauri）/ localStorage（Web） | JWT-HS256 (golang-jwt/v5) + bcrypt |
+| 下载 | PRDownloader 0.6（断点续传） | build_download_url → 前端 fetch Range | HTTP Range / 206 Partial |
+| WS | OkHttp WebSocket | tokio-tungstenite | gorilla/websocket |
+| 配置 | 外部存储 config.conf (Properties) | set_sync_config invoke / localStorage | Viper config.yaml |
+| DI | 无框架，`object` 单例 | Tauri managed state (`Arc<RwLock<T>>`) | 构造器闭包手动注入 |
+| 测试 | 仅模板，无真实覆盖 | 无测试 | 无测试 |
 
-前端 SDK：`compileSdk/targetSdk 37`，`minSdk 24`，versionName 1.0，release 未开混淆。
+Android SDK：`compileSdk/targetSdk 37`，`minSdk 24`，versionName 1.0，release 未开混淆。
 
 ---
 
@@ -182,6 +211,112 @@ WebSocket `network/websocket.kt`（`WebSocketManager`）：
 
 ---
 
+## 3B. Windows 桌面端架构（`filesync-desktop/`）
+
+### 3B.1 技术栈
+
+| 维度 | 值 |
+|---|---|
+| 框架 | Tauri 2（Rust 后端 + WebView 前端） |
+| 前端 | Vue 3 + Vite + TypeScript + Naive UI |
+| 后端（Rust） | Tauri commands + reqwest 0.12 + notify 6 + tokio + tokio-tungstenite |
+| 持久化 | 无本地 DB；`SyncConfig.folder_mappings` 内存缓存，启动时从服务器 MySQL 拉取 |
+| 状态管理 | Pinia store（Vue 侧）；`Arc<RwLock<SyncConfig>>` 共享状态（Rust 侧） |
+| 路径别名 | `@/` → `src/`（vite.config.ts + tsconfig.json paths） |
+
+### 3B.2 目录结构
+
+```
+filesync-desktop/
+├ src/                        Vue 3 前端
+│  ├ api/
+│  │  ├ platform.ts           平台感知：token/server_url/device_id 读写
+│  │  ├ http.ts               Web 模式 fetch 封装（对标 Rust ApiClient）
+│  │  ├ user/ userApi.ts + userTypes.ts
+│  │  ├ file/ fileApi.ts + fileTypes.ts
+│  │  └ sync/ syncApi.ts + syncTypes.ts
+│  ├ competent/               页面级 composable（login/register/resetPassword）
+│  ├ views/                   Vue 页面（dashboard/file/catalog/monitor/sync）
+│  ├ router/ store/ models/   路由 + Pinia store + 旧类型（兼容保留）
+│  └ request/                 @syl/base-request workspace 包（已迁移，保留空壳）
+└ src-tauri/src/
+   ├ lib.rs                   Tauri 入口 + 全部 ~25 个 command 定义
+   ├ config.rs                SyncConfig + FolderMapping（内存状态）
+   ├ device.rs                generate_device_id / hostname
+   ├ api/
+   │  ├ client.rs             ApiClient（reqwest 封装，无状态）
+   │  ├ routes.rs             全部路由常量（与 Go 后端对齐）
+   │  ├ user/ api+params+response.rs
+   │  ├ file/ api+params+response.rs
+   │  ├ sync/ api+params+response.rs
+   │  └ ws/ types.rs
+   ├ sync_engine.rs           文件 watcher + 防抖 + 上传调度
+   ├ upload_worker.rs         上传 worker 池
+   ├ ws_client.rs             WebSocket 连接管理
+   └ watcher.rs               基础监听（监控页用）
+```
+
+### 3B.3 网络层设计（核心）
+
+**所有网络请求统一在 `src/api/*Api.ts` 做平台分支：**
+
+```
+isTauri() == true   →  invoke() → Rust command → reqwest → Go 服务器
+isTauri() == false  →  http.ts fetch() → Go 服务器（Web 部署模式）
+```
+
+- **Token**：Tauri 模式登录后写入 Rust `SyncConfig.token`，同时同步写一份 `localStorage`（供 web 模式 `http.ts` 复用）。
+- **Server URL**：Tauri 模式默认 `http://localhost:8991`（`SyncConfig::default()`），可通过 `invoke('set_sync_config', ...)` 覆盖；Web 模式从 `localStorage` 读（`platform.ts:getServerUrl()`）。
+- **Device ID**：Tauri 模式由 Rust `generate_device_id()` 生成并持有；Web 模式在 `localStorage` 用 `crypto.randomUUID()` 生成一次复用。
+
+### 3B.4 Tauri Commands 清单
+
+| 域 | Commands |
+|---|---|
+| 配置 | `set_sync_config`, `get_sync_config`, `get_device_id` |
+| 用户 | `login`（写 token 到 SyncConfig）, `verify`, `register`, `reset_password` |
+| 文件 | `get_available_disks`, `traverse_directory`, `upload_file`（本地路径→multipart）, `build_download_url`, `get_download_history`, `delete_download_history` |
+| 同步文件夹 | `create_sync_folder`（写服务器+自动加入 watcher）, `list_sync_folders`, `delete_sync_folder`（写服务器+清内存缓存） |
+| 同步任务 | `list_pending_tasks`, `list_conflicts`, `delete_conflict` |
+| 引擎 | `start_sync`（拉服务器 folders→填充缓存→启动引擎）, `stop_sync`, `is_sync_running` |
+| 监听 | `add_watch`, `remove_watch`, `list_watches`（基础监控页用） |
+| 映射（低级） | `add_folder_mapping`, `remove_folder_mapping` |
+
+### 3B.5 同步文件夹管理设计
+
+**权威数据源：服务器 MySQL `sync_folders` 表**（含 `local_path / remote_path / direction / enabled / owner_device_id`）。
+
+客户端**无本地持久化**，流程：
+
+1. 注册新 folder：`create_sync_folder` → 服务器落库 → 自动更新 `SyncConfig.folder_mappings` 内存缓存 → 自动加入 watcher
+2. 启动同步：`start_sync` → 拉 `list_sync_folders` → 填充内存缓存 → 启动 sync_engine → 开始监听所有 local_path
+3. 删除 folder：`delete_sync_folder` → 服务器删除 → 清理内存缓存（watcher 在重启后自然消失）
+
+`SyncConfig.folder_mappings` 是纯运行期缓存，应用退出即清零，下次启动重新拉服务器。
+
+### 3B.6 同步链路已接通（桌面端）
+
+桌面端同步上报/执行链路本轮已落地（详见 §4.11 后端冲突模型 + `SYNC_PROTOCOL.md`）：
+
+- **配置目录**：`app_paths.rs` 以可执行文件所在目录为基准，建 `config/`(含 `config.yml`、`logs/`) 与 `sync/`；`config.rs` 启动读 `config.yml`（token 不落盘）。
+- **日志**：`logger.rs` 全局日志（Tauri 事件 `app-log` + `config/logs/` 文件）；独立日志窗口 `LogViewer.vue`（label=`logs`），菜单「工具→打开日志窗口」+ 快捷键 `Ctrl+Alt+T`。
+- **file_changed 上报**：`upload_worker.rs` 上传后上报，带 `base_hash`（CAS 基线）；`base_store.rs` 记录每文件已知服务端 hash，持久化 `config/state.json`。
+- **task_created 执行**：`ws_client.rs` 下载走「写 `.synctmp` → 校验 hash → 原子 rename」原子发布；目标被占用回 `task_blocked`（转 `waiting_unlock`）。
+- **冲突**：收 `conflict` → 隔离本地分叉到 `.syncpending/` + 收敛服务端版本 + 记待办；`conflict_resolved` 处理 `accept_server`/`keep_local`。
+- **多线程全量同步**：`start_sync` 末尾遍历目录把「无基线」文件入上传队列（`upload_workers` 并发）；下载用 `Semaphore(download_workers)` 限流。
+- **UI**：`SyncManage.vue`（建同步文件夹/启停/状态/冲突 resolve）、`ViewCatalog.vue` 文件管理（上传/下载/删除/刷新）；新增后端 `POST /v1/file/delete`。
+
+#### 仍存在的问题
+
+- **⚠ P1 [下轮解决] Windows 端 WS 连接认证问题**：桌面端 `ws_client` 连 `/v1/ws/connect?token=...` 存在认证失败（待定位）。疑点：WS 升级请求是否走 `RequireAuth` 阻塞校验、中间件是否读 query token 回退、token 写入时机（`run_ws_loop` 在 token 为空时空转）。下轮专项排查。
+- P2 `upload_file` / `keep_local_reupload` 仍一次性读整文件到内存，大文件需改流式。
+- P2 离线期间被改的「已基线」文件不会被首次全量同步重传（`initial_sync` 只推无基线文件，缺带 hash 的 scan 比对）。
+- P3 服务器地址设置页缺失：`set_sync_config` 已能持久化 `config.yml`，缺填地址的 UI。
+- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「等文件 size/mtime 稳定 N 秒再上报」，可能抓到保存中间态。
+- 经 `/file/delete` 删同步目录内文件仅 `os.Remove`，不更新 trunk、不传播同步（属手动管理）。
+
+---
+
 ## 4. Go 后端架构
 
 ### 4.1 目录与分层
@@ -193,13 +328,15 @@ new_server/
 │  ├ database/ db_connect.go(MySQL) redis_connect.go
 │  ├ handler/ routers.go + file/ + user/   胖 Handler
 │  ├ middleware/ auth.go cors.go jwt.go(死) logger.go
-│  ├ model/  16 个 GORM 模型（仅 3 个被用）
-│  ├ ws/ hub.go connection.go handler.go types.go init.go router.go
+│  ├ model/  GORM 模型（User/Upload/Download/SyncTask/SyncFolder/File/FileVersion/Device 等）
+│  ├ ws/ hub.go connection.go handler.go types.go init.go router.go sync_events.go
+│  ├ sync/ engine.go worker.go operations.go handler.go router.go types.go   同步引擎+REST
 │  ├ repository/  [空]
 │  ├ service/     [空]
 │  └ internal_config/ [空]
-├ pkg/ token/toekn.go(注意拼写) password/ logger/ device_store/
-│     e/ jwtutil/ response/  [均空]
+├ pkg/ token/toekn.go(注意拼写) password/ logger/ device_store/ sync_store/
+│     e/ jwtutil/ response/  [均空，sync_store 为新增已实现]
+├ SYNC_PROTOCOL.md  同步前后端对接契约
 ├ venv/ getKey.go + key.yaml   JWT 密钥（被 gitignore）
 ├ sql/init_mysql.sql  参考 DDL+种子（非 app 执行，靠 AutoMigrate）
 ├ static/avatar/      头像
@@ -209,7 +346,7 @@ new_server/
 **架构模式**：标准分层但**胖 Handler**——Handler 内联做校验/DB/业务/WS 通知；无 service/usecase、无 repository 抽象（目录为空，是「装出来的分层」）。手动构造器闭包注入 `*gorm.DB`/`*redis.Client`，无接口，难以单测。
 
 ### 4.2 启动序列（`cmd/main.go`）
-`config.Init` → `logger.Init` → `gin.New()`(+cors+ZapLogger+Recovery) → `database.InitMySQL`(连接池 10/100,1h) → `db.AutoMigrate(16 模型)` → `database.InitRedis`+ping → `ws.InitWS(db)` → `device_store.Init(redis)` → 注册 `/ping` 与 `handler.RegisterRouters` → `r.Run(:port)`。
+`config.Init` → `logger.Init` → `gin.New()`(+cors+ZapLogger+Recovery) → `database.InitMySQL`(连接池 10/100,1h) → `db.AutoMigrate(17 模型，含 SyncFolder)` → `database.InitRedis`+ping → `ws.InitWS(db)` → `device_store.Init(redis)` → `sync.InitSync(db,redis,Conf.Sync)`（启动 N 个 worker goroutine + Reaper） → 注册 `/ping` 与 `handler.RegisterRouters(r,db,redis,syncEngine)` → `r.Run(:port)`。
 
 ### 4.3 路由与中间件
 所有 API 在 `/v1` 组。中间件：
@@ -230,6 +367,7 @@ new_server/
 - `POST /v1/user/update-info`（multipart：username/email/phone + 可选头像）
 - 文件 `POST /v1/file/{available-disks,traverse-directory,upload,download-history,delete-download-history}`、`GET /v1/file/download`（支持 Range，query：path/name/device_id）
 - WebSocket：`GET /v1/ws/connect`、`GET /v1/ws/my-devices`（所有人，自己的连接）、`GET /v1/ws/online`（**仅 admin**，所有在线用户设备）、`GET /v1/ws/stats`、`GET /v1/ws/user/:id/connections`、`POST /v1/ws/{send,broadcast,group,group/send}`、`DELETE /v1/ws/{conn/:conn_id,user/:id,device/:device_id}`、`GET /v1/ws/group/:name/users`
+- **同步**（`internal/sync/router.go`）：`POST/GET /v1/sync/folders`、`PUT/DELETE /v1/sync/folders/:id`、`POST /v1/sync/{notify,scan}`、`GET /v1/sync/tasks[?status=&device_id=&limit=]`、`GET /v1/sync/tasks/pending?device_id=`、`POST /v1/sync/tasks/:id/{complete,failed}`、`GET /v1/sync/conflicts`、`DELETE /v1/sync/conflicts/:id`
 
 > `config.yaml:30-33` 的 whitelist（`/ping`、`/register`）是前缀匹配，与真实路径 `/v1/user/register` 不符；因 AuthToken 非阻塞故无害，whitelist 实为摆设。
 
@@ -268,17 +406,29 @@ new_server/
 ### 4.8 WebSocket 子系统
 - **Hub**（`hub.go`）`sync.Once` 单例 + `Run()` goroutine；按 conn/user(多设备)/device/group 索引；**同设备单连**（新连挤掉旧连）；`SendToUser/Conn/Device/Group/Broadcast`，广播用 `sync.WaitGroup` 并发扇出。
 - **Connection**（`connection.go`）每连 `readPump`/`writePump`/`heartbeatCheck` 三 goroutine；ping/pong（PongWait 60s、PingPeriod 54s、MaxMessageSize 512KB、SendBuf 256、90s 心跳超时关、5s 写超时）。
-- **消息**（`types.go`）JSON 信封 `{id,type,from,target,content,timestamp,extra}`；type ∈ text/broadcast/system/heartbeat/ack/file_sync/notification；target ∈ user/conn/device/group/all。`init.go:53` 注册默认 handler 把 `file_sync`/`notify`/`text` 路由到 target、`broadcast` 发全员。
+- **消息**（`types.go`）JSON 信封 `{id,type,from,target,content,timestamp,extra}`；type ∈ text/broadcast/system/heartbeat/ack/file_sync/notification；target ∈ user/conn/device/group/all。`init.go` 注册默认 handler：`file_sync` 走可注入的 `FileSyncMessageHandler`（见下），无 event 时回落到 target 路由；`notify`/`text` 按 target 路由、`broadcast` 发全员。
+- **同步事件**（`sync_events.go`）：8 个 event 常量（`file_changed`/`task_created`/`task_progress`/`task_completed`/`task_failed`/`conflict`/`scan_request`/`scan_result`）+ `SetFileSyncHandler` 注入器（避免 ws↔sync 循环依赖）。`file_sync` 消息带 `event` 字段时由 `sync.Engine.handleWSMessage` 处理。
 - **HTTP/WS 桥**（`handler.go:Connect`）升级后把设备写 Redis（`device_store.Online`，key `device:online:{id}` TTL 10s + `user:devices:{uid}` set）。
-- **[仅 schema/未实现]**：`file_sync` 类型只做客户端间路由，**无服务端编排/无冲突解决/无任务调度**。`sync_task` 表有 pending/syncing/completed/failed + progress 字段但无 worker。
+- 后端**已具备** `file_sync` 服务端编排：见 §4.11 同步引擎。
 
 ### 4.9 配置
-Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./config")`）+ `AutomaticEnv()` → `var Conf = new(Config)`（`config.go:11`）。结构含 db/redis/log/whitelist/auth/server/file/user；helper `IsExtensionAllowed`/`IsPathAllowed`(未用)/`GetAllowedPaths`。`config.yaml` 关键值：MySQL `syncfile@127.0.0.1:3306/syncfile`（密码 123456）、Redis `127.0.0.1:6379 db0`、`server.port=8991`、token 7d、refresh 1d、允许盘 D/E/F/G、上传 10GB 禁 .exe、头像 ≤~50MB。**真实 JWT 密钥在 `venv/key.yaml`，与 `config.yaml.auth.secret` 无关**。
+Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./config")`）+ `AutomaticEnv()` → `var Conf = new(Config)`（`config.go:11`）。结构含 db/redis/log/whitelist/auth/server/file/user/**sync**；helper `IsExtensionAllowed`/`IsPathAllowed`（盘符前缀校验，file 与 sync 共用）/`GetAllowedPaths`。`config.yaml` 关键值：MySQL `syncfile@127.0.0.1:3306/syncfile`（密码 123456）、Redis `127.0.0.1:6379 db0`、`server.port=8991`、token 7d、refresh 1d、允许盘 D/E/F/G、上传 10GB 禁 .exe、头像 ≤~50MB、sync.worker_concurrency=4/max_retry=3/lock_ttl=300s/task_timeout=600s。**真实 JWT 密钥在 `venv/key.yaml`，与 `config.yaml.auth.secret` 无关**。
 
 ### 4.10 并发与后台任务
-- 无 cron/任务队列/后台 worker（`time.NewTicker` 仅 WS 心跳用）。
-- 并发原语：Hub goroutine + 每连三 goroutine；`sync.RWMutex` 护 Hub map 与 Connection 状态；`sync.Once` 护 Hub/连接关闭；Redis pipeline 护在线设备。
-- `sync_task`/`storage_config.last_sync` **[无消费方]**。
+- **同步 worker**：`sync.InitSync` 启动 `WorkerConcurrency`(默认4) 个 goroutine `BRPOP` Redis 队列 `sync:queue`，目标设备在线则置 syncing + 发文件锁(SetNX TTL) + WS 推 `task_created`；Reaper goroutine 30s 扫超时任务重试、扫 pending+在线补入队。
+- 并发原语：Hub goroutine + 每连三 goroutine + N worker + Reaper；`sync.RWMutex` 护 Hub map 与 Connection 状态；`sync.Once` 护 Hub/连接关闭；Redis pipeline/SetNX 护在线设备与同步锁。
+- `storage_config.last_sync` 仍 **[无消费方]**。
+
+### 4.11 同步引擎（`internal/sync/`）— 已实现
+后端定位为「接收客户端上报 → 编排 → 推任务给目标设备」，文件探测在客户端（Android root daemon / Windows Rust watcher / 鸿蒙 download_only）。
+- **Redis 存储层** `pkg/sync_store/sync_store.go`：`sync:queue`(List+BRPOP)、`sync:lock:file:{sha256[:16]}`(SetNX TTL)、`sync:progress:{id}`(HSet,24h TTL)、`sync:pending:user:{uid}`(计数)。
+- **引擎** `engine.go`：WS 回调 `handleWSMessage` 分发 `file_changed`/`task_progress`/`task_completed`/`task_failed`/`scan_result`；`HandleFileChange` 做元数据 upsert(File 表启用)+冲突检测(FileHash 双变则推 `conflict` 事件+入库冲突记录)+向其它在线设备派发 download/delete/mkdir 任务；`relative_path` 经 `cleanRelPath` 清洗 `..` 防穿越。
+- **Worker** `worker.go`：BRPOP 出队 → 目标在线 + 文件锁 → 置 syncing → WS 推 `task_created`(含 remote_dir)；Reaper 兜底超时重试与离线积压补发。
+- **操作** `operations.go`：Complete/Fail/Progress 回调、`HandleScan` 离线重连全量比对补任务、Folder CRUD、Task 查询、Conflict 列表/解决。
+- **REST** `handler.go`+`router.go`：见 §4.4 `/v1/sync/*`。
+- **冲突策略**：保留两者——服务端拒收新版本，推 `conflict` 让源端本地改名加 `.{conflict_suffix}` 后缀重报；冲突记录入库，`DELETE /sync/conflicts/:id` 供后续清理残留。
+- **协议契约**：`SYNC_PROTOCOL.md`（WS 事件字段 + REST 接口签名）。
+- **客户端侧 [未接线]**：Android `SyncEngine`+root daemon 待做；Rust 桌面端有 watcher 但需补 `device_id`/`file_changed` 上报/算 hash/接 `task_created`。
 
 ---
 
@@ -298,8 +448,9 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 ### 5.4 WebSocket 消息协议
 信封见 §4.8。当前真正流转的事件：
-- 后端 → 客户端：`file_upload`（start/failed/completed）、`file_download`（start/complete）。
-- 客户端 → 后端：`file_sync`/`text`/`broadcast`（Hub 按 target 路由）。
+- 后端 → 客户端：`file_upload`（start/failed/completed）、`file_download`（start/complete）、`file_sync`（同步引擎派发的 `task_created`/`task_progress`/`task_completed`/`task_failed`/`conflict`/`scan_request`）。
+- 客户端 → 后端：`file_sync`（`file_changed`/`scan_result`/`task_progress`/`task_completed`/`task_failed`，带 `event` 字段走引擎编排）、`text`/`broadcast`（Hub 按 target 路由）。
+- 同步事件字段契约详见 `new_server/SYNC_PROTOCOL.md`。
 
 ### 5.5 文件传输约定
 - 上传：multipart，字段 `path/name/action=upload` + 文件 part `file`；先 `action=check` 冲突预检。单次缓冲落盘，10GB 上限（大文件内存风险）。
@@ -329,9 +480,9 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 7. **前端文档与约定自律**：大量文件头注释、DTO snake/camel 约定、sealed 状态类型、类型安全导航。
 
 ### 6.2 架构层面问题（需关注）
-1. **「同步」名实不符（最大落差）**：两端均无持续同步引擎。前端 autoSync 标志、后端 sync_task 表均为 [未接线]。若产品目标是真同步，需新增「文件监听 + 任务调度 + 增量/分块 + 冲突策略」一整层；当前仅是「按需传输 + 实时事件」。
+1. **「同步」名实不符（落差收窄中）**：**后端同步引擎已实现**（§4.11：Redis 队列 + worker + 冲突检测 + WS 派发 + Folder CRUD/Task 回调/Scan 比对）。**剩客户端侧未接线**：Android 端无文件监听守护（autoSync 标志仍无消费方），Rust 桌面端有 `notify` watcher 但未上报 `file_changed`/未接 SyncTask。打通需：Android root daemon + FileObserver、Rust 端补 `device_id`/hash/`file_changed`/`task_created` 处理（契约见 `SYNC_PROTOCOL.md`）。
 2. **后端「装出来的分层」**：service/repository/internal_config/pkg(e|jwtutil|response) 全空 → 实为胖 Handler，与目录暗示的 clean 架构不符，易误导。要么补分层，要么删空目录、按真实结构重命名。
-3. **schema 与实现严重脱节**：16 模型仅 3 个落地。RBAC/文件元数据/version/分享/配额/审计/同步任务「只在表里」。文档与对外承诺必须区分「schema-defined」与「functional」。
+3. **schema 与实现脱节（部分消化）**：落地模型升至 6 个（User/Upload/Download/**SyncTask/SyncFolder/File**）。仍未落地：FileVersion(版本历史未写)/RBAC(Permission/Role/RolePermission/UserRole)/DictType/DictData/OperationLog/StorageConfig/ShareRecord/Device 表。文档对外承诺仍须区分「schema-defined」与「functional」。
 4. **构建/密钥风险**：`venv/` gitignored 但 `pkg/token` 编译期依赖其 `init()`，新克隆不能 build。`config.yaml.auth.secret` 是死配置，真实密钥在 key.yaml，密钥管理不一致。
 5. **无 Repository/无缓存的纯网络依赖前端**：每屏重拉，无离线能力，且 ViewModel 直连 API object，缺抽象层。`baseUrl` 单例初始化求值 + 运行时改配置不重赋值 = 陈旧 URL bug。
 6. **安全面**：前端明文存密码、"`secure_prefs`" 未加密、cleartext 全开、过度权限（SMS/联系人/相机/麦克风未被代码用）；后端 CORS `*`、WS `CheckOrigin: true`、`RequireRole` 未接线致 admin 端点开放。
@@ -341,7 +492,18 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 10. **无测试**：前后端均无真实测试覆盖，重构风险高。
 
 ### 6.3 结论
-架构**骨架合理、基础设施扎实**，但**业务完成度低且存在名实不符与多处半成品/安全隐患**。短期内建议优先级：① 修构建（venv 密钥纳入安全分发）→ ② 清死代码 + 补/删空分层目录 → ③ 修安全（凭证加密、收窄权限/CORS、接线 RequireRole）→ ④ 决策「同步」是否真要做，做则补同步引擎，不做则下线相关 [未接线] 配置与表以免误导。
+架构**骨架合理、基础设施扎实**。**后端同步引擎已落地**；**Windows 桌面端网络层已统一**（TS 全部走 invoke/fetch，两套 HTTP 客户端问题消除），Tauri command 集完整（~25 个），平台适配器模式支持 Web 部署。
+
+当前主要落差：**桌面端同步链路上报/执行未接通**（watcher 就绪但未上报 `file_changed`，ws_client 就绪但未处理 `task_created`）；**Android 端无探测**。
+
+建议优先级：
+① **接通 Rust 同步上报**（sha256 hash + WS 发 `file_changed` + ws_client 解析 `task_created` 执行下载/删除/mkdir + 回 `task_completed/failed`，契约见 `SYNC_PROTOCOL.md`）
+② 桌面端设置页面（服务器地址 UI）
+③ upload_file 改流式
+④ 修构建（venv 密钥纳入安全分发）
+⑤ 清死代码 + 补/删空分层目录
+⑥ 修安全（凭证加密、收窄权限/CORS、接线 RequireRole）
+⑦ Android root daemon + FileObserver
 
 ---
 
@@ -357,20 +519,36 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - P2 cleartext 全开（`network_security_config.xml`）；`AndroidManifest` 过度权限且 `MANAGE_EXTERNAL_STORAGE` 重复声明。
 - P2 `/user/register` 响应无 code 致前端校验恒失败；multipart 接口走不通 `Request`（3 处 TODO）。
 - P3 `router/AppRoute.kt` 死代码；`MonitorScreen.kt` 内塞 FileDetail/Search/About 多屏；分页模型重复。
+- P1 **同步客户端待接线**：`AppConfig.autoSyncEnabled/autoSyncIntervalMs/syncOnWifiOnly` 仍无调度器消费；无 `SyncEngine`/root daemon/FileObserver；后端同步引擎已就绪（§4.11），需 Android 侧补上报 `file_changed`+接 `task_created`（契约 `SYNC_PROTOCOL.md`）。
 - ✅ ~`DevicesViewModel` 桩~ → 改为调 `WsApi.getMyDevices` 返回真实在线设备数。
 - ✅ ~下载状态多实例/进度不同步/暂停恢复失效~ → `DownloadController` 单例收敛 + 前台服务 + 通知栏 action。
 - ✅ ~`DownloadList` deviceId 类型混用~ → `DownloadItem` 加 `deviceId` 字段。
 - ✅ ~`DownloadRepository`/`TransferScreen`/`TransmissionList`/`MicroTransmissionCard` 废弃文件~ → 已删除。
 - ✅ ~监控路由 bug（`MonitorDestination` 双注册）~ → `MonitorGraph` 改绑 `MonitorListDestination`。
 
+**Windows 桌面端**
+- 🔴 **P1 [下轮解决] Windows 端 WS 连接认证问题**：`ws_client` 连 `/v1/ws/connect?token=...` 认证失败（待定位）。疑点：WS 升级是否走 `RequireAuth` 阻塞校验、中间件是否读 query token 回退、`run_ws_loop` 在 token 写入前空转的时机。**下轮专项排查并修复**。
+- P2 `upload_file` / `keep_local_reupload` 仍整文件读内存，大文件需改流式。
+- P2 离线期间被改的「已基线」文件不会被首次全量同步重传（`initial_sync` 只推无基线文件，缺带 hash 的 scan 比对）。
+- P3 服务器地址设置页缺失：`set_sync_config` 已持久化 `config.yml`，缺填地址 UI。
+- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「size/mtime 稳定 N 秒再上报」。
+- ✅ ~`file_changed` 上报 / `task_created` 执行待接线~ → 已落地：上传带 `base_hash`、原子发布(.synctmp)、冲突隔离(.syncpending)、`waiting_unlock`、多线程全量同步（见 §3B.6）。
+- ✅ ~配置无持久化~ → `config/config.yml`（exe 同级 `config/`+`sync/`），`base_store` 持久化 `config/state.json`。
+- ✅ ~无日志可见~ → 全局 `logger` + 独立日志窗口（菜单 / `Ctrl+Alt+T`）。
+- ✅ ~`builder error`~ → `SyncConfig::default()` server_url 已改为 `http://localhost:8991`，`make_client()` 返回 `Result`。
+- ✅ ~两套 HTTP 客户端并存 / TS 直接 fetch~ → 网络层统一走 invoke / fetch fallback。
+- ✅ ~重启丢失 folder_mappings~ → `start_sync` 从服务器拉 `list_sync_folders` 重建缓存。
+
 **后端**
 - P1 `venv/` gitignored 但编译依赖 → 新克隆不能 build；`auth.secret`/`auth.enabled` 死配置。
 - P1 `RequireRole` 中间件仍未接线（admin 守卫靠各 handler 内联 `isAdmin`，非全局）；CORS `*`、WS `CheckOrigin:true`。
-- P1 16 模型仅 3 落地；service/repository 等空目录误导；`redisClient` 死参。
+- P1 service/repository 等空目录误导；handlers 形参 `redisClient` 死参（file/ws handler 未用）。
 - P2 上传 `SaveUploadedFile` 缓冲落盘（10GB 上限内存风险）；`File.Storage.*` 配置未用、文件落任意盘路径。
 - P2 死代码：`middleware/jwt.go`(硬编码 secret)、`middleware/cors.go`/`auth.go:CORS()`；拼写 `toekn.go`；`venv` 命名误导。
 - P3 AutoMigrate vs `init_mysql.sql` schema 漂移；README 仍写 PostgreSQL；无测试。
 - ✅ ~admin 端点对所有登录用户开放~ → `GetOnlineUsers` 加 admin 守卫；新增 `GetMyDevices` 供所有人。
+- ✅ ~`sync_task` 表无 handler/worker，file_sync 仅客户端间路由~ → 新增 `internal/sync/` 引擎 + worker + 冲突检测 + REST `/v1/sync/*`；`file_sync` 接入服务端编排。
+- ✅ ~路径校验重复且 `IsPathAllowed` 死代码~ → 提升为 `config.Conf.IsPathAllowed` 盘符前缀校验，file/sync 共用。
 
 ---
 
@@ -394,7 +572,19 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 | `DownloadStore` | 前端下载任务持久化 `ui/viewModel/data/DownloadStore.kt` |
 | `UserStore` | 前端当前用户可观察单例 `ui/viewModel/user/UserStore.kt` |
 | `DeviceMonitorViewModel` | 设备监控 VM `ui/viewModel/monitor/DeviceMonitorViewModel.kt` |
-| `isAdmin` | 后端 admin 判定辅助 `ws/handler.go:327`（Roles 含 "admin"） |
+| `isAdmin` | 后端 admin 判定辅助 `ws/handler.go`（Roles 含 "admin"） |
+| `sync.Engine` | 后端同步引擎 `internal/sync/engine.go`（编排上报→任务→派发） |
+| `sync.Worker` | 后端同步 worker `internal/sync/worker.go`（BRPOP 队列 + Reaper） |
+| `sync_store` | 后端 Redis 同步存储 `pkg/sync_store/sync_store.go`（队列/锁/进度/计数） |
+| `SyncFolder` / `SyncTask` | 同步文件夹配置 / 同步任务模型 `internal/model/` |
+| `SYNC_PROTOCOL.md` | 前后端同步对接契约 `new_server/SYNC_PROTOCOL.md` |
+| `IsPathAllowed` | 盘符前缀路径校验 `config/config.go`（file/sync 共用） |
+| `SyncConfig` | 桌面端 Rust 运行期配置 `config.rs`（server_url/token/device_id/folder_mappings），`Arc<RwLock<T>>` 共享 |
+| `FolderMapping` | 内存缓存的 folder 映射 `{local_path, remote_path, folder_id}`，来源于服务器 `sync_folders` |
+| `ApiClient` | 桌面端 Rust HTTP 客户端封装 `api/client.rs`（reqwest，无状态） |
+| `platform.ts` | 桌面端 TS 平台感知工具 `src/api/platform.ts`（token/server_url/device_id 的 Tauri/Web 双路读写） |
+| `http.ts` | 桌面端 TS Web 模式 fetch 封装 `src/api/http.ts`（对标 Rust ApiClient，isTauri()==false 时使用） |
+| `*Api.ts` | 桌面端 TS API 入口层 `src/api/{user,file,sync}/*Api.ts`，每个函数做 isTauri() 路由 |
 | [仅 schema/未接线] | 表/模型/配置已定义但无业务代码消费，文档中统一标注 |
 | P1/P2/P3 | 问题优先级，P1 最高；✅ 标记本轮已解决项 |
 
@@ -402,22 +592,25 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 ---
 
-## 9. 下一轮：实时同步基底（设计预留，未实现）
+## 9. 实时同步基底（后端已实现，客户端待接）
 
-> 本节为下一轮对话的上下文锚点，描述目标与约束，当前**无代码实现**。
+> 后端编排层已落地（§4.11），本节记录设计约束与客户端待办。
 
-### 9.1 目标
-实现"指定文件夹的实时同步"——本地文件夹变化（增/改/删）自动同步到服务端，反向亦然。这是用户明确的**核心功能点**。基底要在本轮持久化续传地基（`DownloadStore`/`persistentDownloadEnabled`）之上构建。
+### 9.1 现状
+- **后端**：同步引擎 `internal/sync/` 全链路实现——Redis 队列(`sync:queue`)+文件锁+进度+计数、worker BRPOP 调度 + Reaper 超时重试/离线补发、冲突检测(hash 双变推 `conflict`+残留可 `DELETE /sync/conflicts/:id` 清理)、Folder CRUD/Task 回调/Scan 全量比对、WS `file_sync` 接入编排、REST `/v1/sync/*`。
+- **客户端**：Android/Rust 均未接上报与任务执行。Rust 桌面端已有 `notify` watcher + 上传 worker + WS 客户端骨架，但缺：稳定 `device_id`、`file_changed` 上报、sha256、`task_created` 处理、delete 同步。Android 端无 daemon/FileObserver。
 
-### 9.2 关键约束（已与用户确认）
-- **守护强度**：用户期望"系统进程级、类似厂商同步服务、被杀也继续"。原生 Android 应用层无法达成，需 root daemon（`su` fork 常驻进程承载 `FileObserver` + 同步循环）+ app 与 daemon IPC。
-- **开关归属**：同步引擎作为 **root 模式功能**，默认关，仅 `RootHelper.checkRootAccess()` 通过才在设置页可见（与现有 `persistentDownloadEnabled` 开关同模式）。
-- **本轮只做地基**：先把持久化层、任务模型、引擎接口骨架搭好，daemon 化与 FileObserver 留后续。
+### 9.2 关键约束（已确认）
+- **探测在客户端**：同步厂家发生在客户端——Android 用 root daemon(`su` fork + FileObserver)主动探测上报；Windows 用 Rust watcher；鸿蒙无监听能力则当 `download_only` 客户端。后端只做"接收上报 → 编排 → 推任务给目标设备"。
+- **双向同步 + 冲突保留两者**：源端 hash 与服务端 hash 都非空且不等 → 推 `conflict` 让源端改名 `.conflict.<ts>` 重报；冲突记录入库可清理。
+- **守护强度**：用户期望 root 模式「被杀也继续」，需 root daemon；非 root 仅「app 在前台/前台服务时同步」。
+- **开关归属**：同步作为 root 模式功能，默认关，仅 `RootHelper.checkRootAccess()` 通过才可见（与 `persistentDownloadEnabled` 同模式）。
 
-### 9.3 复用与新增
-- **复用**：`DownloadController`/`DownloadService`（传输承载）、`DownloadStore`（持久化思路）、`RootHelper`（root 执行）、`AppConfig` + `ConfigManager`（开关）、WS `file_sync` 消息类型（已注册，当前仅客户端间路由）。
-- **后端待补**：`SyncTask` 模型已在 schema（pending/syncing/completed/failed + progress）但无 handler/worker；需新增同步任务 CRUD + worker 调度 + 冲突策略。
-- **Android 待补**：`SyncEngine` 单例（监听目录 + 生成 SyncTask + 调 DownloadController 传输）、root daemon 进程模型、`FileObserver` 接线、同步规则配置 UI。
+### 9.3 复用与待补
+- **后端已补**：SyncTask/SyncFolder 模型 + File 元数据启用 + sync_store + engine/worker/operations/handler/router + WS sync_events + config sync 段。
+- **Rust 已补**：稳定 device_id（`device.rs:generate_device_id`）、完整 Tauri command 集（用户/文件/同步域共 ~25 个）、ApiClient(reqwest)、notify watcher + 防抖 + 上传 worker + ws_client 骨架、`start_sync` 启动时从服务器拉 folder 列表填充缓存、`create_sync_folder` 自动加入 watcher。
+- **Rust 待补**：① 上传后向服务器上报 `file_changed`（需 sha256 文件 hash + WS 发送 `file_sync` 消息）；② ws_client 解析 `task_created` 按 `task_type`(download/delete/mkdir) 执行并回 `task_completed/failed`；③ 文件 remove 事件走 delete 上报；④ upload_file 改流式避免大文件全量内存。
+- **Android 待补**：`SyncEngine` 单例、root daemon 进程模型、FileObserver 接线、同步规则配置 UI。
 
 ### 9.4 应用内更新机制（搁置备忘）
 - 决策：APK 上传由 **PC 端发起**（当前 PC 端未具备 → 整体搁置）；安装**全部弹系统安装框**（非 root 静默不做）；范围**仅 Android**。
@@ -425,4 +618,4 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 ---
 
-*本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。§9 为下一轮目标锚点，实现后应将设计转为正式章节。*
+*本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。§9 后端部分已转正（见 §4.11），客户端待接项落地后应从 §9.3 移除。*
