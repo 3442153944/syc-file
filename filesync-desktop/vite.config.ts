@@ -15,7 +15,7 @@ export default defineConfig(async ({mode}) => {
     return {
         plugins: [
             vue(),
-            checker({ vueTsc: true }),
+            checker({vueTsc: true}),
             // 仅在开发环境启用 DevTools
             // ...(env.VITE_DEVTOOLS === 'true' ? [
             //     VueDevTools({
@@ -42,6 +42,13 @@ export default defineConfig(async ({mode}) => {
         clearScreen: false,
         server: {
             port: 1420,
+            proxy: {
+                '/file': {
+                    target: 'http://localhost:8991', // 你的 Go 后端地址
+                    changeOrigin: true,
+                    rewrite: (path) => path.replace(/^\/file/, '') // 把 /file 去掉，变成 /v1/user/login 发给后端
+                }
+            },
             strictPort: true,
             host: host || false,
             hmr: host

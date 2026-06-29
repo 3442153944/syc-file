@@ -9,7 +9,7 @@
 
 这是一个**个人自托管文件传输/同步系统**，三端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
 
-⚠ **同步链路现状**：Go 后端同步引擎已全链路实现（Redis 队列 + worker 调度 + base CAS 冲突检测 + WS 派发，见 §4.11）。**Windows 桌面端同步上报/执行链路已接通**（`file_changed` 带 `base_hash` 上报、`task_created` 原子发布执行、冲突隔离、`waiting_unlock`、多线程全量同步、日志窗口，见 §3B.6）。**但桌面端 WS 连接存在认证问题（🔴 P1，下轮解决）**，整条链路尚未实机跑通验证。Android 端仍无文件监听守护。
+⚠ **同步链路现状**：Go 后端同步引擎已全链路实现（Redis 队列 + worker 调度 + base CAS 冲突检测 + WS 派发，见 §4.11）。**Windows 桌面端同步上报/执行链路已接通**（`file_changed` 带 `base_hash` 上报、`task_created` 原子发布执行、冲突隔离、`waiting_unlock`、多线程全量同步、日志窗口，见 §3B.6）。**WS 认证问题已修复**（`ws_client.rs` URL 补齐 `/v1/ws/connect` 路径）。Android 端仍无文件监听守护。
 
 ---
 
@@ -308,7 +308,7 @@ isTauri() == false  →  http.ts fetch() → Go 服务器（Web 部署模式）
 
 #### 仍存在的问题
 
-- **⚠ P1 [下轮解决] Windows 端 WS 连接认证问题**：桌面端 `ws_client` 连 `/v1/ws/connect?token=...` 存在认证失败（待定位）。疑点：WS 升级请求是否走 `RequireAuth` 阻塞校验、中间件是否读 query token 回退、token 写入时机（`run_ws_loop` 在 token 为空时空转）。下轮专项排查。
+- ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径（原 `{ws_url}?token=...` 打到根路径 404）。Go 端 `AuthToken` 已正确支持 query token 回退、`RequireAuth` 拦截正确。
 - P2 `upload_file` / `keep_local_reupload` 仍一次性读整文件到内存，大文件需改流式。
 - P2 离线期间被改的「已基线」文件不会被首次全量同步重传（`initial_sync` 只推无基线文件，缺带 hash 的 scan 比对）。
 - P3 服务器地址设置页缺失：`set_sync_config` 已能持久化 `config.yml`，缺填地址的 UI。
@@ -527,7 +527,7 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - ✅ ~监控路由 bug（`MonitorDestination` 双注册）~ → `MonitorGraph` 改绑 `MonitorListDestination`。
 
 **Windows 桌面端**
-- 🔴 **P1 [下轮解决] Windows 端 WS 连接认证问题**：`ws_client` 连 `/v1/ws/connect?token=...` 认证失败（待定位）。疑点：WS 升级是否走 `RequireAuth` 阻塞校验、中间件是否读 query token 回退、`run_ws_loop` 在 token 写入前空转的时机。**下轮专项排查并修复**。
+- ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径，Go 端认证链路经验证正确。
 - P2 `upload_file` / `keep_local_reupload` 仍整文件读内存，大文件需改流式。
 - P2 离线期间被改的「已基线」文件不会被首次全量同步重传（`initial_sync` 只推无基线文件，缺带 hash 的 scan 比对）。
 - P3 服务器地址设置页缺失：`set_sync_config` 已持久化 `config.yml`，缺填地址 UI。

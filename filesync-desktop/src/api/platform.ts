@@ -7,20 +7,31 @@
  * 外部代码统一调这里的函数，不直接碰 localStorage 或 invoke。
  */
 
-import { isTauri } from '@tauri-apps/api/core'
+import {isTauri} from '@tauri-apps/api/core'
 
 const KEY_SERVER = 'filesync_server_url'
-const KEY_TOKEN  = 'filesync_token'
+const KEY_TOKEN = 'filesync_token'
 const KEY_DEVICE = 'filesync_device_id'
 
 // ── server URL ────────────────────────────────────────────────────────────────
 
 export function getServerUrl(): string {
-  return localStorage.getItem(KEY_SERVER) || 'http://localhost:8991'
+    const savedUrl = localStorage.getItem(KEY_SERVER)
+    if (savedUrl) return savedUrl
+
+    // 1. Tauri 客户端模式：继续走本地 8991 绝对路径
+    if (isTauri()) {
+        return 'http://localhost:8991'
+    }
+
+    // 2. 网页/Web 模式：直接返回相对路径 "/file"
+    // 这样浏览器发请求就会变成: 当前域名/file/api/login
+    // 完美触发你 Nginx 的 location /file/ 代理
+    return '/file'
 }
 
 export function setServerUrl(url: string): void {
-  localStorage.setItem(KEY_SERVER, url.trimEnd().replace(/\/$/, ''))
+    localStorage.setItem(KEY_SERVER, url.trimEnd().replace(/\/$/, ''))
 }
 
 // ── token ─────────────────────────────────────────────────────────────────────
@@ -28,30 +39,30 @@ export function setServerUrl(url: string): void {
 // 方便 web fallback 路径复用；Rust login command 自己也会写到 SyncConfig）。
 
 export function getToken(): string {
-  return localStorage.getItem(KEY_TOKEN) || ''
+    return localStorage.getItem(KEY_TOKEN) || ''
 }
 
 export function setToken(token: string): void {
-  if (token) {
-    localStorage.setItem(KEY_TOKEN, token)
-  } else {
-    localStorage.removeItem(KEY_TOKEN)
-  }
+    if (token) {
+        localStorage.setItem(KEY_TOKEN, token)
+    } else {
+        localStorage.removeItem(KEY_TOKEN)
+    }
 }
 
 export function clearToken(): void {
-  localStorage.removeItem(KEY_TOKEN)
+    localStorage.removeItem(KEY_TOKEN)
 }
 
 // ── device ID ─────────────────────────────────────────────────────────────────
 // Tauri 模式由 Rust 生成并持有；web 模式在 localStorage 生成一次后复用。
 
 export function getDeviceId(): string {
-  if (isTauri()) return ''   // web 模式才走这里；Tauri 调 invoke('get_device_id')
-  let id = localStorage.getItem(KEY_DEVICE)
-  if (!id) {
-    id = crypto.randomUUID()
-    localStorage.setItem(KEY_DEVICE, id)
-  }
-  return id
+    if (isTauri()) return ''   // web 模式才走这里；Tauri 调 invoke('get_device_id')
+    let id = localStorage.getItem(KEY_DEVICE)
+    if (!id) {
+        id = crypto.randomUUID()
+        localStorage.setItem(KEY_DEVICE, id)
+    }
+    return id
 }
