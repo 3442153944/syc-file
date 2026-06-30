@@ -480,7 +480,7 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 7. **前端文档与约定自律**：大量文件头注释、DTO snake/camel 约定、sealed 状态类型、类型安全导航。
 
 ### 6.2 架构层面问题（需关注）
-1. **「同步」名实不符（落差收窄中）**：**后端同步引擎已实现**（§4.11：Redis 队列 + worker + 冲突检测 + WS 派发 + Folder CRUD/Task 回调/Scan 比对）。**剩客户端侧未接线**：Android 端无文件监听守护（autoSync 标志仍无消费方），Rust 桌面端有 `notify` watcher 但未上报 `file_changed`/未接 SyncTask。打通需：Android root daemon + FileObserver、Rust 端补 `device_id`/hash/`file_changed`/`task_created` 处理（契约见 `SYNC_PROTOCOL.md`）。
+1. **「同步」基本闭环（仅 Android + UI 待补）**：**后端同步引擎已实现**（§4.11：Redis 队列 + worker + 冲突检测 + WS 派发 + Folder CRUD/Task 回调/Scan 比对）；**Windows（Rust 桌面端）同步链路已跑通**（§3B.6：watcher + sha256 + `file_changed` 上报 + ws_client 执行 `task_created` + 冲突保留），实测可用。**剩两块**：① 桌面端「冲突待办/同步任务列表」UI 简陋（功能已通，界面不行）；② Android 端尚未接（无 root daemon/FileObserver，autoSync 标志暂无消费方）。
 2. **后端「装出来的分层」**：service/repository/internal_config/pkg(e|jwtutil|response) 全空 → 实为胖 Handler，与目录暗示的 clean 架构不符，易误导。要么补分层，要么删空目录、按真实结构重命名。
 3. **schema 与实现脱节（部分消化）**：落地模型升至 6 个（User/Upload/Download/**SyncTask/SyncFolder/File**）。仍未落地：FileVersion(版本历史未写)/RBAC(Permission/Role/RolePermission/UserRole)/DictType/DictData/OperationLog/StorageConfig/ShareRecord/Device 表。文档对外承诺仍须区分「schema-defined」与「functional」。
 4. **构建/密钥风险**：`venv/` gitignored 但 `pkg/token` 编译期依赖其 `init()`，新克隆不能 build。`config.yaml.auth.secret` 是死配置，真实密钥在 key.yaml，密钥管理不一致。
@@ -494,16 +494,16 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 ### 6.3 结论
 架构**骨架合理、基础设施扎实**。**后端同步引擎已落地**；**Windows 桌面端网络层已统一**（TS 全部走 invoke/fetch，两套 HTTP 客户端问题消除），Tauri command 集完整（~25 个），平台适配器模式支持 Web 部署。
 
-当前主要落差：**桌面端同步链路上报/执行未接通**（watcher 就绪但未上报 `file_changed`，ws_client 就绪但未处理 `task_created`）；**Android 端无探测**。
+当前主要落差：**Windows 桌面端同步已闭环、实测可用**，仅「冲突待办/同步任务列表」UI 简陋；**Android 端同步未做**（无探测）。
 
 建议优先级：
-① **接通 Rust 同步上报**（sha256 hash + WS 发 `file_changed` + ws_client 解析 `task_created` 执行下载/删除/mkdir + 回 `task_completed/failed`，契约见 `SYNC_PROTOCOL.md`）
+① **桌面端「冲突收件箱/同步任务列表」UI**（同步功能已通，界面简陋；冲突待办语义见 §9.2）
 ② 桌面端设置页面（服务器地址 UI）
-③ upload_file 改流式
+③ **分片文件传输协议**替代单缓冲上传（见 §9.5）
 ④ 修构建（venv 密钥纳入安全分发）
 ⑤ 清死代码 + 补/删空分层目录
 ⑥ 修安全（凭证加密、收窄权限/CORS、接线 RequireRole）
-⑦ Android root daemon + FileObserver
+⑦ Android 同步（root daemon + FileObserver）
 
 ---
 
@@ -592,13 +592,14 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 ---
 
-## 9. 实时同步基底（后端已实现，客户端待接）
+## 9. 实时同步基底（后端 + Windows 客户端已闭环，Android 待接）
 
-> 后端编排层已落地（§4.11），本节记录设计约束与客户端待办。
+> 后端编排层（§4.11）+ Windows（Rust）客户端（§3B.6）均已落地、实测可用，本节记录设计约束与剩余待办（Android + UI）。
 
 ### 9.1 现状
 - **后端**：同步引擎 `internal/sync/` 全链路实现——Redis 队列(`sync:queue`)+文件锁+进度+计数、worker BRPOP 调度 + Reaper 超时重试/离线补发、冲突检测(hash 双变推 `conflict`+残留可 `DELETE /sync/conflicts/:id` 清理)、Folder CRUD/Task 回调/Scan 全量比对、WS `file_sync` 接入编排、REST `/v1/sync/*`。
-- **客户端**：Android/Rust 均未接上报与任务执行。Rust 桌面端已有 `notify` watcher + 上传 worker + WS 客户端骨架，但缺：稳定 `device_id`、`file_changed` 上报、sha256、`task_created` 处理、delete 同步。Android 端无 daemon/FileObserver。
+- **Windows（Rust 桌面端）**：**同步已闭环、实测可用**——稳定 `device_id` + `notify` watcher + sha256 + `file_changed` 上报 + ws_client 执行 `task_created`(download/delete/mkdir) + 冲突保留（详见 §3B.6）。**唯一短板**：冲突待办/同步任务列表 UI 简陋。
+- **Android**：**未接**——无 root daemon / FileObserver，autoSync 标志暂无消费方。
 
 ### 9.2 关键约束（已确认）
 - **探测在客户端**：同步厂家发生在客户端——Android 用 root daemon(`su` fork + FileObserver)主动探测上报；Windows 用 Rust watcher；鸿蒙无监听能力则当 `download_only` 客户端。后端只做"接收上报 → 编排 → 推任务给目标设备"。
@@ -609,13 +610,36 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 ### 9.3 复用与待补
 - **后端已补**：SyncTask/SyncFolder 模型 + File 元数据启用 + sync_store + engine/worker/operations/handler/router + WS sync_events + config sync 段。
 - **Rust 已补**：稳定 device_id（`device.rs:generate_device_id`）、完整 Tauri command 集（用户/文件/同步域共 ~25 个）、ApiClient(reqwest)、notify watcher + 防抖 + 上传 worker + ws_client 骨架、`start_sync` 启动时从服务器拉 folder 列表填充缓存、`create_sync_folder` 自动加入 watcher。
-- **Rust 待补**：① 上传后向服务器上报 `file_changed`（需 sha256 文件 hash + WS 发送 `file_sync` 消息）；② ws_client 解析 `task_created` 按 `task_type`(download/delete/mkdir) 执行并回 `task_completed/failed`；③ 文件 remove 事件走 delete 上报；④ upload_file 改流式避免大文件全量内存。
+- **Rust 已接通**（原"待补"①②③ 均已落地，见 §3B.6）：`file_changed` 上报 + sha256、ws_client 执行 `task_created`(download/delete/mkdir) 并回 `task_completed/failed`、remove 走 delete 上报、冲突保留。
+- **Rust 待补**：① upload_file 改流式 → 并入 §9.5 分片传输协议；② 冲突待办/同步任务列表 UI（功能已通、界面简陋）。
 - **Android 待补**：`SyncEngine` 单例、root daemon 进程模型、FileObserver 接线、同步规则配置 UI。
 
 ### 9.4 应用内更新机制（搁置备忘）
 - 决策：APK 上传由 **PC 端发起**（当前 PC 端未具备 → 整体搁置）；安装**全部弹系统安装框**（非 root 静默不做）；范围**仅 Android**。
 - 未来落点：后端 `update` 模块（`AppRelease` + upload/check/download + WS `app_update` 推送）+ PC 端上传 UI + Android `UpdateController`（check + WS 监听 + 下载复用 `DownloadController` + FileProvider + `ACTION_VIEW` + `REQUEST_INSTALL_PACKAGES`）。
 
+### 9.5 分片文件传输协议（设计中，替代当前单缓冲上传）
+
+> 动机：当前上传走 `SaveUploadedFile` 单次缓冲落盘（§6.2#7，10GB 上限有内存风险）。改为「分片 + 按偏移定位写」——**落盘即成品、无需拼接**，天然支持乱序 / 并发 / 断点续传。Rust 端用 **BLAKE3**（比 SHA-256 快、可并行、Merkle 树结构便于合并校验）。
+
+**客户端（发送端）**
+- 传输前先发**文件元信息**：总大小、分片大小、分片数、整体 BLAKE3。
+- 文件切分片，每片带**序号 `index`**，多线程**乱序上传**；每片可带分片 BLAKE3。
+
+**服务端（接收端）**
+- 收元信息后**预分配空间**：`fallocate`/`posix_fallocate`(Linux) 或 `set_len`(注意仅逻辑稀疏)。目的不是"物理连续"（SSD 上无意义），而是**提前撞 ENOSPC + 抗碎片 + 免边写边扩展元数据**。
+- 每片按 `offset = index * chunk_size` **定位写**：必须用 positional write（Rust `FileExt::write_at`/`seek_write`），**不动共享文件游标 → 多线程共享同一个 fd 并发写无需加锁**；**切忌 `seek()+write()`**（共享 cursor 必 race，是该方案能"无锁并发写"的命门）。
+- 写入即校验**分片 BLAKE3**；用**原子 bitset（`[AtomicU64]`）**标记已落盘片，兼做**幂等去重 + 断点续传**（重连只补缺片）。
+- 全部落盘后做**整体校验**，二选一（**别既逐片又整读**）：
+  - **BLAKE3 hazmat / 子树合并**：分片大小取 1024 的 2 幂次倍且对齐 → 由分片子树哈希**合并出根哈希**，省掉最后整读一遍；
+  - 或**单遍并行**：落盘后 `Hasher::update_rayon` 整读一次（BLAKE3 够快，可能比"逐片哈希 + 二次整读"更省）。
+- 收尾：`sync_all()` 落盘一次；文件名先 `.part`，整体校验通过再 **rename 成正式名**（中途挂掉不留半成品）。
+- 校验项：`index` 越界、`chunk_size`/总大小合理性、路径白名单（复用 `config.IsPathAllowed`）。
+
+**哈希选型**：只防传输损坏可用 `xxh3`（更快、非加密）；要校验 + Merkle 合并便利，则以 **BLAKE3** 为准。
+
+> 状态：[设计中 / 未实现]。当前上传仍为单缓冲 `SaveUploadedFile`，落地后从 §6.2#7 / §6.3③ 移除。
+
 ---
 
-*本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。§9 后端部分已转正（见 §4.11），客户端待接项落地后应从 §9.3 移除。*
+*本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。§9 后端 + Windows 客户端已转正（见 §4.11 / §3B.6），剩余 Android 接入与桌面端同步 UI 落地后应从 §9.3 移除；§9.5 分片传输协议实现后从 §6.3③ 移除。*
