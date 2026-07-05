@@ -56,28 +56,80 @@ pub struct TraverseDirectoryData {
     pub total_count: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CheckFileData {
-    pub exists: bool,
-    #[serde(rename = "can_upload")]
-    pub can_upload: bool,
-    #[serde(rename = "file_name")]
-    pub file_name: String,
-    #[serde(rename = "file_size")]
-    pub file_size: Option<i64>,
-    pub path: String,
+
+// ==================== 分片上传 ====================
+// 对应后端 upload_chunked.go / upload_chunk.go / upload_complete.go
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadInitData {
+    #[serde(rename = "upload_id")]
+    pub upload_id: String,
+    /// true=秒传，已直接完成，无需上传分片
+    #[serde(default)]
+    pub instant: bool,
+    #[serde(rename = "chunk_size")]
+    #[serde(default)]
+    pub chunk_size: i64,
+    #[serde(rename = "chunk_count")]
+    #[serde(default)]
+    pub chunk_count: i32,
+    /// 仍缺失（需上传）的分片索引
+    #[serde(default)]
+    pub missing: Vec<i32>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UploadData {
-    #[serde(rename = "history_id")]
-    pub history_id: i64,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadChunkData {
+    #[serde(default)]
+    pub index: i32,
+    #[serde(default)]
+    pub received: i32,
+    #[serde(rename = "chunk_count")]
+    #[serde(default)]
+    pub chunk_count: i32,
+    /// 是否已收齐全部分片
+    #[serde(default)]
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadStatusData {
+    #[serde(default)]
+    pub found: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(rename = "chunk_size")]
+    #[serde(default)]
+    pub chunk_size: i64,
+    #[serde(rename = "chunk_count")]
+    #[serde(default)]
+    pub chunk_count: i32,
+    #[serde(default)]
+    pub received: i32,
+    #[serde(default)]
+    pub missing: Vec<i32>,
+    #[serde(rename = "total_size")]
+    #[serde(default)]
+    pub total_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadCompleteData {
+    #[serde(rename = "file_id")]
+    #[serde(default)]
+    pub file_id: u64,
     #[serde(rename = "file_name")]
     pub file_name: String,
-    #[serde(rename = "file_size")]
-    pub file_size: i64,
     #[serde(rename = "storage_path")]
     pub storage_path: String,
+    #[serde(rename = "file_size")]
+    pub file_size: i64,
+    #[serde(rename = "file_hash")]
+    #[serde(default)]
+    pub file_hash: String,
+    /// 是否已触发同步派发（目标在同步目录内）
+    #[serde(default)]
+    pub synced: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

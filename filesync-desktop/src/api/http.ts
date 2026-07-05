@@ -47,24 +47,35 @@ export function httpDelete<T = void>(path: string): Promise<T> {
   return send<T>('DELETE', path)
 }
 
-/** 文件上传专用：body 已是 FormData，不设 Content-Type（浏览器自动加 boundary） */
-export async function httpPostForm<T>(path: string, form: FormData): Promise<T> {
-  const url = `${getServerUrl()}/v1${path}`
-  const token = getToken()
-  const headers: Record<string, string> = {}
-  if (token) headers['Token'] = token
-
-  const res = await fetch(url, { method: 'POST', headers, body: form })
-  const json = await res.json() as ApiEnvelope<T>
-
-  if (json.code !== 200) throw new Error(json.message || `上传失败 (${path})`)
-  if (json.data === undefined || json.data === null) throw new Error(`${path}: data 为空`)
-  return json.data
-}
-
 /** 构建带 token 的 GET URL（下载链接） */
 export function buildGetUrl(path: string, params: Record<string, string>): string {
   const token = getToken()
   const allParams = { ...params, token }
   return `${getServerUrl()}/v1${path}?${new URLSearchParams(allParams).toString()}`
+}
+
+/**
+ * 裸字节 POST：query 带 params，body 是分片二进制（application/octet-stream）。
+ * 返回完整响应信封（不 throw），供分片上传按业务码区分：
+ * - code==200 成功 / 422 分片校验失败需重传 / 404 会话过期需重新 init
+ */
+export async function httpPostRawBytes<T>(
+  path: string,
+  params: Record<string, string>,
+  bytes: Uint8Array,
+): Promise<ApiEnvelope<T>> {
+  const url = `${getServerUrl()}/v1${path}?${new URLSearchParams(params).toString()}`
+  const token = getToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/octet-stream',
+  }
+  if (token) headers['Token'] = token
+
+  const res = await fetch(url, { method: 'POST', headers, body: bytes })
+  const text = await res.text()
+  try {
+    return JSON.parse(text) as ApiEnvelope<T>
+  } catch {
+    return { code: -1, message: `响应解析失败: ${text.slice(0, 200)}`, data: undefined }
+  }
 }

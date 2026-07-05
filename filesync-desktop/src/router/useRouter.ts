@@ -49,6 +49,11 @@ export const router = createRouter({
                     path: "sync/manage",
                     name: "SyncManage",
                     component: () => import("../views/sync/SyncManage.vue")
+                },
+                {
+                    path: "transfers",
+                    name: "Transfers",
+                    component: () => import("../views/transfer/TransferList.vue")
                 }
             ]
         },

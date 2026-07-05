@@ -1,34 +1,24 @@
 // ui/viewModel/files/FileUploadViewModel.kt
 package com.sunyuanling.filesync.ui.viewModel.files
 
+import android.app.Application
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.sunyuanling.filesync.api.file.CheckFileData
-import com.sunyuanling.filesync.api.file.FileApi
-import com.sunyuanling.filesync.api.file.UploadParams
-import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.api.file.ChunkedUploader
+import com.sunyuanling.filesync.util.DeviceInfoUtil
 import com.sunyuanling.filesync.util.RootHelper
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
-import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import okio.Buffer
-import okio.BufferedSink
-import okio.ForwardingSink
-import okio.Sink
-import okio.buffer
 import java.io.File
 
-class FileUploadViewModel : ViewModel() {
+class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
     val uploadState: StateFlow<UploadState> = _uploadState
@@ -51,6 +41,9 @@ class FileUploadViewModel : ViewModel() {
     //可用磁盘列表
     private val _availableDisks = MutableStateFlow<List<String>>(emptyList())
     val availableDisks: StateFlow<List<String>> = _availableDisks
+
+    /** 当前上传协程引用，便于取消。 */
+    private var uploadJob: Job? = null
 
     init {
         checkRootAccess()
@@ -103,65 +96,72 @@ class FileUploadViewModel : ViewModel() {
         _selectedFiles.value = emptyList()
     }
 
-    suspend fun checkFileExists(path: String, fileName: String): CheckFileData? {
-        val normalizedPath = normalizePath(path)
-        Log.d("FileUpload", "检查文件: path=$normalizedPath, name=$fileName")
-
-        val result = FileApi.checkFile(UploadParams(
-            path = normalizedPath,
-            name = fileName,
-            action = "check"
-        ))
-
-        return result.getOrNull()?.data
-    }
-
     fun uploadFiles() {
         if (_selectedFiles.value.isEmpty()) {
             _uploadState.value = UploadState.Error("请选择要上传的文件")
             return
         }
-
         if (_targetPath.value.isEmpty()) {
             _uploadState.value = UploadState.Error("请选择目标路径")
             return
         }
+        // 已有上传在跑，忽略再次触发
+        if (uploadJob?.isActive == true) return
 
-        viewModelScope.launch {
+        uploadJob = viewModelScope.launch {
             _uploadState.value = UploadState.Uploading
             var successCount = 0
             var failCount = 0
 
+            val deviceId = try {
+                DeviceInfoUtil.getDeviceId(getApplication())
+            } catch (e: Exception) {
+                Log.w("FileUpload", "取 deviceId 失败，回退空串", e)
+                ""
+            }
+
             _selectedFiles.value.forEachIndexed { index, fileInfo ->
+                ensureActive()
+                _currentUploadProgress.value = UploadProgress(
+                    fileName = fileInfo.name,
+                    currentIndex = index + 1,
+                    totalCount = _selectedFiles.value.size,
+                    progress = 0f,
+                    sentBytes = 0,
+                    totalBytes = fileInfo.size
+                )
+
                 try {
-                    _currentUploadProgress.value = UploadProgress(
-                        fileName = fileInfo.name,
-                        currentIndex = index + 1,
-                        totalCount = _selectedFiles.value.size,
-                        progress = 0f
-                    )
-
-                    val checkResult = checkFileExists(_targetPath.value, fileInfo.name)
-
-                    if (checkResult?.exists == true) {
-                        Log.w("FileUpload", "文件已存在: ${fileInfo.name}")
+                    val file = File(fileInfo.path)
+                    if (!file.exists()) {
+                        Log.e("FileUpload", "文件不存在: ${fileInfo.path}")
                         failCount++
+                        return@forEachIndexed
                     }
 
-                    val uploaded = uploadSingleFile(fileInfo) { progress ->
+                    val result = ChunkedUploader.upload(
+                        file = file,
+                        remoteDir = normalizePath(_targetPath.value),
+                        options = ChunkedUploader.UploadOptions(deviceId = deviceId)
+                    ) { sent, total ->
+                        val p = if (total > 0) (sent.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
                         _currentUploadProgress.value = _currentUploadProgress.value?.copy(
-                            progress = progress
+                            progress = p,
+                            sentBytes = sent,
+                            totalBytes = total
                         )
                     }
 
-                    if (uploaded) {
+                    if (result.isSuccess) {
                         successCount++
-                        Log.d("FileUpload", "上传成功: ${fileInfo.name}")
+                        Log.d("FileUpload", "上传成功: ${fileInfo.name} -> ${result.getOrNull()?.storagePath}")
                     } else {
                         failCount++
-                        Log.e("FileUpload", "上传失败: ${fileInfo.name}")
+                        Log.e("FileUpload", "上传失败: ${fileInfo.name}", result.exceptionOrNull())
                     }
-
+                } catch (ce: CancellationException) {
+                    // 取消向上传播
+                    throw ce
                 } catch (e: Exception) {
                     Log.e("FileUpload", "上传异常: ${fileInfo.name}", e)
                     failCount++
@@ -169,7 +169,6 @@ class FileUploadViewModel : ViewModel() {
             }
 
             _currentUploadProgress.value = null
-
             _uploadState.value = if (failCount == 0) {
                 UploadState.Success(successCount)
             } else {
@@ -178,115 +177,24 @@ class FileUploadViewModel : ViewModel() {
         }
     }
 
-    private suspend fun uploadSingleFile(
-        fileInfo: UploadFileInfo,
-        onProgress: (Float) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val file = File(fileInfo.path)
-            if (!file.exists()) {
-                Log.e("FileUpload", "文件不存在: ${fileInfo.path}")
-                return@withContext false
-            }
-
-            val normalizedPath = normalizePath(_targetPath.value)
-            val url = "${Request.baseUrl}/file/upload"
-            val token = Request.getToken()
-
-            Log.d("FileUpload", "上传文件: path=$normalizedPath, name=${fileInfo.name}")
-
-            // 构建 multipart body（包含文件和参数）
-            val requestBody = file.asRequestBody("application/octet-stream".toMediaTypeOrNull())
-            val filePart = MultipartBody.Part.createFormData("file", file.name, requestBody)
-
-            val multipartBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("path", normalizedPath)
-                .addFormDataPart("name", fileInfo.name)
-                .addFormDataPart("action", "upload")
-                .addPart(filePart)
-                .build()
-
-            val progressBody = ProgressRequestBody(multipartBody) { bytesWritten, contentLength ->
-                val progress = bytesWritten.toFloat() / contentLength.toFloat()
-                onProgress(progress)
-            }
-
-            val request = okhttp3.Request.Builder()
-                .url(url)
-                .apply {
-                    token?.let { header("Token", it) }
-                }
-                .post(progressBody)
-                .build()
-
-            val response = Request.client.newCall(request).execute()
-
-            if (response.isSuccessful) {
-                val responseBody = response.body?.string()
-                if (responseBody != null) {
-                    val uploadResponse =
-                        Request.json.decodeFromString<com.sunyuanling.filesync.network.Response<com.sunyuanling.filesync.api.file.UploadData>>(responseBody)
-                    if (uploadResponse.code == 200) {
-                        Log.d("FileUpload", "上传成功: ${uploadResponse.data}")
-                        return@withContext true
-                    } else {
-                        Log.e("FileUpload", "上传失败: ${uploadResponse.message}")
-                    }
-                }
-            } else {
-                val errorBody = response.body?.string()
-                Log.e("FileUpload", "上传失败: ${response.code} - $errorBody")
-            }
-
-            false
-        } catch (e: Exception) {
-            Log.e("FileUpload", "上传异常", e)
-            false
-        }
+    /** 取消正在进行的上传。无任务在跑时为空操作。 */
+    fun cancelUpload() {
+        uploadJob?.cancel()
+        uploadJob = null
+        _currentUploadProgress.value = null
+        _uploadState.value = UploadState.Idle
     }
 
     fun resetState() {
         _uploadState.value = UploadState.Idle
     }
+
     /**
      * 标准化路径格式为正斜杠
      */
     private fun normalizePath(path: String): String {
         if (path.isEmpty()) return path
         return path.replace("\\", "/")
-    }
-}
-
-private class ProgressRequestBody(
-    private val requestBody: RequestBody,
-    private val onProgress: (bytesWritten: Long, contentLength: Long) -> Unit
-) : RequestBody() {
-
-    override fun contentType() = requestBody.contentType()
-
-    override fun contentLength() = requestBody.contentLength()
-
-    override fun writeTo(sink: BufferedSink) {
-        val countingSink = CountingSink(sink, contentLength(), onProgress)
-        val bufferedSink = countingSink.buffer()
-        requestBody.writeTo(bufferedSink)
-        bufferedSink.flush()
-    }
-}
-
-private class CountingSink(
-    delegate: Sink,
-    private val contentLength: Long,
-    private val onProgress: (bytesWritten: Long, contentLength: Long) -> Unit
-) : ForwardingSink(delegate) {
-
-    private var bytesWritten = 0L
-
-    override fun write(source: Buffer, byteCount: Long) {
-        super.write(source, byteCount)
-        bytesWritten += byteCount
-        onProgress(bytesWritten, contentLength)
     }
 }
 
@@ -302,7 +210,11 @@ data class UploadProgress(
     val fileName: String,
     val currentIndex: Int,
     val totalCount: Int,
-    val progress: Float
+    val progress: Float,
+    /** 已发送字节（字节级进度；旧字段 progress 派生自此处）。 */
+    val sentBytes: Long = 0,
+    /** 总字节（可能等于 UploadFileInfo.size，秒传完成时直接置 totalSize）。 */
+    val totalBytes: Long = 0
 )
 
 sealed class UploadState {

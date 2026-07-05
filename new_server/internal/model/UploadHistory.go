@@ -10,6 +10,8 @@ type UploadHistory struct {
 	FileSize     *int64     `json:"file_size"`
 	FileType     *string    `gorm:"size:100" json:"file_type"`
 	StoragePath  *string    `gorm:"size:500" json:"storage_path"`
+	UploadID     *string    `gorm:"size:64;index" json:"upload_id"`   // 分片上传会话 id（单发上传为空）
+	ChunkCount   *int       `json:"chunk_count"`                       // 分片总数（单发上传为空）
 	UploadStatus string     `gorm:"size:20;not null;default:pending" json:"upload_status"`
 	UploadSpeed  *int64     `json:"upload_speed"`
 	Progress     int8       `gorm:"not null;default:0" json:"progress"`

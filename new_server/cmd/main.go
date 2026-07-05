@@ -10,12 +10,14 @@ import (
 	"syc-file/config"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
+	filehandler "syc-file/internal/handler/file"
 	"syc-file/internal/middleware"
 	"syc-file/internal/model"
 	"syc-file/internal/sync"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/upload_store"
 	"time"
 )
 
@@ -102,6 +104,12 @@ func main() {
 
 	//初始化设备状态Redis存储
 	device_store.Init(redisClient)
+
+	//初始化分片上传会话Redis存储
+	upload_store.Init(redisClient)
+
+	//启动临时文件清理器（清理过期上传遗留的 .part）
+	filehandler.StartTempJanitor()
 
 	//初始化文件同步引擎（Redis队列 + worker）
 	syncEngine := sync.InitSync(db, redisClient, config.Conf.Sync)

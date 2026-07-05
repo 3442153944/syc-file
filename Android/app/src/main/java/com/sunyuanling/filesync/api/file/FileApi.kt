@@ -8,6 +8,14 @@ import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.api.ApiRoutes
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.network.Response as ApiResponse
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Request as OkRequest
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 
 object FileApi {
@@ -74,30 +82,67 @@ object FileApi {
         return Request.getSuspend<ApiResponse<Unit?>>(ApiRoutes.FILE_DOWNLOAD, queryMap)
     }
 
-    // ==================== 上传 ====================
+    // ==================== 分片上传 ====================
 
-    /**
-     * 检查文件是否已存在（JSON body，action=check）。
-     */
-    suspend fun checkFile(params: UploadParams): Result<ApiResponse<CheckFileData>> {
-        return Request.postSuspend<ApiResponse<CheckFileData>, UploadParams>(
-            ApiRoutes.FILE_UPLOAD, params
+    /** 初始化分片上传：提交描述信息，返回 upload_id + 缺失分片（instant=true 为秒传已完成）。 */
+    suspend fun uploadInit(params: UploadInitParams): Result<ApiResponse<UploadInitData>> {
+        return Request.postSuspend<ApiResponse<UploadInitData>, UploadInitParams>(
+            ApiRoutes.FILE_UPLOAD_INIT, params
+        )
+    }
+
+    /** 查询上传进度/缺失分片（断点续传）。 */
+    suspend fun uploadStatus(uploadId: String): Result<ApiResponse<UploadStatusData>> {
+        return Request.getSuspend<ApiResponse<UploadStatusData>>(
+            ApiRoutes.FILE_UPLOAD_STATUS, mapOf("upload_id" to uploadId)
+        )
+    }
+
+    /** 完成分片上传：收齐后触发服务端校验落盘。 */
+    suspend fun uploadComplete(params: UploadCompleteParams): Result<ApiResponse<UploadCompleteData>> {
+        return Request.postSuspend<ApiResponse<UploadCompleteData>, UploadCompleteParams>(
+            ApiRoutes.FILE_UPLOAD_COMPLETE, params
         )
     }
 
     /**
-     * 上传文件。
-     *
-     * TODO: 后端 action=upload 时要求 multipart/form-data（path/name/action 作为 form 字段，
-     * 文件作为 multipart 字段），当前 Request 单例不支持 multipart 请求。
-     * 调用方需自行构造 OkHttp MultipartBody 发起请求。
-     * 待 Request 单例增加 multipart 支持后再接入。
+     * 上传单个分片：query 带 upload_id+index，body 是分片裸字节（application/octet-stream）。
+     * Request 单例只支持 JSON，故这里直接用 OkHttp。
+     *  - 422 → ChunkVerifyException（该片校验失败，调用方重传该片）
+     *  - 404 → SessionGoneException（会话过期，调用方重新 init）
      */
-    suspend fun uploadFile(params: UploadParams): Result<ApiResponse<UploadData>> {
-        return Request.postSuspend<ApiResponse<UploadData>, UploadParams>(
-            ApiRoutes.FILE_UPLOAD, params
-        )
-    }
+    suspend fun uploadChunk(uploadId: String, index: Int, data: ByteArray): Result<UploadChunkData> =
+        withContext(Dispatchers.IO) {
+            try {
+                val url = "${Request.baseUrl}${ApiRoutes.FILE_UPLOAD_CHUNK}" +
+                        "?upload_id=${URLEncoder.encode(uploadId, "UTF-8")}&index=$index"
+                val token = Request.getToken()
+                val body = data.toRequestBody("application/octet-stream".toMediaType())
+                val builder = OkRequest.Builder().url(url).post(body)
+                token?.let { builder.header("Token", it) }
+
+                Request.client.newCall(builder.build()).execute().use { resp ->
+                    val text = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        return@withContext Result.failure(Exception("HTTP ${resp.code}: ${resp.message}"))
+                    }
+                    val obj = Request.json.parseToJsonElement(text).jsonObject
+                    val code = obj["code"]?.jsonPrimitive?.intOrNull ?: -1
+                    val message = obj["message"]?.jsonPrimitive?.content ?: "未知错误"
+                    when (code) {
+                        200 -> {
+                            val parsed = Request.json.decodeFromString<ApiResponse<UploadChunkData>>(text)
+                            Result.success(parsed.data ?: UploadChunkData())
+                        }
+                        422 -> Result.failure(ChunkVerifyException(index, message))
+                        404 -> Result.failure(SessionGoneException(message))
+                        else -> Result.failure(Exception(message))
+                    }
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
 
     // ==================== 下载历史 ====================
 

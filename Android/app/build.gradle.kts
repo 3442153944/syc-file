@@ -80,6 +80,9 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
 
+    // BLAKE3（分片上传：叶子/Merkle树根/整文件哈希，与服务端 file_lib 一致）
+    implementation(libs.blake3)
+
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

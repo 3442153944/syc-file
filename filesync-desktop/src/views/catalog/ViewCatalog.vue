@@ -6,9 +6,10 @@ import { useCatalogStore } from "./composeables/useCatalogStore"
 import { NDataTable, NButton, NSpace, NEmpty, useMessage, useDialog } from "naive-ui"
 import type { DataTableColumns } from "naive-ui"
 import type { FileItem } from "@/api/file/fileTypes"
-import { uploadFile, deleteFile, buildDownloadUrl } from "@/api/file/fileApi"
+import { deleteFile, buildDownloadUrl } from "@/api/file/fileApi"
 import { isTauri } from "@tauri-apps/api/core"
 import { open } from "@tauri-apps/plugin-dialog"
+import { useTransferStore } from "@/store/useTransferStore"
 
 const route = useRoute()
 const router = useRouter()
@@ -18,6 +19,7 @@ const dialog = useDialog()
 const inTauri = isTauri()
 const uploading = ref(false)
 const webFileInput = ref<HTMLInputElement | null>(null)
+const transferStore = useTransferStore()
 
 const { currentPath, parentPath, items, loading } = storeToRefs(catalogStore)
 
@@ -109,20 +111,18 @@ const onWebFiles = async (e: Event) => {
 
 const doUpload = async (entries: (string | File)[]) => {
   uploading.value = true
-  let ok = 0
-  for (const entry of entries) {
-    const label = typeof entry === "string" ? entry.split(/[\\/]/).pop() : entry.name
-    try {
-      await uploadFile(entry, currentPath.value)
-      ok++
-    } catch (err) {
-      message.error(`上传失败 ${label}: ${String(err)}`)
-    }
-  }
+  // 并行上传：每个文件独立进度，store 聚合；任一失败不中断其它
+  const results = await Promise.allSettled(
+    entries.map((entry) => transferStore.startManualUpload(entry, currentPath.value))
+  )
+  const ok = results.filter((r) => r.status === "fulfilled").length
+  const fail = results.length - ok
   uploading.value = false
   if (ok > 0) {
-    message.success(`已上传 ${ok} 个文件`)
+    message.success(`已上传 ${ok} 个文件${fail ? `,失败 ${fail} 个` : ""}`)
     refresh()
+  } else if (fail > 0) {
+    message.error(`上传失败 ${fail} 个文件`)
   }
 }
 

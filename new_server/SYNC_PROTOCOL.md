@@ -1,7 +1,7 @@
 # 文件同步前后端接口规约（Go 后端 ↔ Rust 桌面端 / Android）
 
 > 本文档为实时同步基座的对接契约。Go 后端为编排方与权威 trunk，客户端为探测+执行方。
-> 字段统一 snake_case（JSON）。所有时间戳为 Unix 秒。文件 hash 为 sha256 hex（小写）。
+> 字段统一 snake_case（JSON）。所有时间戳为 Unix 秒。文件 hash 为 blake3 hex（小写，32 字节）。
 > 响应信封统一 `{code,message,data}`，`code==200` 成功。
 
 ---
@@ -128,7 +128,7 @@ Header: Token: <jwt>   (可选，query token 为主)
 | file_name | string | 是 | 文件名 |
 | action | string | 是 | `create`/`modify`/`delete` |
 | file_size | int64 | 否 | 字节数（dir 可省） |
-| file_hash | string | 否 | 新内容 sha256（dir/delete 可省） |
+| file_hash | string | 否 | 新内容 blake3（dir/delete 可省） |
 | **base_hash** | string | modify 必填 | **修改前客户端看到的服务端版本 hash**；create 留空；空+服务端已有不同版本→判冲突 |
 | is_dir | bool | 否 | 目录标记 |
 | mtime | int64 | 否 | 本地修改时间 |
@@ -138,14 +138,14 @@ Header: Token: <jwt>   (可选，query token 为主)
 #### 3.1.2 scan_result（全量清单）
 ```json
 {"event":"scan_result","folder_id":1,"items":[
-  {"relative_path":"a.txt","file_name":"a.txt","file_size":1024,"file_hash":"<sha256>","is_dir":false,"mtime":1700000000}
+  {"relative_path":"a.txt","file_name":"a.txt","file_size":1024,"file_hash":"<blake3>","is_dir":false,"mtime":1700000000}
 ]}
 ```
 
 #### 3.1.3 task_progress / task_completed / task_failed
 ```json
 {"event":"task_progress","task_id":1,"progress":50,"bytes":512}
-{"event":"task_completed","task_id":1,"file_hash":"<sha256>"}
+{"event":"task_completed","task_id":1,"file_hash":"<blake3>"}
 {"event":"task_failed","task_id":1,"error":"..."}
 ```
 
@@ -162,7 +162,7 @@ Header: Token: <jwt>   (可选，query token 为主)
 {
   "event":"task_created","task_id":1,"task_type":"download","direction":"download",
   "folder_id":1,"relative_path":"sub/a.txt","file_name":"a.txt","file_size":1024,
-  "file_hash":"<sha256>",
+  "file_hash":"<blake3>",
   "remote_path":"E:\\FileSync\\myfolder\\sub\\a.txt",
   "remote_dir":"E:\\FileSync\\myfolder\\sub"
 }
@@ -238,7 +238,7 @@ SyncConflict：
 
 ## 5. 传输接口复用（不变）
 
-- 上传：`POST /v1/file/upload` multipart `path=远端目录&name=文件名&action=upload` + file part
+- 上传：`POST /v1/file/upload/init` + `/chunk` + `/complete` 分片协议（blake3 校验，详见 `file_lib/README.md`）
 - 下载：`GET /v1/file/download?path=远端目录&name=文件名&device_id=&token=` 支持 Range
 
 ---
@@ -246,12 +246,12 @@ SyncConflict：
 ## 6. 客户端侧改动清单（待接）
 
 1. **生成稳定 device_id**：机器标识 → sha256[:16]，WS 连接带上。
-2. **上传后上报 file_changed**：上传前算 sha256，带 `base_hash`（修改前的服务端版本 hash，由上次同步记录得知）。
+2. **上传后上报 file_changed**：上传走分片协议（blake3 + Merkle 树根），带 `base_hash`（修改前的服务端版本 hash，由上次同步记录得知）。
 3. **原子发布**：下载写 `.synctmp` → 校验 → rename；被占用回 `task_blocked`。
 4. **冲突处理**：收 conflict → 隔离到 `.syncpending` + 主目录收敛 + 记待办；处理时调 `/conflicts/:id/resolve`。
 5. **稳定窗口 + 忽略 Office 锁文件**：Word 等保存是「写临时文件 + rename + `~$` 锁文件」，watcher 探测后须**等文件稳定**（size/mtime 连续 N 秒不变 / `~$*` 消失）再算 hash，避免抓到中间态。
 6. **忽略目录**：`.synctmp/`、`.syncpending/`、`~$*` 不上报。
-7. **hash 依赖**：Rust 端 `sha2 = "0.10"`。
+7. **hash 依赖**：Rust 端 `blake3 = "1.5"`（双端共用 file_lib 的哈希/树实现，逐字节一致）。
 
 ---
 

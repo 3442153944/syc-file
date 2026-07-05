@@ -5,20 +5,19 @@
 use crate::api::{
     client::ApiClient,
     file::api as file_api,
-    file::params::DownloadParams,
+    file::params::{DeleteFileParams, DownloadParams},
     sync::api as sync_api,
     sync::params::NotifyParams,
     ws::types::{ConflictContent, ConflictResolvedContent, TaskCreatedContent, WsEnvelope},
 };
 use crate::base_store;
+use crate::chunked_uploader::{self, UploadOptions};
 use crate::config::SharedSyncConfig;
 use crate::logger;
 use crate::upload_worker::UploadTask;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use reqwest::multipart;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Component, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -310,10 +309,15 @@ async fn download_and_publish(
         return Err(PublishErr::Other(format!("HTTP {}", resp.status())));
     }
     let bytes = resp.bytes().await.map_err(|e| PublishErr::Other(e.to_string()))?;
-    let actual = sha256_hex(&bytes);
+
+    // blake3 校验：算 blake3 hex 与 expected_hash 比对，不匹配直接失败。
+    let actual = blake3_hex(&bytes);
     if let Some(exp) = expected_hash {
         if exp != actual {
-            return Err(PublishErr::Other(format!("hash 不匹配 expected={} actual={}", exp, actual)));
+            return Err(PublishErr::Other(format!(
+                "hash 不匹配 expected={} actual={}",
+                exp, actual
+            )));
         }
     }
 
@@ -423,37 +427,38 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         let c = config.read();
         (c.server_url.clone(), c.token.clone(), c.device_id.clone())
     };
-    let bytes = match tokio::fs::read(&pc.quarantine).await {
-        Ok(b) => b,
-        Err(e) => {
-            logger::error("conflict", format!("读取隔离副本失败: {}", e));
-            return;
-        }
-    };
-    let hash = sha256_hex(&bytes);
-    let size = bytes.len() as i64;
     let client = ApiClient::new(&server_url, &token);
 
-    // 1) 上传字节
-    let part = match multipart::Part::bytes(bytes.clone())
-        .file_name(pc.file_name.clone())
-        .mime_str("application/octet-stream")
-    {
-        Ok(p) => p,
+    // 隔离副本必须存在
+    if !pc.quarantine.exists() {
+        logger::error("conflict", format!("keep_local 找不到隔离副本: {}", pc.quarantine.display()));
+        return;
+    }
+
+    // 1) 同步场景需覆盖：先删远端旧文件（收敛的服务端版本），再分片上传
+    let _ = file_api::delete_file(&client, DeleteFileParams {
+        path: pc.remote_dir.clone(),
+        name: pc.file_name.clone(),
+    }).await;
+
+    let options = UploadOptions::new(device_id.clone());
+    let on_progress: chunked_uploader::ProgressFn = Arc::new(|_, _| {});
+    let complete = match chunked_uploader::upload(
+        &client,
+        &pc.quarantine,
+        &pc.remote_dir,
+        &options,
+        on_progress,
+    ).await {
+        Ok(d) => d,
         Err(e) => {
-            logger::error("conflict", format!("构造上传失败: {}", e));
+            logger::error("conflict", format!("keep_local 上传失败: {}", e));
             return;
         }
     };
-    let form = multipart::Form::new()
-        .text("action", "upload")
-        .text("path", pc.remote_dir.clone())
-        .text("name", pc.file_name.clone())
-        .part("file", part);
-    if let Err(e) = file_api::upload_file(&client, form).await {
-        logger::error("conflict", format!("keep_local 上传失败: {}", e));
-        return;
-    }
+
+    let hash = complete.file_hash.clone();
+    let size = complete.file_size;
 
     // 2) 以 server_hash 为 base 上报 file_changed（快进，不再冲突）
     sync_api::notify(&client, NotifyParams {
@@ -525,10 +530,8 @@ fn build_remote_dir(config: &SharedSyncConfig, folder_id: u64, rel: &str) -> Str
 
 // ── 工具函数 ─────────────────────────────────────────────────────────────────
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(bytes);
-    hex::encode(h.finalize())
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
 }
 
 fn now_secs() -> i64 {

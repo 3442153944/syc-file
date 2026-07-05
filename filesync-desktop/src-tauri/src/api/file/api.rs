@@ -3,7 +3,6 @@
 // 每个函数只做：组装参数 + 调用 ApiClient，不包含业务逻辑。
 use super::{params::*, response::*};
 use crate::api::{client::{ApiClient, ApiResponse}, routes};
-use reqwest::multipart;
 use std::collections::HashMap;
 
 pub async fn get_available_disks(
@@ -31,23 +30,7 @@ pub fn build_download_url(client: &ApiClient, params: &DownloadParams) -> String
     client.build_url_with_token(routes::FILE_DOWNLOAD, map)
 }
 
-/// 检查文件是否已存在（action=check，JSON body）
-pub async fn check_file(
-    client: &ApiClient,
-    params: CheckFileParams,
-) -> Result<ApiResponse<CheckFileData>, String> {
-    client.post(routes::FILE_UPLOAD, &params).await
-}
-
-/// 上传文件（action=upload，multipart；调用方传入已构造好的 Form）
-pub async fn upload_file(
-    client: &ApiClient,
-    form: multipart::Form,
-) -> Result<ApiResponse<UploadData>, String> {
-    client.post_multipart(routes::FILE_UPLOAD, form).await
-}
-
-/// 删除远端文件（文件管理用）
+/// 删除远端文件（文件管理用 + 同步场景 delete-before-upload）
 pub async fn delete_file(
     client: &ApiClient,
     params: DeleteFileParams,
@@ -68,3 +51,39 @@ pub async fn delete_download_history(
 ) -> Result<ApiResponse<serde_json::Value>, String> {
     client.post(routes::FILE_DELETE_DOWNLOAD_HISTORY, &params).await
 }
+
+// ==================== 分片上传 ====================
+
+/// 初始化分片上传：提交描述信息，返回 upload_id + 缺失分片（instant=true 为秒传已完成）。
+pub async fn upload_init(
+    client: &ApiClient,
+    params: UploadInitParams,
+) -> Result<ApiResponse<UploadInitData>, String> {
+    client.post(routes::FILE_UPLOAD_INIT, &params).await
+}
+
+/// 上传单个分片：query 带 upload_id+index，body 是分片裸字节。
+///
+/// 返回原始 `ApiResponse` 由上层按业务码区分：
+/// - `code == 200` → 该片成功
+/// - `code == 422` → ChunkVerifyException（分片校验失败，需重传该片）
+/// - `code == 404` → SessionGoneException（会话过期，需重新 init）
+pub async fn upload_chunk(
+    client: &ApiClient,
+    upload_id: &str,
+    index: i32,
+    data: Vec<u8>,
+) -> Result<ApiResponse<UploadChunkData>, String> {
+    let index_str = index.to_string();
+    let params: [(&str, &str); 2] = [("upload_id", upload_id), ("index", index_str.as_str())];
+    client.post_raw_bytes(routes::FILE_UPLOAD_CHUNK, &params, data).await
+}
+
+/// 完成分片上传：收齐后触发服务端校验落盘。
+pub async fn upload_complete(
+    client: &ApiClient,
+    params: UploadCompleteParams,
+) -> Result<ApiResponse<UploadCompleteData>, String> {
+    client.post(routes::FILE_UPLOAD_COMPLETE, &params).await
+}
+

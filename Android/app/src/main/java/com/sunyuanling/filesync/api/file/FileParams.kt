@@ -47,24 +47,36 @@ data class DownloadParams(
     val deviceId: String = ""
 )
 
-// ==================== 上传 ====================
+// ==================== 分片上传 ====================
 
 /**
- * 上传请求参数。
- * JSON 模式：用于 check 操作，path/name/action 作为 JSON body 发送。
- * Multipart 模式：用于 upload 操作，path/name/action 作为 form 字段，文件作为 multipart 字段。
- *
- * TODO: upload 操作需构造 MultipartBody，当前 Request 单例不支持，
- * 调用方需自行构建 OkHttp MultipartBody 请求。
+ * 分片上传初始化描述信息。所有哈希均为 blake3 hex（与服务端 file_lib 一致）。
  */
 @Serializable
-data class UploadParams(
-    /** 目标路径（必填） */
+data class UploadInitParams(
+    /** 目标目录（必填） */
     val path: String,
     /** 文件名（必填） */
     val name: String,
-    /** 操作类型：check（检查文件是否存在）/ upload（上传文件） */
-    val action: String
+    @SerialName("total_size") val totalSize: Long,
+    @SerialName("chunk_size") val chunkSize: Long,
+    @SerialName("chunk_count") val chunkCount: Int,
+    /** blake3 Merkle 树根 hex */
+    @SerialName("merkle_root") val merkleRoot: String,
+    /** 整文件 blake3 hex（秒传/去重键） */
+    @SerialName("file_hash") val fileHash: String,
+    /** 每片叶子哈希 hex，长度须等于 chunk_count */
+    @SerialName("leaf_hashes") val leafHashes: List<String>
+)
+
+/**
+ * 分片上传完成。
+ */
+@Serializable
+data class UploadCompleteParams(
+    @SerialName("upload_id") val uploadId: String,
+    /** 本机设备 id，服务端派发同步任务时排除源设备 */
+    @SerialName("device_id") val deviceId: String = ""
 )
 
 // ==================== 下载历史 ====================

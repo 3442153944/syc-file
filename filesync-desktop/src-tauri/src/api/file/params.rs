@@ -22,30 +22,46 @@ pub struct DownloadParams {
     pub device_id: String,
 }
 
-/// 上传检查参数（JSON body，action=check）
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CheckFileParams {
-    pub path: String,
-    pub name: String,
-    pub action: String,
-}
-
-impl CheckFileParams {
-    pub fn new(path: &str, name: &str) -> Self {
-        CheckFileParams {
-            path: path.to_string(),
-            name: name.to_string(),
-            action: "check".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadHistoryParams {
     #[serde(rename = "pageNum")]
     pub page_num: i32,
     #[serde(rename = "pageSize")]
     pub page_size: i32,
+}
+
+// ==================== 分片上传 ====================
+
+/// 分片上传初始化描述信息。所有哈希均为 blake3 hex（与服务端 file_lib 一致）。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadInitParams {
+    pub path: String,
+    pub name: String,
+    #[serde(rename = "total_size")]
+    pub total_size: i64,
+    #[serde(rename = "chunk_size")]
+    pub chunk_size: i64,
+    #[serde(rename = "chunk_count")]
+    pub chunk_count: i32,
+    /// blake3 Merkle 树根 hex
+    #[serde(rename = "merkle_root")]
+    pub merkle_root: String,
+    /// 整文件 blake3 hex（秒传/去重键）
+    #[serde(rename = "file_hash")]
+    pub file_hash: String,
+    /// 每片叶子哈希 hex，长度须等于 chunk_count
+    #[serde(rename = "leaf_hashes")]
+    pub leaf_hashes: Vec<String>,
+}
+
+/// 分片上传完成。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadCompleteParams {
+    #[serde(rename = "upload_id")]
+    pub upload_id: String,
+    /// 本机设备 id，服务端派发同步任务时排除源设备
+    #[serde(rename = "device_id")]
+    pub device_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

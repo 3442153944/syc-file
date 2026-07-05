@@ -26,10 +26,14 @@ log:
   # 日志文件最大备份数量
   max_backup: 3
 
-# 白名单路由配置，该路由下的请求不会进行认证
+# 白名单路由配置，该路由下的请求无需登录认证即可访问
+# 需与路由注册路径保持一致（含 /v1 前缀）；支持精确匹配或前缀匹配（如 /v1/public 会放行 /v1/public/xxx）
 whitelist:
-  - /ping
-  - /register
+  - /v1/ping
+  - /v1/user/register
+  - /v1/user/login
+  - /v1/user/reset-password
+  - /v1/user/verify
 
 # 认证配置
 auth:
@@ -63,9 +67,9 @@ file:
   upload:
     max_file_size: 10737418240     # 最大文件大小 10GB（字节）
     max_filename_length: 255       # 最大文件名长度
-    allowed_extensions: []         # 允许的扩展名（空=不限制，除禁止列表外）
-    forbidden_extensions:          # 禁止的扩展名
-      - ".exe"
+    # 扩展名策略：allowed_extensions 不写=允许所有；forbidden_extensions 默认空，按需添加
+    # forbidden_extensions:
+    #   - ".exe"
 
 # 用户配置
 user:
@@ -75,6 +79,23 @@ user:
     - ".jpeg"
     - ".png"
     - ".gif"
+    - ".bmp"
+    - ".webp"
+    - ".svg"
+    - ".tiff"
+    - ".ico"
+    - ".svgz"
+    - ".tga"
+    - ".dds"
+    - ".exr"
+    - ".hdr"
+    - ".exe"
+    - ".dll"
+    - ".so"
+    - ".dy"
+    - ".a"
+    - ".o"
+    - ".db"
   max_size: 50485760              # 最大头像大小 50MB（字节）
 
 # 文件同步引擎配置

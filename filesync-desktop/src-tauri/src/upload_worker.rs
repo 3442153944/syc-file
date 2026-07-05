@@ -1,16 +1,18 @@
 // upload_worker.rs
-// 职责：文件上传 worker 池。
-// 只做调度：从 channel 取任务 → 调 api::file + api::sync，不含路由字符串。
+// 职责：同步场景的文件上传 worker 池。
+// 只做调度：从 channel 取任务 → 删除旧文件（sync overwrite）→ 分片上传 → 上报 file_changed。
+// 哈希统一用 blake3（与 chunked_uploader / file_lib 一致），base_store 存 blake3 hex。
 use crate::api::{
     client::ApiClient,
     file::api as file_api,
+    file::params::DeleteFileParams,
     sync::{api as sync_api, params::NotifyParams},
 };
+use crate::chunked_uploader::{self, UploadOptions};
 use crate::config::SharedSyncConfig;
-use reqwest::multipart;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
@@ -59,64 +61,56 @@ pub fn start_upload_workers(
 async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandle) {
     let path_str = task.local_path.to_string_lossy().to_string();
 
-    let (server_url, token, device_id) = {
+    let (client, device_id) = {
         let cfg = config.read();
-        (cfg.server_url.clone(), cfg.token.clone(), cfg.device_id.clone())
+        if cfg.server_url.is_empty() || cfg.token.is_empty() {
+            return;
+        }
+        (ApiClient::new(&cfg.server_url, &cfg.token), cfg.device_id.clone())
     };
-    if server_url.is_empty() || token.is_empty() {
-        return;
-    }
-
-    let client = ApiClient::new(&server_url, &token);
 
     let file_name = match task.local_path.file_name() {
         Some(n) => n.to_string_lossy().to_string(),
         None => return,
     };
 
-    // 读文件 + 计算 sha256
-    let data = match tokio::fs::read(&task.local_path).await {
-        Ok(d) => d,
-        Err(e) => {
-            emit_progress(app, &path_str, "error", Some(e.to_string()));
-            return;
-        }
-    };
-    let file_hash = {
-        let mut h = Sha256::new();
-        h.update(&data);
-        hex::encode(h.finalize())
-    };
-    let file_size = data.len() as i64;
-
     emit_progress(app, &path_str, "uploading", None);
 
-    // 1. 上传文件字节（multipart）
-    let file_part = multipart::Part::bytes(data)
-        .file_name(file_name.clone())
-        .mime_str("application/octet-stream")
-        .unwrap();
-    let form = multipart::Form::new()
-        .text("path", task.remote_dir.clone())
-        .text("name", file_name.clone())
-        .text("action", "upload")
-        .part("file", file_part);
+    // 同步场景需要覆盖已存在文件：先删远端旧文件（不存在则忽略 404），再分片上传
+    let _ = file_api::delete_file(
+        &client,
+        DeleteFileParams {
+            path: task.remote_dir.clone(),
+            name: file_name.clone(),
+        },
+    )
+    .await;
 
-    match file_api::upload_file(&client, form).await {
-        Ok(resp) if resp.is_ok() => {}
-        Ok(resp) => {
-            crate::logger::error("upload", format!("上传失败 {}: {}", path_str, resp.message));
-            emit_progress(app, &path_str, "error", Some(resp.message));
-            return;
-        }
+    // 分片上传（blake3 + merkle + 乱序并发 + 断点续传 + 秒传 + SessionGone 重试一次）
+    let options = UploadOptions::new(device_id.clone());
+    let on_progress: chunked_uploader::ProgressFn = Arc::new(|_, _| {});
+
+    let complete = match chunked_uploader::upload(
+        &client,
+        &task.local_path,
+        &task.remote_dir,
+        &options,
+        on_progress,
+    )
+    .await
+    {
+        Ok(d) => d,
         Err(e) => {
             crate::logger::error("upload", format!("上传失败 {}: {}", path_str, e));
             emit_progress(app, &path_str, "error", Some(e));
             return;
         }
-    }
+    };
 
-    // 2. 上传成功后上报 file_changed（带 base_hash 供服务端 CAS）
+    let file_hash = complete.file_hash.clone();
+    let file_size = complete.file_size;
+
+    // 上报 file_changed（带 base_hash 供服务端 CAS）
     let mtime = task
         .local_path
         .metadata()

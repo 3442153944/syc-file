@@ -21,7 +21,9 @@ impl<T> ApiResponse<T> {
     }
 }
 
-/// HTTP 客户端，无状态，token 由调用方传入
+/// HTTP 客户端，无状态，token 由调用方传入。
+/// reqwest::Client 内部 Arc，clone 便宜；为方便跨 tokio::spawn 持有，derive Clone。
+#[derive(Clone)]
 pub struct ApiClient {
     client: Client,
     base_url: String,
@@ -117,6 +119,27 @@ impl ApiClient {
             .post(self.url(path))
             .header("Token", &self.token)
             .multipart(form);
+        send_and_parse(req.send().await).await
+    }
+
+    /// POST 裸字节 body + query string（分片上传专用：upload_id/index 走 query，
+    /// 分片字节走 raw body，Content-Type: application/octet-stream）。
+    /// 服务端按业务码（200/422/404）区分成功/校验失败/会话过期，这里把整段 JSON 返回给调用方解析。
+    pub async fn post_raw_bytes<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Result<ApiResponse<T>, String> {
+        let mut req = self
+            .client
+            .post(self.url(path))
+            .header("Token", &self.token)
+            .header("Content-Type", "application/octet-stream")
+            .body(body);
+        for (k, v) in params {
+            req = req.query(&[(*k, *v)]);
+        }
         send_and_parse(req.send().await).await
     }
 

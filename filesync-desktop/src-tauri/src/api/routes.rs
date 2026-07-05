@@ -18,8 +18,11 @@ pub const FILE_AVAILABLE_DISKS: &str = "/file/available-disks";
 pub const FILE_TRAVERSE_DIRECTORY: &str = "/file/traverse-directory";
 /// GET，支持 Range，参数拼 query string
 pub const FILE_DOWNLOAD: &str = "/file/download";
-/// POST multipart
-pub const FILE_UPLOAD: &str = "/file/upload";
+/// 分片上传：init/status/chunk/complete（替代旧 /file/upload 单缓冲 multipart）
+pub const FILE_UPLOAD_INIT: &str = "/file/upload/init";
+pub const FILE_UPLOAD_STATUS: &str = "/file/upload/status";
+pub const FILE_UPLOAD_CHUNK: &str = "/file/upload/chunk";
+pub const FILE_UPLOAD_COMPLETE: &str = "/file/upload/complete";
 pub const FILE_DELETE: &str = "/file/delete";
 pub const FILE_DOWNLOAD_HISTORY: &str = "/file/download-history";
 pub const FILE_DELETE_DOWNLOAD_HISTORY: &str = "/file/delete-download-history";

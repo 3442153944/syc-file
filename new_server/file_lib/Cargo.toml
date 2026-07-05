@@ -1,0 +1,19 @@
+[package]
+name = "filecore"
+version = "0.1.0"
+edition = "2021"
+description = "文件同步上传核心：预分配、乱序分片定位写、blake3 分片校验与 Merkle 树校验、整文件哈希"
+
+[lib]
+name = "filecore"
+# staticlib：产出 libfilecore.a，供 Go 通过 cgo 静态链接
+crate-type = ["staticlib"]
+
+[dependencies]
+blake3 = "1"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
+panic = "abort"

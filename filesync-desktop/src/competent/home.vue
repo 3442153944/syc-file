@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import {onMounted, ref, computed} from "vue"
+import {onMounted, onBeforeUnmount, ref, computed} from "vue"
 import {useRouter, useRoute} from "vue-router"
 import {useLogin} from "./login/login.ts"
 import {useMenuConfig} from "./composeables/menu-config.ts"
-import {NMenu, NButton} from "naive-ui"
+import {NMenu, NButton, NBadge} from "naive-ui"
 import type {MenuOption} from "naive-ui"
 import {logo} from "@syl/icon"
+import {useTransferStore} from "@/store/useTransferStore"
 
 const router = useRouter()
 const route = useRoute() // 引入 route 用于菜单高亮
 const {verify} = useLogin()
 const {menuConfig} = useMenuConfig()
+const transferStore = useTransferStore()
 
 const userInfo = ref<any>(null)
 
@@ -43,8 +45,17 @@ onMounted(async () => {
   } catch {
     localStorage.removeItem("token")
     await router.push("/login")
+    return
   }
+  // 初始化传输状态监听（Tauri 模式起事件监听 + 引擎状态轮询）
+  transferStore.init()
 })
+onBeforeUnmount(() => {
+  transferStore.dispose()
+})
+
+const ind = computed(() => transferStore.indicator)
+const goTransfers = () => router.push("/transfers")
 
 const handleLogout = () => {
   localStorage.removeItem("token")
@@ -78,6 +89,18 @@ const handleMenuClick = (key: string) => {
       </div>
 
       <div class="header-right">
+        <div class="transfer-indicator" @click="goTransfers" title="传输列表">
+          <n-badge :value="ind.count" :max="99" :show="ind.count > 0" type="error">
+            <!-- 同步中：转圈 -->
+            <el-icon v-if="ind.type === 'sync'" class="spin ind-sync"><Loading /></el-icon>
+            <!-- 上传中：箭头向上 -->
+            <el-icon v-else-if="ind.type === 'upload'" class="ind-upload"><Upload /></el-icon>
+            <!-- 下载中：箭头向下 -->
+            <el-icon v-else-if="ind.type === 'download'" class="ind-download"><Download /></el-icon>
+            <!-- 空闲 -->
+            <el-icon v-else class="ind-idle"><Files /></el-icon>
+          </n-badge>
+        </div>
         <span v-if="userInfo" class="username">{{ userInfo.username }}</span>
         <n-button type="primary" size="small" @click="handleLogout">
           退出登录
@@ -136,6 +159,35 @@ const handleMenuClick = (key: string) => {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+.transfer-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.transfer-indicator:hover {
+  background-color: #f0f2f5;
+}
+.transfer-indicator .el-icon {
+  font-size: 18px;
+}
+.ind-idle { color: #909399; }
+.ind-upload { color: #e6a23c; }
+.ind-download { color: #409eff; }
+.ind-sync { color: #67c23a; }
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 1s linear infinite;
 }
 
 .username {

@@ -1,5 +1,6 @@
 mod api;
 mod app_paths;
+mod chunked_uploader;
 mod config;
 mod device;
 mod logger;
@@ -10,8 +11,9 @@ mod ws_client;
 mod base_store;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use api::client::ApiClient;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use api::user::{api as user_api, params::*, response::*};
 use api::file::{api as file_api, params::*, response::*};
 use api::sync::{api as sync_api, params::*, response::*};
@@ -71,6 +73,7 @@ fn set_sync_config(
     upload_workers: Option<usize>,
     download_workers: Option<usize>,
     debounce_ms: Option<u64>,
+    log_level: Option<String>,
     config: State<SharedSyncConfig>,
 ) {
     let mut cfg = config.write();
@@ -80,8 +83,11 @@ fn set_sync_config(
     if let Some(w) = upload_workers { cfg.upload_workers = w; }
     if let Some(w) = download_workers { cfg.download_workers = w; }
     if let Some(d) = debounce_ms { cfg.debounce_ms = d; }
+    if let Some(lvl) = log_level {
+        cfg.log.level = lvl;
+    }
     cfg.save(); // 持久化到 config/config.yml（token 不写入）
-    logger::info("config", "同步配置已更新并保存");
+    logger::info("config", format!("同步配置已更新并保存（日志级别: {}）", cfg.log.level));
 }
 
 // ── 日志窗口 ─────────────────────────────────────────────────────────────────
@@ -282,32 +288,46 @@ async fn traverse_directory(
     api_data(resp, "traverse_directory")
 }
 
-/// 上传文件：TS 传本地绝对路径，Rust 读文件构造 multipart
+/// 上传文件：TS 传本地绝对路径，Rust 走分片上传（blake3 + 乱序并发 + 断点续传 + 秒传）。
+/// 进度通过 Tauri 事件 `upload-progress-byte` 推前端（字节级）。
 #[tauri::command]
 async fn upload_file(
     local_path: String,
     remote_dir: String,
     config: State<'_, SharedSyncConfig>,
-) -> Result<UploadData, String> {
-    use reqwest::multipart;
+    app_handle: tauri::AppHandle,
+) -> Result<UploadCompleteData, String> {
+    use chunked_uploader::{UploadOptions, upload, ProgressFn};
     let path = std::path::Path::new(&local_path);
-    let name = path.file_name()
-        .ok_or_else(|| format!("无效路径: {}", local_path))?
-        .to_string_lossy()
-        .to_string();
-    let bytes = tokio::fs::read(&local_path).await.map_err(|e| e.to_string())?;
-    let part = multipart::Part::bytes(bytes)
-        .file_name(name.clone())
-        .mime_str("application/octet-stream")
-        .map_err(|e| e.to_string())?;
-    let form = multipart::Form::new()
-        .text("action", "upload")
-        .text("path", remote_dir)
-        .text("name", name)
-        .part("file", part);
-    let client = make_client(&config.read())?;
-    let resp = file_api::upload_file(&client, form).await?;
-    api_data(resp, "upload_file")
+    if !path.exists() {
+        return Err(format!("文件不存在: {}", local_path));
+    }
+    let (client, device_id) = {
+        let cfg = config.read();
+        (make_client(&cfg)?, cfg.device_id.clone())
+    };
+    let options = UploadOptions::new(device_id);
+    let app_for_progress = app_handle.clone();
+    let local_for_progress = local_path.clone();
+    let on_progress: ProgressFn = Arc::new(move |sent, total| {
+        let _ = app_for_progress.emit(
+            "upload-progress-byte",
+            serde_json::json!({
+                "path": local_for_progress,
+                "sent": sent,
+                "total": total,
+            }),
+        );
+    });
+    let data = upload(&client, path, &remote_dir, &options, on_progress).await?;
+    logger::info(
+        "upload",
+        format!(
+            "上传成功: {} ({} bytes, synced={})",
+            data.storage_path, data.file_size, data.synced
+        ),
+    );
+    Ok(data)
 }
 
 /// 删除远端文件（文件管理用）
@@ -456,19 +476,22 @@ async fn delete_conflict(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 先创建共享配置，setup 与 manage 共用同一 Arc
+    let shared_config = init_sync_config();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(init_watcher_state())
-        .manage(init_sync_config())
+        .manage(shared_config.clone())
         .manage(init_sync_engine())
-        .setup(|app| {
-            // 绑定全局日志（事件 + 文件），任意模块即可 logger::info(...)
-            logger::init(app.handle().clone());
+        .setup(move |app| {
+            // 绑定全局日志（事件 + 文件 + 级别过滤 + 轮转），任意模块即可 logger::info(...)
+            let log_cfg = shared_config.read().log.clone();
+            logger::init(app.handle().clone(), &log_cfg);
             base_store::init(); // 载入 base_hash 基线
             logger::info(
                 "app",
-                format!("应用启动，配置目录: {}", app_paths::config_dir().display()),
+                format!("应用启动，配置目录: {} | 日志级别: {}", app_paths::config_dir().display(), log_cfg.level),
             );
 
             // 顶部菜单栏：一级菜单「工具」→「打开日志窗口」(Ctrl+Alt+T)

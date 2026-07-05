@@ -75,30 +75,49 @@ data class TraverseDirectoryData(
 // GET /v1/file/download 返回文件流，无 JSON 响应体。
 // 响应头 X-History-ID 包含下载历史记录 ID。
 
-// ==================== 上传（check） ====================
-// 对应后端 upload.go 中 handleCheck 返回
+// ==================== 分片上传 ====================
+// 对应后端 upload_chunked.go / upload_chunk.go / upload_complete.go
 
 @Serializable
-data class CheckFileData(
-    val exists: Boolean = false,
-    @SerialName("can_upload") val canUpload: Boolean = false,
-    @SerialName("file_name") val fileName: String = "",
-    @SerialName("file_size") val fileSize: Long? = null,
-    val path: String = "",
-    /** 后端 time.Time → RFC3339 字符串 */
-    @SerialName("modified_at") val modifiedAt: String? = null
+data class UploadInitData(
+    @SerialName("upload_id") val uploadId: String = "",
+    /** true=秒传，已直接完成，无需上传分片 */
+    val instant: Boolean = false,
+    @SerialName("chunk_size") val chunkSize: Long = 0,
+    @SerialName("chunk_count") val chunkCount: Int = 0,
+    /** 仍缺失（需上传）的分片索引 */
+    val missing: List<Int> = emptyList()
 )
 
-// ==================== 上传（upload） ====================
-// 对应后端 upload.go 中 handleUpload 成功返回
+@Serializable
+data class UploadChunkData(
+    val index: Int = 0,
+    val received: Int = 0,
+    @SerialName("chunk_count") val chunkCount: Int = 0,
+    /** 是否已收齐全部分片 */
+    val complete: Boolean = false
+)
 
 @Serializable
-data class UploadData(
-    @SerialName("history_id") val historyId: Long = 0,
+data class UploadStatusData(
+    val found: Boolean = false,
+    val status: String = "",
+    @SerialName("chunk_size") val chunkSize: Long = 0,
+    @SerialName("chunk_count") val chunkCount: Int = 0,
+    val received: Int = 0,
+    val missing: List<Int> = emptyList(),
+    @SerialName("total_size") val totalSize: Long = 0
+)
+
+@Serializable
+data class UploadCompleteData(
+    @SerialName("file_id") val fileId: Long = 0,
     @SerialName("file_name") val fileName: String = "",
-    @SerialName("original_name") val originalName: String? = null,
+    @SerialName("storage_path") val storagePath: String = "",
     @SerialName("file_size") val fileSize: Long = 0,
-    @SerialName("storage_path") val storagePath: String = ""
+    @SerialName("file_hash") val fileHash: String = "",
+    /** 是否已触发同步派发（目标在同步目录内） */
+    val synced: Boolean = false
 )
 
 // ==================== 下载历史 ====================

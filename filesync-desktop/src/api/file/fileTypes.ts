@@ -35,11 +35,35 @@ export interface TraverseDirectoryData {
     total_count: number
 }
 
-export interface UploadData {
-    history_id: number
+// ==================== 分片上传 ====================
+// 对应后端 upload_chunked.go / upload_chunk.go / upload_complete.go
+
+export interface UploadInitData {
+    upload_id: string
+    /** true=秒传，已直接完成，无需上传分片 */
+    instant: boolean
+    chunk_size: number
+    chunk_count: number
+    /** 仍缺失（需上传）的分片索引 */
+    missing: number[]
+}
+
+export interface UploadChunkData {
+    index: number
+    received: number
+    chunk_count: number
+    /** 是否已收齐全部分片 */
+    complete: boolean
+}
+
+export interface UploadCompleteData {
+    file_id: number
     file_name: string
-    file_size: number
     storage_path: string
+    file_size: number
+    file_hash: string
+    /** 是否已触发同步派发（目标在同步目录内） */
+    synced: boolean
 }
 
 export interface DownloadHistoryItem {

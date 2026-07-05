@@ -26,76 +26,74 @@ func CORS() gin.HandlerFunc {
 	}
 }
 
-// AuthToken 全局解析token，不拦截
-func AuthToken() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// 白名单直接放行
-		for _, path := range config.Conf.Whitelist {
-			if strings.HasPrefix(c.Request.URL.Path, path) {
-				c.Set("Auth", false)
-				c.Next()
-				return
-			}
+// isWhitelisted 判断请求路径是否命中配置文件中的白名单
+// 支持精确匹配，或以白名单项为前缀的子路径匹配（如 /v1/public 放行 /v1/public/xxx）
+func isWhitelisted(path string) bool {
+	for _, p := range config.Conf.Whitelist {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return true
 		}
+	}
+	return false
+}
 
+// Auth 统一认证中间件
+// 是否需要登录完全由配置文件 whitelist 决定：白名单内的路由直接放行，
+// 其余路由必须携带有效 token，否则返回 401。无需再手动区分 public/private 路由组。
+func Auth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Set("Auth", false)
+
+		// 尽量解析 token 并注入用户信息（白名单路由如 /user/verify 也依赖此信息）
 		tokenStr := c.GetHeader("Token")
 		if tokenStr == "" {
 			tokenStr = c.Query("token")
 		}
-
-		if tokenStr == "" {
-			c.Set("Auth", false)
-			c.Next()
-			return
-		}
-
-		claims, err := token.ParseToken(tokenStr)
-		if err != nil {
-			logger.Logger.Warn("Token验证失败", zap.Error(err))
-			c.Set("Auth", false)
-			c.Next()
-			return
-		}
-
-		// 检查剩余有效期，不足 refresh_expire 天则自动刷新
-		remaining := time.Until(claims.ExpiresAt.Time)
-		refreshThreshold := time.Duration(config.Conf.Auth.RefreshExpire) * 24 * time.Hour
-		if remaining < refreshThreshold {
-			newToken, err := token.GenerateToken(
-				claims.UserID,
-				claims.Username,
-				claims.Email,
-				claims.Roles,
-				config.Conf.Auth.TokenExpire,
-			)
-			if err != nil {
-				logger.Logger.Warn("Token刷新失败", zap.Error(err))
+		if tokenStr != "" {
+			if claims, err := token.ParseToken(tokenStr); err != nil {
+				logger.Logger.Warn("Token验证失败", zap.Error(err))
 			} else {
-				// 新token写回响应头，前端从 New-Token 取
-				c.Header("New-Token", newToken)
-				c.Header("Token-Refreshed", "true")
-				logger.Logger.Info("Token已自动刷新",
+				// 检查剩余有效期，不足 refresh_expire 天则自动刷新
+				remaining := time.Until(claims.ExpiresAt.Time)
+				refreshThreshold := time.Duration(config.Conf.Auth.RefreshExpire) * 24 * time.Hour
+				if remaining < refreshThreshold {
+					newToken, err := token.GenerateToken(
+						claims.UserID,
+						claims.Username,
+						claims.Email,
+						claims.Roles,
+						config.Conf.Auth.TokenExpire,
+					)
+					if err != nil {
+						logger.Logger.Warn("Token刷新失败", zap.Error(err))
+					} else {
+						// 新token写回响应头，前端从 New-Token 取
+						c.Header("New-Token", newToken)
+						c.Header("Token-Refreshed", "true")
+						logger.Logger.Info("Token已自动刷新",
+							zap.Int64("user_id", claims.UserID),
+							zap.String("username", claims.Username),
+						)
+					}
+				}
+
+				c.Set("Auth", true)
+				c.Set("UserInfo", claims)
+				logger.Logger.Info("Token验证成功",
 					zap.Int64("user_id", claims.UserID),
 					zap.String("username", claims.Username),
 				)
 			}
 		}
 
-		c.Set("Auth", true)
-		c.Set("UserInfo", claims)
-		logger.Logger.Info("Token验证成功",
-			zap.Int64("user_id", claims.UserID),
-			zap.String("username", claims.Username),
-		)
-		c.Next()
-	}
-}
+		// 白名单路由直接放行，无需登录
+		if isWhitelisted(c.Request.URL.Path) {
+			c.Next()
+			return
+		}
 
-// RequireAuth 强制登录拦截
-func RequireAuth() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		auth, exists := c.Get("Auth")
-		if !exists || auth == false {
+		// 非白名单路由必须已认证
+		if auth, _ := c.Get("Auth"); auth != true {
 			c.JSON(http.StatusOK, gin.H{
 				"code":    401,
 				"message": "未登录，请先登录",
@@ -104,6 +102,7 @@ func RequireAuth() gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+
 		c.Next()
 	}
 }

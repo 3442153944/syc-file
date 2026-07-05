@@ -39,8 +39,17 @@ object ApiRoutes {
     /** GET /v1/file/download */
     const val FILE_DOWNLOAD = "/file/download"
 
-    /** POST /v1/file/upload */
-    const val FILE_UPLOAD = "/file/upload"
+    /** POST /v1/file/upload/init —— 分片上传：提交描述信息，建/续会话 */
+    const val FILE_UPLOAD_INIT = "/file/upload/init"
+
+    /** POST /v1/file/upload/chunk —— 分片上传：上传单个分片（裸字节 body，query 带 upload_id+index） */
+    const val FILE_UPLOAD_CHUNK = "/file/upload/chunk"
+
+    /** GET /v1/file/upload/status —— 分片上传：查缺失分片（断点续传） */
+    const val FILE_UPLOAD_STATUS = "/file/upload/status"
+
+    /** POST /v1/file/upload/complete —— 分片上传：收齐后校验落盘 */
+    const val FILE_UPLOAD_COMPLETE = "/file/upload/complete"
 
     /** POST /v1/file/download-history */
     const val FILE_DOWNLOAD_HISTORY = "/file/download-history"

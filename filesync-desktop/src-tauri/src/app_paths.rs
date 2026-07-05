@@ -36,15 +36,9 @@ pub fn state_file() -> PathBuf {
     config_dir().join("state.json")
 }
 
-/// 日志目录 base/config/logs，自动创建。
+/// 日志目录 base/log，自动创建（对齐后端 ./log/ 约定，放在运行目录下而非 config/ 内）。
 pub fn log_dir() -> PathBuf {
-    let d = config_dir().join("logs");
+    let d = base_dir().join("log");
     let _ = fs::create_dir_all(&d);
     d
-}
-
-/// 当天日志文件 base/config/logs/filesync-YYYY-MM-DD.log。
-pub fn log_file() -> PathBuf {
-    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
-    log_dir().join(format!("filesync-{}.log", day))
 }

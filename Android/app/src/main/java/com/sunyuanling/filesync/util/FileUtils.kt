@@ -79,7 +79,9 @@ object FileUtils {
 
     /**
      * 计算文件 SHA256
+     * @deprecated 同步身份哈希已全栈统一为 blake3，请改用 [calculateBLAKE3]。仅历史/兼容场景保留。
      */
+    @Deprecated("同步统一用 blake3", ReplaceWith("calculateBLAKE3(file)"))
     fun calculateSHA256(file: File): String {
         val md = MessageDigest.getInstance("SHA-256")
         FileInputStream(file).use { input ->
@@ -90,6 +92,22 @@ object FileUtils {
             }
         }
         return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 计算文件 blake3（同步身份哈希 / file_hash，与服务端 file_lib、桌面端一致）。
+     * 流式读取，不把整文件载入内存。
+     */
+    fun calculateBLAKE3(file: File): String {
+        val hasher = Blake3Util.newHasher()
+        FileInputStream(file).use { input ->
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            while (input.read(buffer).also { bytesRead = it } != -1) {
+                hasher.update(if (bytesRead == buffer.size) buffer else buffer.copyOf(bytesRead))
+            }
+        }
+        return Blake3Util.toHex(hasher.digest())
     }
 
     /**

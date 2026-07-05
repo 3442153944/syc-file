@@ -20,6 +20,9 @@ pub struct SyncConfig {
     pub debounce_ms: u64,
     /// 默认同步根目录（base/sync）
     pub sync_root: String,
+    /// 日志配置（对齐后端 log 段）
+    #[serde(default)]
+    pub log: LogConfig,
 }
 
 /// 本地目录 ↔ 服务器目录的映射，含 server 侧 folder_id
@@ -40,7 +43,59 @@ pub struct FileConfig {
     pub download_workers: usize,
     pub debounce_ms: u64,
     pub sync_root: String,
+    #[serde(default)]
+    pub log: LogConfig,
 }
+
+/// 日志配置，字段命名与后端 config.yaml 的 log 段一致。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
+    /// 日志级别：debug / info / warn / error
+    #[serde(default = "default_level")]
+    pub level: String,
+    /// 是否写文件
+    #[serde(default = "default_true")]
+    pub file: bool,
+    /// 是否输出到控制台（GUI app 默认关）
+    #[serde(default)]
+    pub console: bool,
+    /// 输出格式：console / json
+    #[serde(default = "default_format")]
+    pub format: String,
+    /// 单文件最大大小（MB）
+    #[serde(default = "default_max_size")]
+    #[serde(rename = "max_size")]
+    pub max_size: u64,
+    /// 最大备份文件数
+    #[serde(default = "default_max_backup")]
+    #[serde(rename = "max_backup")]
+    pub max_backup: u32,
+    /// 最大保留天数
+    #[serde(default = "default_max_age")]
+    #[serde(rename = "max_age")]
+    pub max_age: u32,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        LogConfig {
+            level: default_level(),
+            file: true,
+            console: false,
+            format: default_format(),
+            max_size: default_max_size(),
+            max_backup: default_max_backup(),
+            max_age: default_max_age(),
+        }
+    }
+}
+
+fn default_level() -> String { "info".into() }
+fn default_true() -> bool { true }
+fn default_format() -> String { "console".into() }
+fn default_max_size() -> u64 { 100 }
+fn default_max_backup() -> u32 { 3 }
+fn default_max_age() -> u32 { 7 }
 
 impl Default for SyncConfig {
     fn default() -> Self {
@@ -55,6 +110,7 @@ impl Default for SyncConfig {
             download_workers: 4,
             debounce_ms: 800,
             sync_root: app_paths::sync_dir().to_string_lossy().to_string(),
+            log: LogConfig::default(),
         }
     }
 }
@@ -82,6 +138,7 @@ impl SyncConfig {
             download_workers: self.download_workers,
             debounce_ms: self.debounce_ms,
             sync_root: self.sync_root.clone(),
+            log: self.log.clone(),
         };
         if let Ok(text) = serde_yaml::to_string(&fc) {
             let _ = std::fs::write(app_paths::config_file(), text);
@@ -103,6 +160,7 @@ impl SyncConfig {
         if !fc.sync_root.is_empty() {
             self.sync_root = fc.sync_root;
         }
+        self.log = fc.log;
     }
 }
 

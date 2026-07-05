@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@noble/hashes": "^1.6.0",
     "@syl/base-request": "workspace:*",
     "@syl/icon": "workspace:*",
     "@syl/models": "workspace:*",
