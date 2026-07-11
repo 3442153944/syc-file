@@ -29,6 +29,7 @@ var (
 	ErrIO           = errors.New("filecore: IO 错误")
 	ErrLeafMismatch = errors.New("filecore: 分片哈希不匹配")
 	ErrRootMismatch = errors.New("filecore: Merkle 树根不匹配")
+	ErrSizeMismatch = errors.New("filecore: 文件尺寸/分片数与描述不符")
 	ErrUnknown      = errors.New("filecore: 未知错误")
 )
 
@@ -44,6 +45,8 @@ func codeToErr(rc C.int32_t) error {
 		return ErrLeafMismatch
 	case C.FC_ERR_ROOT_MISMATCH:
 		return ErrRootMismatch
+	case C.FC_ERR_SIZE_MISMATCH:
+		return ErrSizeMismatch
 	default:
 		return ErrUnknown
 	}
@@ -145,4 +148,15 @@ func Move(src, dst string) error {
 	cd := C.CString(dst)
 	defer C.free(unsafe.Pointer(cd))
 	return codeToErr(C.fc_move(cs, cd))
+}
+
+// Evict 逐出并关闭 Rust 侧缓存的该路径写句柄。
+//
+// 在 Go 侧删除/移动临时文件（os.Remove 等）前必须先调用，否则缓存可能残留
+// 指向已删文件的句柄，同路径新会话的分片写入会静默丢失。
+// Preallocate/Finalize/Move 内部已自带逐出，无须额外调用。
+func Evict(path string) error {
+	cp := C.CString(path)
+	defer C.free(unsafe.Pointer(cp))
+	return codeToErr(C.fc_evict(cp))
 }

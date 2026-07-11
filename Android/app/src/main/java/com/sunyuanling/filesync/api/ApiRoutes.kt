@@ -96,4 +96,24 @@ object ApiRoutes {
      * post /v1/file/delete-download-history
      * */
     const val FILE_DELETE_DOWNLOAD_HISTORY = "/file/delete-download-history"
+
+    // ==================== 同步（internal/sync/router.go） ====================
+
+    /** GET /v1/sync/tasks —— 同步任务记录（query：status/device_id/limit） */
+    const val SYNC_TASKS = "/sync/tasks"
+
+    /** GET /v1/sync/tasks/pending —— 本设备待执行任务（query：device_id 必填） */
+    const val SYNC_TASKS_PENDING = "/sync/tasks/pending"
+
+    /** GET /v1/sync/conflicts —— 待处理冲突列表 */
+    const val SYNC_CONFLICTS = "/sync/conflicts"
+
+    /** POST /v1/sync/conflicts/:id/resolve —— 解决冲突（body: {resolution}） */
+    const val SYNC_CONFLICT_RESOLVE = "/sync/conflicts/%s/resolve"
+
+    /** DELETE /v1/sync/conflicts/:id —— 删除冲突记录 */
+    const val SYNC_CONFLICT_DELETE = "/sync/conflicts/%s"
+
+    /** GET /v1/sync/folders —— 同步文件夹列表 */
+    const val SYNC_FOLDERS = "/sync/folders"
 }

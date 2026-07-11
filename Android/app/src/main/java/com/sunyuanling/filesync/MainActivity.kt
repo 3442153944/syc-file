@@ -47,6 +47,7 @@ import com.sunyuanling.filesync.router.LoginDestination
 import com.sunyuanling.filesync.router.PermissionDestination
 import com.sunyuanling.filesync.router.TopLevelDestination
 import com.sunyuanling.filesync.ui.components.notice.DownloadNotificationHelper
+import com.sunyuanling.filesync.service.SyncKeepAliveService
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -175,18 +176,28 @@ fun FileSyncApp(startDestination: Any) {
     }
 
     // ========== WebSocket 生命周期管理 ==========
+    // 强制保活开启时连接归 SyncKeepAliveService 管：ON_STOP 不断开，退后台仍在线
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> scope.launch {
                     if (Request.hasToken()) WebSocketManager.connect(context)
                 }
-                Lifecycle.Event.ON_STOP -> WebSocketManager.disconnect()
+                Lifecycle.Event.ON_STOP -> {
+                    if (!AppConfig.forceKeepAliveEnabled) WebSocketManager.disconnect()
+                }
                 else -> {}
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // ========== 强制保活服务 ==========
+    LaunchedEffect(Unit) {
+        if (AppConfig.forceKeepAliveEnabled && Request.hasToken()) {
+            SyncKeepAliveService.start(context)
+        }
     }
 
     // ========== 是否显示底部导航 ==========

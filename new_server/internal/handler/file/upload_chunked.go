@@ -145,6 +145,7 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 			}
 			// 描述对不上或临时文件已丢 → 丢弃旧会话，重新开始（客户端整份重传）
 			_ = upload_store.Global.Delete(ctx, id)
+			_ = filecore.Evict(sess.TempPath) // 先关 Rust 侧缓存句柄再删文件
 			_ = os.Remove(sess.TempPath)
 		}
 

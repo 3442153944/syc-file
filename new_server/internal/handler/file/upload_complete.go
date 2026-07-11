@@ -97,9 +97,9 @@ func HandlerFuncUploadComplete(db *gorm.DB, _ *redis.Client, engine *sync.Engine
 				c.JSON(http.StatusOK, gin.H{"code": 422, "message": "分片校验失败，请重传指定分片", "data": gin.H{
 					"bad_index": badIndex,
 				}})
-			case errors.Is(err, filecore.ErrRootMismatch):
-				// 树根对不上：按既定取舍让客户端整份重传
-				logger.Logger.Warn("finalize 树根不一致", zap.String("upload_id", uploadID))
+			case errors.Is(err, filecore.ErrRootMismatch), errors.Is(err, filecore.ErrSizeMismatch):
+				// 树根/尺寸对不上：按既定取舍让客户端整份重传
+				logger.Logger.Warn("finalize 整体校验失败", zap.String("upload_id", uploadID), zap.Error(err))
 				c.JSON(http.StatusOK, gin.H{"code": 422, "message": "整体校验失败，请重新上传", "data": nil})
 			default:
 				logger.Logger.Error("finalize 失败", zap.String("upload_id", uploadID), zap.Error(err))

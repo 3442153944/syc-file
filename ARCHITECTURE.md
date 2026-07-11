@@ -210,6 +210,14 @@ WebSocket `network/websocket.kt`（`WebSocketManager`）：
 - `SyncSettingsScreen` 加「持久化续传（Root）」开关，**仅 `RootHelper.checkRootAccess()` 通过才显示**。
 - 约束：app 被杀后重开可恢复未完成任务续传；"被杀即实时续"需 root daemon + FileObserver，属未来工作（见 §9）。
 
+### 3.10 同步入口 + 强制保活 + 同步列表（新增）
+- **API 层**：`api/sync/`（`SyncApi`/`SyncResponse`）对齐后端 `/v1/sync/*`——`listTasks`/`pendingTasks`/`listConflicts`/`resolveConflict`/`deleteConflict`/`listFolders`；DTO 字段与 GORM 模型 json tag 严格一致。
+- **强制保活**：`AppConfig.forceKeepAliveEnabled`（默认关，`ConfigManager` 持久化）→ 消费者 `service/SyncKeepAliveService`（dataSync 前台服务 + 常驻低优先级通知）：持有 WS 连接、30s 守护循环掉线重连、START_STICKY；开启时 `MainActivity` 的 ON_STOP **不再断开 WS**（连接归服务管），app 启动时若开关已开自动拉起服务。`SyncSettingsScreen` 提供开关 + 电池优化白名单跳转（`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）。root 设备的进程级守护（LSPosed 看门狗拉起）在 app 外部，独立维护。
+- **同步列表**：`SyncListScreen`（`SyncListDestination`，fileGraph）两 tab——「同步记录」(`/sync/tasks`) 与「待处理」（本设备 `/sync/tasks/pending` + 冲突 `/sync/conflicts`，冲突可 accept_server / keep_local / 删除）；VM `ui/viewModel/sync/SyncListViewModel`。
+- **Files 页入口**：`file.kt` 磁盘列表首屏加「同步」卡片（同步设置 / 同步列表两行入口，副标题实时显示保活开关与 WS 连接状态）。
+- ✅ `WebSocketManager` 重连上限接线 `AppConfig.wsMaxReconnectAttempts`（负数=无限，默认 -1），替换原硬编码 5 次；指数退避防溢出。
+- 注意：同步**探测/执行引擎**（FileObserver 上报 file_changed、执行 task_created）仍未接（见 §9.3），本轮是「入口 + 保活 + 可视化」地基。
+
 ---
 
 ## 3B. Windows 桌面端架构（`filesync-desktop/`）
@@ -540,7 +548,7 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 **前端**
 - P1 `network/websocket.kt` package 仍为 `com.example.filesync.data.sync`，应改 `com.sunyuanling.filesync.*`；测试包同病。
-- P1 `AppConfig.wsMaxReconnectAttempts`/`autoSync*`/日志系列配置项 **未接线**，`WebSocketManager` 硬编码 5 次重连。
+- P1 `AppConfig.autoSync*`/日志系列配置项 **未接线**（`wsMaxReconnectAttempts` ✅ 已接线：负数=无限重连，`forceKeepAliveEnabled` ✅ 已接线：SyncKeepAliveService，见 §3.10）。
 - P1 `Request.baseUrl` 单例 init 求值，改服务器配置后需手动重赋值。
 - P2 DataStore `"secure_prefs"` 未加密；「记住密码」明文存。
 - P2 cleartext 全开（`network_security_config.xml`）；`AndroidManifest` 过度权限且 `MANAGE_EXTERNAL_STORAGE` 重复声明。
@@ -653,7 +661,8 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - **Rust 已补**：稳定 device_id（`device.rs:generate_device_id`）、完整 Tauri command 集（用户/文件/同步域共 ~25 个）、ApiClient(reqwest)、notify watcher + 防抖 + 上传 worker + ws_client 骨架、`start_sync` 启动时从服务器拉 folder 列表填充缓存、`create_sync_folder` 自动加入 watcher。
 - **Rust 已接通**（原"待补"①②③ 均已落地，见 §3B.6）：`file_changed` 上报 + blake3、ws_client 执行 `task_created`(download/delete/mkdir) 并回 `task_completed/failed`、remove 走 delete 上报、冲突保留；同步上传/keep_local 已切分片协议（§9.5）。
 - **Rust 待补**：① 冲突待办/同步任务列表 UI（功能已通、界面简陋，传输列表已有但冲突收件箱语义仍弱）。
-- **Android 待补**：`SyncEngine` 单例、root daemon 进程模型、FileObserver 接线、同步规则配置 UI。
+- **Android 已补（本轮）**：同步 API 层（`api/sync/`）、强制保活前台服务（`SyncKeepAliveService`，WS 常驻）、同步列表页（记录 + 待处理/冲突处置）、Files 页同步入口卡片（见 §3.10）。
+- **Android 待补**：`SyncEngine` 单例（消费 task_created 执行 download/delete/mkdir + 上报 file_changed）、root daemon 进程模型、FileObserver 接线、同步规则（文件夹映射）配置 UI、重连后 scan 全量比对限流。
 
 ### 9.4 应用内更新机制（搁置备忘）
 - 决策：APK 上传由 **PC 端发起**（当前 PC 端未具备 → 整体搁置）；安装**全部弹系统安装框**（非 root 静默不做）；范围**仅 Android**。

@@ -11,8 +11,8 @@ import (
 // TestSmoke 走通完整链路：预分配 → 乱序写分片 → finalize 校验 → 落盘，
 // 顺带验证 cgo 链接成功与哈希/Merkle 一致性。
 func TestSmoke(t *testing.T) {
-	if v := ABIVersion(); v != 1 {
-		t.Fatalf("ABIVersion = %d, 期望 1（cgo 链接异常）", v)
+	if v := ABIVersion(); v != 2 {
+		t.Fatalf("ABIVersion = %d, 期望 2（cgo 链接异常或旧 .a 未重建）", v)
 	}
 
 	const chunkSize = 4 << 20 // 4MiB
@@ -98,5 +98,59 @@ func TestLeafMismatch(t *testing.T) {
 	err := ChunkWrite(tmp, 0, data, wrongLeaf)
 	if err != ErrLeafMismatch {
 		t.Fatalf("期望 ErrLeafMismatch，得到 %v", err)
+	}
+}
+
+// TestPathReuse 回归：句柄缓存不得把写入丢进"同路径的旧文件"。
+// 场景 = 会话中止：Evict + 删除临时文件 → 同路径新会话 → 写入必须落到新文件。
+func TestPathReuse(t *testing.T) {
+	dir := t.TempDir()
+	tmp := filepath.Join(dir, "reuse.part")
+
+	old := bytes.Repeat([]byte{0xAA}, 64)
+	if err := Preallocate(tmp, 64); err != nil {
+		t.Fatalf("Preallocate#1: %v", err)
+	}
+	if err := ChunkWrite(tmp, 0, old, nil); err != nil {
+		t.Fatalf("ChunkWrite#1: %v", err) // 让缓存持有该路径的句柄
+	}
+	if err := Evict(tmp); err != nil {
+		t.Fatalf("Evict: %v", err)
+	}
+	if err := os.Remove(tmp); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	fresh := bytes.Repeat([]byte{0xBB}, 64)
+	if err := Preallocate(tmp, 64); err != nil {
+		t.Fatalf("Preallocate#2: %v", err)
+	}
+	if err := ChunkWrite(tmp, 0, fresh, nil); err != nil {
+		t.Fatalf("ChunkWrite#2: %v", err)
+	}
+
+	wantHash, err := HashChunk(fresh)
+	if err != nil {
+		t.Fatalf("HashChunk: %v", err)
+	}
+	gotHash, bad, err := Finalize(tmp, 64, 64, nil, nil)
+	if err != nil || bad != -1 {
+		t.Fatalf("Finalize: %v (badIndex=%d)", err, bad)
+	}
+	if !bytes.Equal(gotHash, wantHash) {
+		t.Fatalf("同路径新会话的内容被旧句柄污染")
+	}
+}
+
+// TestSizeMismatch 验证 Finalize 的长度早校验返回专用错误码。
+func TestSizeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	tmp := filepath.Join(dir, "size.part")
+	if err := Preallocate(tmp, 2048); err != nil {
+		t.Fatalf("Preallocate: %v", err)
+	}
+	_, _, err := Finalize(tmp, 1024, 1024, nil, nil) // 实际 2048 ≠ 声称 1024
+	if err != ErrSizeMismatch {
+		t.Fatalf("期望 ErrSizeMismatch，得到 %v", err)
 	}
 }

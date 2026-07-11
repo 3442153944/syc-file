@@ -41,6 +41,9 @@ import kotlinx.serialization.Serializable
 /**文件传输列表*/
 @Serializable data object TransferListDestination
 
+/**同步列表（同步记录 + 待处理事项）*/
+@Serializable data object SyncListDestination
+
 // 特殊页面
 /**权限设置*/
 @Serializable data object PermissionDestination

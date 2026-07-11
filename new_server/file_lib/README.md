@@ -51,9 +51,22 @@ Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libfilecore.a`）
 
 ## 二、filecore 库设计
 
-**无状态**：不持有长生命周期会话句柄，会话/位图状态全在 Go+Redis。好处：抗服务重启、
-无句柄泄漏、天然并发安全。每次 `fc_chunk_write` 各自开独立文件句柄 seek 写，
-不相交区域的定位写并发安全。
+**对外无状态**：会话/位图状态全在 Go+Redis，重启后一切照常。进程内有一层**写句柄缓存**
+（纯加速层，v2 引入）：按路径缓存写句柄，消除每分片一次 open/close（Windows 上 CreateFile
+要过全套过滤驱动，代价远高于 Linux）；逐出/清空随时可重开，不影响正确性。
+定位写用 pwrite（unix）/ OVERLAPPED 偏移写（Windows），共享句柄对不相交区域并发安全。
+缓存以全局世代号防 ABA（open 窗口横跨 evict 的句柄不入缓存），杜绝旧句柄污染同路径新文件。
+
+**多平台**：unix 系（Linux / Android / macOS / OHOS）与 Windows 全覆盖，平台差异收敛在
+`src/lib.rs` 的 cfg 分支（fallocate 仅 Linux/Android；NTFS sparse 仅 Windows；其余目标
+编译期报错）。同一份实现将复用到安卓（NDK）、另一个 Tauri 客户端与鸿蒙。
+
+**调用方必须遵守**（详见 `src/lib.rs` 模块注释）：
+1. **删除临时文件前先 `fc_evict(path)`**（Go 侧 `filecore.Evict`），否则缓存可能残留
+   指向已删文件的句柄，同路径新会话的写入会静默丢失。`fc_preallocate` / `fc_finalize` /
+   `fc_move` 内部已自带逐出。
+2. **`fc_finalize` / `fc_move` 期间不得有同路径写入/预分配在途**（finalize 走 mmap，
+   途中截断文件在 unix 上是 SIGBUS）。服务端语义天然满足：收齐分片才 finalize。
 
 ### FFI 接口（见 `filecore.h`）
 
@@ -64,11 +77,14 @@ Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libfilecore.a`）
 | `fc_chunk_write(path, offset, data, len, expected_leaf)` | blake3 早校验 + 按 offset 定位写 |
 | `fc_hash_chunk(data, len, out32)` | 算一段数据的 blake3 叶子哈希（客户端也用） |
 | `fc_merkle_root(leaves, count, out32)` | 由叶子哈希数组构造 Merkle 树根（双端共用） |
-| `fc_finalize(path, chunk_size, total_size, expected_leaves, leaf_count, expected_root, out_file_hash32, out_bad_index)` | 单趟校验：逐块比对 + 树根比对 + 算整文件哈希，定位坏块 |
+| `fc_finalize(path, chunk_size, total_size, expected_leaves, leaf_count, expected_root, out_file_hash32, out_bad_index)` | mmap 窗口化单趟校验：逐块比对 + 树根比对 + 算整文件哈希，定位坏块；mmap 失败回退流式 |
 | `fc_move(src, dst)` | 原子落盘：mkdir -p + rename，跨卷退化 copy+remove |
+| `fc_evict(path)` | v2 新增：逐出缓存写句柄。**删除临时文件前必须调用** |
 
 返回码：`FC_OK=0`；`FC_ERR_IO=-1`、`FC_ERR_ARG=-2`、`FC_ERR_LEAF_MISMATCH=-3`、
-`FC_ERR_ROOT_MISMATCH=-4`。所有哈希均为 **32 字节 blake3**。
+`FC_ERR_ROOT_MISMATCH=-4`、`FC_ERR_SIZE_MISMATCH=-5`（v2 新增：文件尺寸/分片数与
+描述不符，v1 里混在 ROOT_MISMATCH）。所有哈希均为 **32 字节 blake3**。
+ABI 版本：`fc_abi_version() == 2`。
 
 ### Merkle 树构造规则（客户端必须一致）
 
@@ -148,16 +164,20 @@ cgo 指令写在 `../pkg/filecore/filecore.go`：
 ## 四、注意事项
 
 - **LDFLAGS 需与 `native-static-libs` 同步**：Rust 静态库依赖的系统库由
-  `build.ps1` 末尾打印（当前为 `-lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp`）。
-  升级 Rust/依赖后若链接报未定义符号，按新输出更新 `filecore.go` 的 LDFLAGS。
+  `build.ps1` 末尾打印（当前为 `-lwindows.0.52.0 -lkernel32 -lntdll -luserenv -lws2_32
+  -ldbghelp`）。其中 `-lwindows.0.52.0` 是 windows-sys 的聚合导入库，**可不加**：
+  本库实际用到的 Win32 符号（`DeviceIoControl`）由 kernel32 导出，gcc 从 `-lkernel32`
+  即可解析（已实测链接通过）。升级依赖后若链接报未定义符号，按新输出补 LDFLAGS。
 - **临时文件必须与目标同盘**：`fc_move` 优先 `rename`（同卷才原子且零拷贝），跨卷会退化
   为 copy+remove。Go 侧 `tempPathFor` 已把临时文件放到目标盘的 `BasePath/TempPath` 下。
 - **Redis 位图是 MSB-first**：`SETBIT offset` 的 offset=0 对应字节最高位。Go 侧
   `MissingChunks` 的位序与之严格对齐，改动需保持一致（有单测覆盖）。
 - **cgo 指针规则**：Go 把分片 `[]byte` 首地址传给 Rust，Rust 在调用期内使用、不留存，
   符合 cgo 规则；不要让 Rust 侧缓存这些指针跨调用。
-- **`panic = "abort"`**：Rust 侧 panic 直接 abort 进程（不跨 FFI 展开）。所有对外函数
-  都用返回码报错、不 panic；新增函数务必遵循，避免把 Go 进程带崩。
+- **`panic = "unwind"` + catch_unwind（v2 起，勿改回 abort）**：所有导出函数包
+  `ffi_guard`（catch_unwind），panic 统一兜成 `FC_ERR_IO`，绝不跨 FFI 展开。
+  catch_unwind 依赖 unwind 模式——改回 `panic = "abort"` 会让任何 panic（含 rayon
+  工作线程）直接带崩宿主进程（Go/Tauri/安卓/鸿蒙）。新增函数必须同样包 `ffi_guard`。
 - **blake3 树规则双端一致**：改 Merkle 构造或分片语义时，客户端（Tauri）与服务端必须
   同步，否则树根对不上会触发整份重传。
 - **go 可执行**：本机在 `C:\Program Files\Go\bin\go.exe`，不在默认 PATH。
@@ -168,8 +188,8 @@ cgo 指令写在 `../pkg/filecore/filecore.go`：
 
 ```
 file_lib/
-├── Cargo.toml          # crate 配置（staticlib, blake3, lto, panic=abort）
-├── src/lib.rs          # 核心实现
+├── Cargo.toml          # crate 配置（staticlib; blake3+rayon/memmap2; lto; panic=unwind）
+├── src/lib.rs          # 核心实现（v2：句柄缓存/定位写/sparse/fallocate/mmap 并行 finalize）
 ├── filecore.h          # C ABI 声明
 ├── build.ps1           # 构建并打包到 lib/
 ├── lib/libfilecore.a   # 构建产物（Go cgo 链接目标）

@@ -33,6 +33,7 @@ object ConfigManager {
         props["autoSyncIntervalMs"] = AppConfig.autoSyncIntervalMs.toString()
         props["syncOnWifiOnly"] = AppConfig.syncOnWifiOnly.toString()
         props["persistentDownloadEnabled"] = AppConfig.persistentDownloadEnabled.toString()
+        props["forceKeepAliveEnabled"] = AppConfig.forceKeepAliveEnabled.toString()
         props["loggerLevel"] = AppConfig.loggerLevel.name
         props["logDir"] = AppConfig.logDir
         props["logMaxFileSizeBytes"] = AppConfig.logMaxFileSizeBytes.toString()
@@ -65,6 +66,7 @@ object ConfigManager {
         AppConfig.autoSyncIntervalMs = props["autoSyncIntervalMs"]?.toString()?.toLongOrNull() ?: AppConfig.autoSyncIntervalMs
         AppConfig.syncOnWifiOnly = props["syncOnWifiOnly"]?.toString()?.toBooleanStrictOrNull() ?: AppConfig.syncOnWifiOnly
         AppConfig.persistentDownloadEnabled = props["persistentDownloadEnabled"]?.toString()?.toBooleanStrictOrNull() ?: AppConfig.persistentDownloadEnabled
+        AppConfig.forceKeepAliveEnabled = props["forceKeepAliveEnabled"]?.toString()?.toBooleanStrictOrNull() ?: AppConfig.forceKeepAliveEnabled
         AppConfig.loggerLevel = props["loggerLevel"]?.toString()
             ?.let { runCatching { LogLevel.valueOf(it) }.getOrNull() } ?: AppConfig.loggerLevel
         AppConfig.logDir = props["logDir"] as? String ?: AppConfig.logDir

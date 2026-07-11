@@ -6,14 +6,25 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -23,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -30,7 +42,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
+import com.example.filesync.data.sync.WebSocketManager
+import com.example.filesync.data.sync.WsState
+import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.router.FileUploadDestination
+import com.sunyuanling.filesync.router.SyncListDestination
+import com.sunyuanling.filesync.router.SyncSettingsDestination
 import com.sunyuanling.filesync.router.navigateToDetail
 import com.sunyuanling.filesync.ui.components.files.DirectoryPickerScreen
 import com.sunyuanling.filesync.ui.components.files.ErrorCard
@@ -274,6 +291,9 @@ fun FileScreen(
                 )
             }
 
+            // 同步入口：设置（保活开关等）+ 同步列表（记录/待处理）
+            item { SyncSectionCard(navController = navController) }
+
             if (diskLoading) {
                 item { LoadingIndicator() }
             }
@@ -315,6 +335,78 @@ fun FileScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * 同步区块：文件页首屏入口卡片。
+ * - 同步设置：强制保活开关、自动同步等（SyncSettingsScreen）
+ * - 同步列表：同步记录 + 待处理事项（SyncListScreen）
+ * 副标题实时显示保活开关与 WS 连接状态。
+ */
+@Composable
+private fun SyncSectionCard(navController: NavController) {
+    val wsState by WebSocketManager.connectionState.collectAsState()
+    val statusText = buildString {
+        append(if (AppConfig.forceKeepAliveEnabled) "保活已开启" else "保活未开启")
+        append(" · ")
+        append(
+            when (wsState) {
+                is WsState.Connected -> "同步连接在线"
+                is WsState.Connecting -> "连接中…"
+                is WsState.Disconnected -> "连接已断开"
+                is WsState.Error -> "连接异常"
+            }
+        )
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column {
+            SyncEntryRow(
+                icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                title = "同步设置",
+                subtitle = statusText,
+                onClick = { navController.navigate(SyncSettingsDestination) }
+            )
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            SyncEntryRow(
+                icon = { Icon(Icons.Default.Sync, contentDescription = null) },
+                title = "同步列表",
+                subtitle = "同步记录与待处理事项",
+                onClick = { navController.navigate(SyncListDestination) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SyncEntryRow(
+    icon: @Composable () -> Unit,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        icon()
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                text = subtitle,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.outline
+        )
     }
 }
 

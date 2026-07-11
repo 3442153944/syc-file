@@ -35,7 +35,8 @@ $prev = $env:RUSTFLAGS
 $env:RUSTFLAGS = "--print native-static-libs"
 Push-Location $root
 try {
-    cargo rustc --release --target $target --lib 2>&1 |
+    # 经 cmd 重定向 stderr，避免 PowerShell 5.1 把 cargo 的 stderr 包装成 NativeCommandError
+    cmd /c "cargo rustc --release --target $target --lib 2>&1" |
         Select-String "native-static-libs:" | ForEach-Object { $_.Line }
 } finally {
     Pop-Location

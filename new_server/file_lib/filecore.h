@@ -19,8 +19,10 @@ extern "C" {
 #define FC_ERR_ARG -2
 #define FC_ERR_LEAF_MISMATCH -3
 #define FC_ERR_ROOT_MISMATCH -4
+/* v2 新增：文件实际尺寸/分片数与描述不符（v1 里混在 ROOT_MISMATCH） */
+#define FC_ERR_SIZE_MISMATCH -5
 
-/* ABI 版本，链接自检用 */
+/* ABI 版本，链接自检用。v2：新增 fc_evict 与 FC_ERR_SIZE_MISMATCH */
 int32_t fc_abi_version(void);
 
 /* 预分配临时文件到 total_size；已存在则只调整长度，不清空（支持续传复用） */
@@ -51,6 +53,13 @@ int32_t fc_finalize(const char *path, uint64_t chunk_size, uint64_t total_size,
 
 /* 原子落盘：mkdir -p 目标父目录后 rename，跨卷退化为 copy+remove */
 int32_t fc_move(const char *src, const char *dst);
+
+/*
+ * 逐出并关闭某路径的进程内缓存写句柄。
+ * 编排层在删除/移动临时文件前【必须】调用（会话超时、取消、清理僵尸文件），
+ * 否则缓存可能残留指向已删文件的句柄，同路径新会话的写入会静默丢失。
+ */
+int32_t fc_evict(const char *path);
 
 #ifdef __cplusplus
 }

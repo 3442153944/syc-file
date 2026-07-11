@@ -46,6 +46,8 @@
     <!-- 前台下载服务 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 强制保活：申请加入电池优化白名单（同步设置页跳系统弹窗） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
             android:allowBackup="true"
@@ -70,6 +72,11 @@
 
         <service
                 android:name=".service.DownloadService"
+                android:exported="false"
+                android:foregroundServiceType="dataSync" />
+
+        <service
+                android:name=".service.SyncKeepAliveService"
                 android:exported="false"
                 android:foregroundServiceType="dataSync" />
     </application>

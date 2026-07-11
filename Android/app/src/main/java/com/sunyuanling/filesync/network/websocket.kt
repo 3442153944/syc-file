@@ -48,7 +48,9 @@ object WebSocketManager {
 
     /** 重连次数 */
     private var reconnectAttempts = 0
-    private val maxReconnectAttempts = 5
+
+    /** 最大重连次数：接线 AppConfig.wsMaxReconnectAttempts，负数 = 无限重连 */
+    private val maxReconnectAttempts get() = AppConfig.wsMaxReconnectAttempts
 
     private var deviceInfoJson: String = ""
     private var deviceQueryParams: String = ""
@@ -176,7 +178,7 @@ object WebSocketManager {
      * 安排重连任务
      */
     private fun scheduleReconnect() {
-        if (reconnectAttempts >= maxReconnectAttempts) {
+        if (maxReconnectAttempts >= 0 && reconnectAttempts >= maxReconnectAttempts) {
             Log.e(TAG, "已达到最大重连次数，停止重连")
             shouldReconnect.set(false)
             _connectionState.value = WsState.Error("连接失败，已停止重试")
@@ -185,7 +187,9 @@ object WebSocketManager {
 
         cancelReconnect()
 
-        val delayMs = (1500L * (1 shl reconnectAttempts)).coerceAtMost(30000L)
+        // 指数退避上限 30s；attempts 大时 1 shl n 会溢出，先夹在 [0,14]
+        val backoff = reconnectAttempts.coerceIn(0, 14)
+        val delayMs = (1500L * (1 shl backoff)).coerceAtMost(30000L)
         reconnectAttempts++
 
         reconnectJob = reconnectScope.launch {

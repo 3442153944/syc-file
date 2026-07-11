@@ -73,6 +73,16 @@ object AppConfig {
      */
     var persistentDownloadEnabled = false
 
+    /**
+     * 强制保活（默认关）。
+     * 开启后：启动前台保活服务（SyncKeepAliveService，dataSync 类型常驻通知），
+     * 持有 WebSocket 连接并在断线后持续重连，app 退到后台也保持在线可接收同步任务。
+     * - 非 root：依赖前台服务 + 用户把 app 加入电池优化白名单；被系统强杀后由
+     *   START_STICKY 尽力拉起（厂商 ROM 不保证）。
+     * - root：可另挂 LSPosed 看门狗模块守护进程，死了拉起（模块在 app 外，独立维护）。
+     */
+    var forceKeepAliveEnabled = false
+
     // ==================== 日志 ====================
 
     /** 本地日志记录级别 */
