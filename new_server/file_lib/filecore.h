@@ -22,7 +22,7 @@ extern "C" {
 /* v2 新增：文件实际尺寸/分片数与描述不符（v1 里混在 ROOT_MISMATCH） */
 #define FC_ERR_SIZE_MISMATCH -5
 
-/* ABI 版本，链接自检用。v2：新增 fc_evict 与 FC_ERR_SIZE_MISMATCH */
+/* ABI 版本，链接自检用。v2：新增 fc_evict 与 FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe */
 int32_t fc_abi_version(void);
 
 /* 预分配临时文件到 total_size；已存在则只调整长度，不清空（支持续传复用） */
@@ -60,6 +60,17 @@ int32_t fc_move(const char *src, const char *dst);
  * 否则缓存可能残留指向已删文件的句柄，同路径新会话的写入会静默丢失。
  */
 int32_t fc_evict(const char *path);
+
+/*
+ * v3 新增（客户端侧）：一趟算出文件的上传描述信息。
+ * 叶子哈希写 out_leaves（容量 leaf_cap 个 32B），Merkle 树根写 out_root32，
+ * 整文件 blake3 写 out_file_hash32。与服务端 fc_finalize 重算逐字节一致。
+ * 返回 >=0 实际叶子数；负数为 FC_ERR_*（容量不足返回 FC_ERR_ARG，扩容重试）。
+ * 空文件返回 0，root/file_hash = blake3("")。计算期间文件不得被并发写。
+ */
+int64_t fc_describe(const char *path, uint64_t chunk_size,
+                    uint8_t *out_leaves, size_t leaf_cap,
+                    uint8_t *out_root32, uint8_t *out_file_hash32);
 
 #ifdef __cplusplus
 }

@@ -26,8 +26,12 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 
 	remotePrefix := filepath.Clean(folder.RemotePath)
 	var files []model.File
-	like := strings.ReplaceAll(filepath.ToSlash(remotePrefix), "/", "\\") + string(filepath.Separator) + "%"
-	e.db.Where("user_id = ? AND file_path LIKE ?", userID, like).Find(&files)
+	// MySQL LIKE 默认以 '\' 为转义符：Windows 路径 'E:\FileSync\%' 里 '\F'/'\%' 全被
+	// 当成转义序列，永远匹配不到反斜杠路径（曾导致 scan 恒为 0 行、离线追赶失效）。
+	// 改用 ESCAPE '|' 让反斜杠恢复字面量，并转义前缀里可能出现的 LIKE 元字符。
+	esc := strings.NewReplacer("|", "||", "%", "|%", "_", "|_").Replace(remotePrefix)
+	like := esc + string(filepath.Separator) + "%"
+	e.db.Where("user_id = ? AND file_path LIKE ? ESCAPE '|'", userID, like).Find(&files)
 
 	relToFile := make(map[string]model.File)
 	for _, f := range files {

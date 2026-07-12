@@ -69,10 +69,10 @@ const MAX_CHUNK_SIZE: u64 = 1 << 30; // 1 GiB
 const FINALIZE_WINDOW: usize = 64 << 20; // 64 MiB
 
 /// ABI 版本号，供宿主 smoke test 确认链接成功。
-/// v2：新增 fc_evict、FC_ERR_SIZE_MISMATCH；其余行为兼容 v1。
+/// v2：新增 fc_evict、FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe（客户端描述计算）。
 #[no_mangle]
 pub extern "C" fn fc_abi_version() -> i32 {
-    2
+    3
 }
 
 // ---------------------------------------------------------------------------
@@ -89,8 +89,9 @@ unsafe fn cstr_to_path<'a>(p: *const c_char) -> Option<&'a Path> {
 
 /// FFI 边界的 panic 防护：panic 跨 C ABI 展开是 UB，统一兜成 FC_ERR_IO。
 /// 依赖 profile 的 panic = "unwind"（abort 模式下 panic 直接带崩宿主进程）。
-fn ffi_guard<F: FnOnce() -> i32>(f: F) -> i32 {
-    catch_unwind(AssertUnwindSafe(f)).unwrap_or(FC_ERR_IO)
+/// R 泛化以支持 i32（多数导出）与 i64（fc_describe 返回叶子数）。
+fn ffi_guard<R: From<i32>, F: FnOnce() -> R>(f: F) -> R {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| R::from(FC_ERR_IO))
 }
 
 /// 加锁并忽略毒化：缓存内容只是 Arc<File>，任何中间状态都自洽，
@@ -492,29 +493,9 @@ pub extern "C" fn fc_finalize(
             return FC_OK;
         }
 
-        let (leaves, file_hash) = match unsafe { Mmap::map(&file) } {
-            Ok(mmap) => {
-                #[cfg(unix)]
-                let _ = mmap.advise(memmap2::Advice::Sequential);
-
-                let cs = chunk_size as usize;
-                // 窗口 = chunk_size 的整数倍且 ≥ FINALIZE_WINDOW：
-                // 整体只顺序读一遍，窗口内叶子并行、整文件哈希并行推进
-                let window = FINALIZE_WINDOW.div_ceil(cs).max(1) * cs;
-                let mut leaves: Vec<[u8; HASH_SIZE]> =
-                    Vec::with_capacity(mmap.len().div_ceil(cs));
-                let mut fh = blake3::Hasher::new();
-                for win in mmap.chunks(window) {
-                    leaves.par_extend(win.par_chunks(cs).map(|c| *blake3::hash(c).as_bytes()));
-                    fh.update_rayon(win);
-                }
-                (leaves, *fh.finalize().as_bytes())
-            }
-            // mmap 失败（网络盘/32 位超大文件等）：回退流式单趟
-            Err(_) => match finalize_streaming(&file, chunk_size) {
-                Ok(r) => r,
-                Err(_) => return FC_ERR_IO,
-            },
+        let (leaves, file_hash) = match compute_leaves_and_file_hash(&file, chunk_size) {
+            Ok(r) => r,
+            Err(_) => return FC_ERR_IO,
         };
 
         // 叶子比对（顺序找首个坏块，纯 memcmp，开销可忽略）
@@ -544,6 +525,33 @@ pub extern "C" fn fc_finalize(
         }
         FC_OK
     })
+}
+
+/// 对非空文件按 chunk_size 分块算叶子哈希 + 整文件 blake3。
+/// 优先 mmap 窗口化单趟（窗口内叶子并行 + update_rayon 推进整文件哈希），
+/// mmap 失败（网络盘/32 位超大文件等）回退流式单趟。fc_finalize / fc_describe 共用。
+fn compute_leaves_and_file_hash(
+    file: &File,
+    chunk_size: u64,
+) -> io::Result<(Vec<[u8; HASH_SIZE]>, [u8; HASH_SIZE])> {
+    match unsafe { Mmap::map(file) } {
+        Ok(mmap) => {
+            #[cfg(unix)]
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+
+            let cs = chunk_size as usize;
+            // 窗口 = chunk_size 的整数倍且 ≥ FINALIZE_WINDOW：整体只顺序读一遍
+            let window = FINALIZE_WINDOW.div_ceil(cs).max(1) * cs;
+            let mut leaves: Vec<[u8; HASH_SIZE]> = Vec::with_capacity(mmap.len().div_ceil(cs));
+            let mut fh = blake3::Hasher::new();
+            for win in mmap.chunks(window) {
+                leaves.par_extend(win.par_chunks(cs).map(|c| *blake3::hash(c).as_bytes()));
+                fh.update_rayon(win);
+            }
+            Ok((leaves, *fh.finalize().as_bytes()))
+        }
+        Err(_) => finalize_streaming(file, chunk_size),
+    }
 }
 
 /// mmap 不可用时的流式回退：单趟顺序读，同时算叶子与整文件哈希。
@@ -576,6 +584,86 @@ fn finalize_streaming(
         }
     }
     Ok((leaves, *file_hasher.finalize().as_bytes()))
+}
+
+// ---------------------------------------------------------------------------
+// describe（客户端侧：一趟算出上传描述信息）
+// ---------------------------------------------------------------------------
+
+/// 【v3 新增，客户端用】计算文件的上传描述信息：
+/// 按 `chunk_size` 分块的叶子哈希写入 `out_leaves`（容量 `leaf_cap` 个 32 字节），
+/// Merkle 树根写入 `out_root32`，整文件 blake3 写入 `out_file_hash32`。
+/// mmap 窗口化单趟 + rayon 并行，与服务端 fc_finalize 的重算逐字节一致。
+///
+/// 返回：>= 0 实际叶子数；负数为 FC_ERR_*（`leaf_cap` 不足返回 FC_ERR_ARG，
+/// 调用方按新文件大小扩容重试）。空文件返回 0，root/file_hash = blake3("")。
+///
+/// 注意：计算期间文件不得被并发写入（客户端对自己的源文件天然满足）。
+#[no_mangle]
+pub extern "C" fn fc_describe(
+    path: *const c_char,
+    chunk_size: u64,
+    out_leaves: *mut u8,
+    leaf_cap: usize,
+    out_root32: *mut u8,
+    out_file_hash32: *mut u8,
+) -> i64 {
+    ffi_guard(|| -> i64 {
+        let err = |code: i32| code as i64;
+        let path = match unsafe { cstr_to_path(path) } {
+            Some(p) => p,
+            None => return err(FC_ERR_ARG),
+        };
+        if chunk_size == 0
+            || chunk_size > MAX_CHUNK_SIZE
+            || out_root32.is_null()
+            || out_file_hash32.is_null()
+            || (out_leaves.is_null() && leaf_cap != 0)
+        {
+            return err(FC_ERR_ARG);
+        }
+        if hashes_byte_len(leaf_cap).is_none() {
+            return err(FC_ERR_ARG);
+        }
+
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return err(FC_ERR_IO),
+        };
+        let len = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return err(FC_ERR_IO),
+        };
+
+        // 空文件：0 叶子，root/file_hash 均为 blake3("")（与 merkle_root(空) 一致）
+        if len == 0 {
+            let empty = *blake3::hash(b"").as_bytes();
+            unsafe {
+                slice::from_raw_parts_mut(out_root32, HASH_SIZE).copy_from_slice(&empty);
+                slice::from_raw_parts_mut(out_file_hash32, HASH_SIZE).copy_from_slice(&empty);
+            }
+            return 0;
+        }
+
+        let (leaves, file_hash) = match compute_leaves_and_file_hash(&file, chunk_size) {
+            Ok(r) => r,
+            Err(_) => return err(FC_ERR_IO),
+        };
+        if leaves.len() > leaf_cap {
+            return err(FC_ERR_ARG); // 容量不足（文件比 stat 时更大），调用方扩容重试
+        }
+
+        let root = merkle_root(&leaves);
+        unsafe {
+            let out = slice::from_raw_parts_mut(out_leaves, leaves.len() * HASH_SIZE);
+            for (i, leaf) in leaves.iter().enumerate() {
+                out[i * HASH_SIZE..(i + 1) * HASH_SIZE].copy_from_slice(leaf);
+            }
+            slice::from_raw_parts_mut(out_root32, HASH_SIZE).copy_from_slice(&root);
+            slice::from_raw_parts_mut(out_file_hash32, HASH_SIZE).copy_from_slice(&file_hash);
+        }
+        leaves.len() as i64
+    })
 }
 
 // ---------------------------------------------------------------------------

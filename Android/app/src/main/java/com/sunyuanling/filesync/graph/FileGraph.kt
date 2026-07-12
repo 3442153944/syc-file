@@ -11,11 +11,13 @@ import com.sunyuanling.filesync.ui.screen.FileSearchScreen
 import com.sunyuanling.filesync.router.FileDetailDestination
 import com.sunyuanling.filesync.router.FileSearchDestination
 import com.sunyuanling.filesync.router.FileUploadDestination
+import com.sunyuanling.filesync.router.SyncFolderMapDestination
 import com.sunyuanling.filesync.router.SyncListDestination
 import com.sunyuanling.filesync.router.TransferDestination
 import com.sunyuanling.filesync.router.TransferListDestination
 import com.sunyuanling.filesync.ui.screen.files.FileTransferListScreen
 import com.sunyuanling.filesync.ui.screen.files.FileUploadScreen
+import com.sunyuanling.filesync.ui.screen.files.SyncFolderMapScreen
 import com.sunyuanling.filesync.ui.screen.files.SyncListScreen
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -55,5 +57,8 @@ fun NavGraphBuilder.fileGraph(navController: NavHostController) {
     }
     composable<SyncListDestination> {
         SyncListScreen(navController = navController)
+    }
+    composable<SyncFolderMapDestination> {
+        SyncFolderMapScreen(navController = navController)
     }
 }

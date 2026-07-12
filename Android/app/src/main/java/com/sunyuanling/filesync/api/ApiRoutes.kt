@@ -97,7 +97,25 @@ object ApiRoutes {
      * */
     const val FILE_DELETE_DOWNLOAD_HISTORY = "/file/delete-download-history"
 
+    /** POST /v1/file/delete —— 删除远端单个文件（同步覆盖上传前置） */
+    const val FILE_DELETE = "/file/delete"
+
     // ==================== 同步（internal/sync/router.go） ====================
+
+    /** POST /v1/sync/notify —— 上报单文件变更（file_changed 的 HTTP 通道） */
+    const val SYNC_NOTIFY = "/sync/notify"
+
+    /** POST /v1/sync/scan —— 上报全量扫描清单，服务端比对 trunk 补任务 */
+    const val SYNC_SCAN = "/sync/scan"
+
+    /** POST /v1/sync/tasks/:id/complete —— 任务完成回报 */
+    const val SYNC_TASK_COMPLETE = "/sync/tasks/%s/complete"
+
+    /** POST /v1/sync/tasks/:id/failed —— 任务失败回报 */
+    const val SYNC_TASK_FAILED = "/sync/tasks/%s/failed"
+
+    /** POST /v1/sync/tasks/:id/blocked —— 目标被占用，转 waiting_unlock */
+    const val SYNC_TASK_BLOCKED = "/sync/tasks/%s/blocked"
 
     /** GET /v1/sync/tasks —— 同步任务记录（query：status/device_id/limit） */
     const val SYNC_TASKS = "/sync/tasks"

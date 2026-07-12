@@ -144,6 +144,19 @@ object FileApi {
             }
         }
 
+    // ==================== 删除文件 ====================
+
+    /**
+     * 删除远端单个文件（拒绝目录）。
+     * 同步覆盖上传前置：服务端 init 拒绝已存在文件，先删旧再传新（delete-before-upload）。
+     * 文件不存在（404）对调用方视为可忽略的失败。
+     */
+    suspend fun deleteFile(params: DeleteFileParams): Result<ApiResponse<Unit?>> {
+        return Request.postSuspend<ApiResponse<Unit?>, DeleteFileParams>(
+            ApiRoutes.FILE_DELETE, params
+        )
+    }
+
     // ==================== 下载历史 ====================
 
     /**

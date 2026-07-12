@@ -18,6 +18,7 @@ import (
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/sync"
 	"syc-file/pkg/filecore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
@@ -37,10 +38,11 @@ type uploadInitReq struct {
 	MerkleRoot string   `json:"merkle_root" binding:"required"` // hex blake3 树根
 	FileHash   string   `json:"file_hash" binding:"required"`   // hex blake3 整文件哈希
 	LeafHashes []string `json:"leaf_hashes" binding:"required"` // 每片叶子哈希 hex，len==ChunkCount
+	DeviceID   string   `json:"device_id"`                      // 源设备（秒传时同步派发需排除）
 }
 
 // HandlerFuncUploadInit 分片上传第一步：校验描述信息 → 秒传查重 → 建/续会话 → 预分配临时文件。
-func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
+func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
@@ -112,17 +114,34 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 		ctx := context.Background()
 		id := upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize)
 
-		// 秒传：同用户已有相同 file_hash + 大小的文件且物理存在 → 直接复制落盘
+		// 秒传：同用户已有相同 file_hash + 大小的文件且物理存在 → 直接复制落盘。
+		// 注意：秒传不建会话，客户端收到 instant=true 后【不得】再调 complete。
 		if src, ok := findDedupSource(db, userID, req.FileHash, req.TotalSize); ok && src != fullPath {
 			if err := copyFile(src, fullPath); err != nil {
 				logger.Logger.Warn("秒传复制失败，回退普通上传", zap.String("src", src), zap.Error(err))
 			} else {
-				fileID, _ := upsertFileRecord(db, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
+				// 与 complete 相同的双分支：同步目录内 → 引擎维护 trunk + 派发拉取；否则普通落库
+				var fileID uint64
+				var handled bool
+				if engine != nil {
+					var herr error
+					handled, herr = engine.HandleUploadComplete(userID, req.DeviceID, fullPath, req.Name, req.TotalSize, req.FileHash)
+					if herr != nil {
+						logger.Logger.Warn("秒传同步派发失败", zap.String("path", fullPath), zap.Error(herr))
+					}
+					if handled {
+						fileID = lookupFileID(db, userID, fullPath)
+					}
+				}
+				if !handled {
+					fileID, _ = upsertFileRecord(db, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
+				}
 				writeUploadHistoryCompleted(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
-				logger.Logger.Info("秒传完成", zap.Uint("user_id", userID), zap.String("path", fullPath), zap.Uint64("file_id", fileID))
+				logger.Logger.Info("秒传完成", zap.Uint("user_id", userID), zap.String("path", fullPath),
+					zap.Uint64("file_id", fileID), zap.Bool("synced", handled))
 				c.JSON(http.StatusOK, gin.H{"code": 200, "message": "秒传成功", "data": gin.H{
 					"upload_id": id, "instant": true, "chunk_size": req.ChunkSize,
-					"chunk_count": req.ChunkCount, "missing": []int{},
+					"chunk_count": req.ChunkCount, "missing": []int{}, "synced": handled,
 				}})
 				return
 			}

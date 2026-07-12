@@ -215,8 +215,20 @@ WebSocket `network/websocket.kt`（`WebSocketManager`）：
 - **强制保活**：`AppConfig.forceKeepAliveEnabled`（默认关，`ConfigManager` 持久化）→ 消费者 `service/SyncKeepAliveService`（dataSync 前台服务 + 常驻低优先级通知）：持有 WS 连接、30s 守护循环掉线重连、START_STICKY；开启时 `MainActivity` 的 ON_STOP **不再断开 WS**（连接归服务管），app 启动时若开关已开自动拉起服务。`SyncSettingsScreen` 提供开关 + 电池优化白名单跳转（`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）。root 设备的进程级守护（LSPosed 看门狗拉起）在 app 外部，独立维护。
 - **同步列表**：`SyncListScreen`（`SyncListDestination`，fileGraph）两 tab——「同步记录」(`/sync/tasks`) 与「待处理」（本设备 `/sync/tasks/pending` + 冲突 `/sync/conflicts`，冲突可 accept_server / keep_local / 删除）；VM `ui/viewModel/sync/SyncListViewModel`。
 - **Files 页入口**：`file.kt` 磁盘列表首屏加「同步」卡片（同步设置 / 同步列表两行入口，副标题实时显示保活开关与 WS 连接状态）。
-- ✅ `WebSocketManager` 重连上限接线 `AppConfig.wsMaxReconnectAttempts`（负数=无限，默认 -1），替换原硬编码 5 次；指数退避防溢出。
-- 注意：同步**探测/执行引擎**（FileObserver 上报 file_changed、执行 task_created）仍未接（见 §9.3），本轮是「入口 + 保活 + 可视化」地基。
+- ✅ `WebSocketManager` 重连上限接线 `AppConfig.wsMaxReconnectAttempts`（负数=无限，默认 -1），替换原硬编码 5 次；指数退避防溢出；新增不丢消息的 `events: SharedFlow`（缓冲 256，同步引擎订阅；`messageFlow` StateFlow 保留给旧订阅者）。
+
+### 3.11 Android 同步引擎 + Rust 内核接入（新增，真正的同步）
+- **Rust 内核（JNI）**：`Android/filecore_jni/`（cdylib，jni 0.21，path 依赖 `new_server/file_lib`）→ `app/src/main/jniLibs/*/libfilecore_jni.so`（`build.ps1`，需 NDK+cargo-ndk，见该目录脚本头注释）。Kotlin 门面 `core/FileCore`：`describe`（一趟 mmap+rayon 算叶子/树根/整文件哈希，走 file_lib v3 的 `fc_describe`，与服务端 `fc_finalize` 逐字节一致）/`hashChunk`/`merkleRoot`/`fileHashHex`；**.so 缺失自动回退纯 Java blake3**（Blake3Util），仅性能差。`ChunkedUploader.describe` 已优先走原生。
+- **同步引擎** `sync/SyncEngine`（object，对齐 `SYNC_PROTOCOL.md`，行为对标桌面端）：
+  - 执行派发：WS `file_sync/task_created`（经 SharedFlow，不丢）→ download（流式下载 + blake3 校验 + `.synctmp` 原子 rename 发布）/delete/mkdir → REST `complete/failed` 回报；in-flight 去重。
+  - 探测上报：`RecursiveWatcher`（inotify 递归，动态补挂新目录）→ 2s 稳定窗防抖 + size/mtime 复查 → delete-before-upload + 分片上传 → REST `notify`（file_changed 带 `base_hash` CAS）→ 更新基线。
+  - 连接追赶（每次 WS Connected）：拉 pending 任务执行 + 逐 folder「Phase1 先上传本地离线变更（带 base，冲突安全）→ Phase2 `scan` 全量清单交服务端比对补齐」——**流量爆发防护**：scan 是元数据级 hash 比对只传差异 + stat 缓存（size/mtime 未变不重算 hash）+ 上传/下载各 Semaphore(2) + `syncOnWifiOnly` 门控。
+  - 冲突：收 `conflict` → 本地分叉隔离 `.syncpending/<conflictId>_<name>` + 主目录收敛服务端版；`conflict_resolved`：accept_server 丢副本 / keep_local 以 server_hash 为 base 回放重传。
+  - 自写抑制：引擎自己发布/删除的路径 10s 内的 watcher 事件不回环上报。
+- **存储**：`sync/SyncMappingStore`（**设备私有**的 folder→本地目录映射 + 本机启用，`FileSync/sync_mappings.json`——folder 定义在服务器由 Windows 端创建，映射各设备自理）；`sync/SyncBaseStore`（基线 hash + stat 快照，`FileSync/sync_base.json`，防抖落盘）。
+- **UI**：`SyncFolderMapScreen`（`SyncFolderMapDestination`）——列服务器 folders，本机设置映射路径（可一键默认 `FileSync/sync/<名>`）+ 启用开关；Files 同步卡片加第三行入口，同步列表行副标题显示引擎状态。
+- **接线**：`AppConfig.autoSyncEnabled` 正式有消费者——MainActivity 启动时与 `SyncKeepAliveService.onCreate` 都会（幂等）`SyncEngine.start`。
+- **后端 file_lib v3**：新增 `fc_describe`（客户端描述计算），crate-type 加 rlib 供 JNI 依赖，`fc_abi_version()==3`，Go 测试同步更新、`.a` 已重建。
 
 ---
 
@@ -578,6 +590,9 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - ✅ ~同步哈希不统一~ → 同步链路文件哈希统一 blake3（upload_worker / ws_client / base_store / 下载校验）。
 
 **后端**
+- ✅ ~scan 比对恒 0 行~ → `scan.go` 的 `file_path LIKE 'E:\FileSync\%'` 中反斜杠被 MySQL LIKE 当转义符吃掉，永远匹配不到 Windows 路径 → 改 `ESCAPE '|'` + 元字符转义。此 bug 曾导致安卓离线追赶完全失效。
+- ✅ ~sync_task INSERT 全部失败（Error 1364）~ → 物理表残留 init_mysql.sql 的 `device_id bigint NOT NULL` 列（模型无此字段，AutoMigrate 不清理）→ 已 DROP。**教训：schema 双源漂移是真事故源，init_mysql.sql 与 AutoMigrate 需收敛。**
+- ✅ ~秒传（instant）三端协议 bug~ → 服务端 init 秒传分支不建会话，客户端却照样调 complete → 404"会话不存在"报上传失败且不上报 file_changed；且该分支不做同步派发。修复：服务端 init 加 `device_id` 入参 + 秒传时走 `HandleUploadComplete` 派发（响应带 `synced`）；三端客户端（Rust/TS/Kotlin）instant 时不再调 complete、就地合成结果。
 - P1 `venv/` gitignored 但编译依赖 → 新克隆不能 build；`auth.secret`/`auth.enabled` 死配置。
 - P1 `RequireRole` 中间件仍未接线（admin 守卫靠各 handler 内联 `isAdmin`，非全局）；CORS `*`、WS `CheckOrigin:true`。
 - P1 service/repository 等空目录误导；handlers 形参 `redisClient` 死参（file/ws handler 未用）。
@@ -661,8 +676,8 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - **Rust 已补**：稳定 device_id（`device.rs:generate_device_id`）、完整 Tauri command 集（用户/文件/同步域共 ~25 个）、ApiClient(reqwest)、notify watcher + 防抖 + 上传 worker + ws_client 骨架、`start_sync` 启动时从服务器拉 folder 列表填充缓存、`create_sync_folder` 自动加入 watcher。
 - **Rust 已接通**（原"待补"①②③ 均已落地，见 §3B.6）：`file_changed` 上报 + blake3、ws_client 执行 `task_created`(download/delete/mkdir) 并回 `task_completed/failed`、remove 走 delete 上报、冲突保留；同步上传/keep_local 已切分片协议（§9.5）。
 - **Rust 待补**：① 冲突待办/同步任务列表 UI（功能已通、界面简陋，传输列表已有但冲突收件箱语义仍弱）。
-- **Android 已补（本轮）**：同步 API 层（`api/sync/`）、强制保活前台服务（`SyncKeepAliveService`，WS 常驻）、同步列表页（记录 + 待处理/冲突处置）、Files 页同步入口卡片（见 §3.10）。
-- **Android 待补**：`SyncEngine` 单例（消费 task_created 执行 download/delete/mkdir + 上报 file_changed）、root daemon 进程模型、FileObserver 接线、同步规则（文件夹映射）配置 UI、重连后 scan 全量比对限流。
+- **Android 已补**：同步 API 层（`api/sync/`）、强制保活前台服务（`SyncKeepAliveService`）、同步列表页、Files 同步入口（§3.10）；✅ **`SyncEngine` 已落地**（task_created 执行 + FileObserver 探测上报 + 连接追赶 + 冲突隔离，§3.11）、文件夹映射配置 UI、Rust 内核 JNI 接入（file_lib v3 `fc_describe`）。
+- **Android 待补**：`filecore_jni` 的 NDK 构建产物（本机无 NDK，装好后跑 `Android/filecore_jni/build.ps1`；缺 .so 时自动回退纯 Java blake3）、root daemon 进程模型（LSPosed 看门狗在 app 外部）、真机端到端联调（Android↔Windows 双向）、conflict keep_local 子目录场景回放（当前按根目录名回放，靠重扫兜底）。
 
 ### 9.4 应用内更新机制（搁置备忘）
 - 决策：APK 上传由 **PC 端发起**（当前 PC 端未具备 → 整体搁置）；安装**全部弹系统安装框**（非 root 静默不做）；范围**仅 Android**。

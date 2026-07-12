@@ -10,6 +10,7 @@
 //   （不会重算哈希；二次仍失败则原样抛出）。
 package com.sunyuanling.filesync.api.file
 
+import com.sunyuanling.filesync.core.FileCore
 import com.sunyuanling.filesync.util.Blake3Util
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -59,9 +60,16 @@ object ChunkedUploader {
     )
 
     /**
-     * 一趟顺序读文件：算每片 blake3 叶子 + 整文件流式 blake3，再由叶子构 Merkle 树根。
+     * 计算上传描述：优先走 Rust 原生内核（FileCore/JNI，mmap+rayon 并行，
+     * 与服务端 fc_finalize 逐字节一致）；原生不可用时回退纯 Java 单趟流式。
      */
     fun describe(file: File, chunkSize: Int = DEFAULT_CHUNK_SIZE): Description {
+        FileCore.describe(file, chunkSize)?.let { return it }
+        return describeJava(file, chunkSize)
+    }
+
+    /** 纯 Java 回退：一趟顺序读，算每片 blake3 叶子 + 整文件流式 blake3 + Merkle 树根。 */
+    private fun describeJava(file: File, chunkSize: Int): Description {
         val total = file.length()
         val count = if (total == 0L) 1 else ((total + chunkSize - 1) / chunkSize).toInt()
         val leaves = ArrayList<ByteArray>(count)
@@ -141,10 +149,17 @@ object ChunkedUploader {
     ): UploadCompleteData = coroutineScope {
         val init = callInit(desc, file.name, remoteDir, options)
 
-        // 秒传：无需上传分片，服务端已落盘
+        // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
+        // 不能调 complete（会 404 会话不存在），结果就地合成。
         if (init.instant) {
             onProgress(desc.totalSize, desc.totalSize)
-            return@coroutineScope completeUpload(init.uploadId, options.deviceId)
+            return@coroutineScope UploadCompleteData(
+                fileName = file.name,
+                storagePath = remoteDir,
+                fileSize = desc.totalSize,
+                fileHash = desc.fileHashHex,
+                synced = true,
+            )
         }
 
         val missing = if (init.missing.isNotEmpty()) init.missing else (0 until desc.chunkCount).toList()
@@ -212,7 +227,8 @@ object ChunkedUploader {
                 chunkCount = desc.chunkCount,
                 merkleRoot = desc.merkleRootHex,
                 fileHash = desc.fileHashHex,
-                leafHashes = desc.leafHashesHex
+                leafHashes = desc.leafHashesHex,
+                deviceId = options.deviceId
             )
         )
         return res.getOrElse { throw it }.data ?: throw Exception("init 响应为空")

@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.FolderCopy
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
@@ -46,9 +47,11 @@ import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.data.sync.WsState
 import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.router.FileUploadDestination
+import com.sunyuanling.filesync.router.SyncFolderMapDestination
 import com.sunyuanling.filesync.router.SyncListDestination
 import com.sunyuanling.filesync.router.SyncSettingsDestination
 import com.sunyuanling.filesync.router.navigateToDetail
+import com.sunyuanling.filesync.sync.SyncEngine
 import com.sunyuanling.filesync.ui.components.files.DirectoryPickerScreen
 import com.sunyuanling.filesync.ui.components.files.ErrorCard
 import com.sunyuanling.filesync.ui.components.files.FileItemCard
@@ -347,6 +350,8 @@ fun FileScreen(
 @Composable
 private fun SyncSectionCard(navController: NavController) {
     val wsState by WebSocketManager.connectionState.collectAsState()
+    val engineRunning by SyncEngine.running.collectAsState()
+    val engineActivity by SyncEngine.lastActivity.collectAsState()
     val statusText = buildString {
         append(if (AppConfig.forceKeepAliveEnabled) "保活已开启" else "保活未开启")
         append(" · ")
@@ -369,9 +374,16 @@ private fun SyncSectionCard(navController: NavController) {
             )
             HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
             SyncEntryRow(
+                icon = { Icon(Icons.Default.FolderCopy, contentDescription = null) },
+                title = "同步文件夹",
+                subtitle = "本设备的本地目录映射",
+                onClick = { navController.navigate(SyncFolderMapDestination) }
+            )
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+            SyncEntryRow(
                 icon = { Icon(Icons.Default.Sync, contentDescription = null) },
                 title = "同步列表",
-                subtitle = "同步记录与待处理事项",
+                subtitle = if (engineRunning) "引擎运行中 · $engineActivity" else "同步记录与待处理事项",
                 onClick = { navController.navigate(SyncListDestination) }
             )
         }

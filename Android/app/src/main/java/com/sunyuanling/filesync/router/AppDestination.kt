@@ -44,6 +44,9 @@ import kotlinx.serialization.Serializable
 /**同步列表（同步记录 + 待处理事项）*/
 @Serializable data object SyncListDestination
 
+/**同步文件夹映射（本设备本地目录映射）*/
+@Serializable data object SyncFolderMapDestination
+
 // 特殊页面
 /**权限设置*/
 @Serializable data object PermissionDestination

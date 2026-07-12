@@ -52,6 +52,10 @@ pub struct UploadInitParams {
     /// 每片叶子哈希 hex，长度须等于 chunk_count
     #[serde(rename = "leaf_hashes")]
     pub leaf_hashes: Vec<String>,
+    /// 本机设备 id：秒传在 init 阶段直接完成，服务端同步派发需排除源设备
+    #[serde(rename = "device_id")]
+    #[serde(default)]
+    pub device_id: String,
 }
 
 /// 分片上传完成。

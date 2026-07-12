@@ -217,16 +217,22 @@ async fn run_once(
         .to_string_lossy()
         .to_string();
 
-    let init = call_init(client, &file_name, remote_dir, desc)
+    let init = call_init(client, &file_name, remote_dir, desc, &options.device_id)
         .await
         .map_err(UploadError::Other)?;
 
-    // 秒传
+    // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
+    // 不能调 complete（会 404 会话不存在），结果就地合成。
     if init.instant {
         on_progress(desc.total_size, desc.total_size);
-        return complete_upload(client, &init.upload_id, &options.device_id)
-            .await
-            .map_err(UploadError::Other);
+        return Ok(UploadCompleteData {
+            file_id: 0,
+            file_name,
+            storage_path: remote_dir.to_string(),
+            file_size: desc.total_size,
+            file_hash: desc.file_hash_hex.clone(),
+            synced: true,
+        });
     }
 
     let missing: Vec<i32> = if !init.missing.is_empty() {
@@ -343,6 +349,7 @@ async fn call_init(
     name: &str,
     remote_dir: &str,
     desc: &Description,
+    device_id: &str,
 ) -> Result<UploadInitData, String> {
     let params = UploadInitParams {
         path: remote_dir.to_string(),
@@ -353,6 +360,7 @@ async fn call_init(
         merkle_root: desc.merkle_root_hex.clone(),
         file_hash: desc.file_hash_hex.clone(),
         leaf_hashes: desc.leaf_hashes_hex.clone(),
+        device_id: device_id.to_string(),
     };
     let resp = file_api::upload_init(client, params).await?;
     if resp.is_ok() {

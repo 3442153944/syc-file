@@ -48,6 +48,7 @@ import com.sunyuanling.filesync.router.PermissionDestination
 import com.sunyuanling.filesync.router.TopLevelDestination
 import com.sunyuanling.filesync.ui.components.notice.DownloadNotificationHelper
 import com.sunyuanling.filesync.service.SyncKeepAliveService
+import com.sunyuanling.filesync.sync.SyncEngine
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -193,10 +194,16 @@ fun FileSyncApp(startDestination: Any) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // ========== 强制保活服务 ==========
+    // ========== 强制保活服务 + 同步引擎 ==========
     LaunchedEffect(Unit) {
-        if (AppConfig.forceKeepAliveEnabled && Request.hasToken()) {
-            SyncKeepAliveService.start(context)
+        if (Request.hasToken()) {
+            if (AppConfig.forceKeepAliveEnabled) {
+                SyncKeepAliveService.start(context)
+            }
+            // autoSyncEnabled 的消费者：任务执行 + 探测上报 + 连接追赶
+            if (AppConfig.autoSyncEnabled) {
+                SyncEngine.start(context)
+            }
         }
     }
 

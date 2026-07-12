@@ -11,8 +11,8 @@ import (
 // TestSmoke 走通完整链路：预分配 → 乱序写分片 → finalize 校验 → 落盘，
 // 顺带验证 cgo 链接成功与哈希/Merkle 一致性。
 func TestSmoke(t *testing.T) {
-	if v := ABIVersion(); v != 2 {
-		t.Fatalf("ABIVersion = %d, 期望 2（cgo 链接异常或旧 .a 未重建）", v)
+	if v := ABIVersion(); v != 3 {
+		t.Fatalf("ABIVersion = %d, 期望 3（cgo 链接异常或旧 .a 未重建）", v)
 	}
 
 	const chunkSize = 4 << 20 // 4MiB

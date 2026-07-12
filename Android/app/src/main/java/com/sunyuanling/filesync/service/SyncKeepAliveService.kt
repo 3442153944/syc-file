@@ -14,8 +14,10 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.data.sync.WsState
+import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.MainActivity
 import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.sync.SyncEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -86,6 +88,13 @@ class SyncKeepAliveService : Service() {
                     WebSocketManager.connect(applicationContext)
                 }
                 delay(CHECK_INTERVAL_MS)
+            }
+        }
+
+        // 保活的意义就是后台也能同步：确保同步引擎在跑（幂等）
+        scope.launch {
+            if (AppConfig.autoSyncEnabled && Request.hasToken()) {
+                SyncEngine.start(applicationContext)
             }
         }
     }

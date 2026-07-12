@@ -6,6 +6,17 @@ package com.sunyuanling.filesync.api.file
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+// ==================== 删除文件 ====================
+
+/** 删除远端单个文件（同步 delete-before-upload 覆盖旧文件用，拒绝目录）。 */
+@Serializable
+data class DeleteFileParams(
+    /** 远端目录 */
+    val path: String,
+    /** 文件名 */
+    val name: String
+)
+
 // ==================== 获取可用磁盘 ====================
 
 @Serializable
@@ -66,7 +77,9 @@ data class UploadInitParams(
     /** 整文件 blake3 hex（秒传/去重键） */
     @SerialName("file_hash") val fileHash: String,
     /** 每片叶子哈希 hex，长度须等于 chunk_count */
-    @SerialName("leaf_hashes") val leafHashes: List<String>
+    @SerialName("leaf_hashes") val leafHashes: List<String>,
+    /** 本机设备 id：秒传在 init 阶段直接完成，服务端同步派发需要排除源设备 */
+    @SerialName("device_id") val deviceId: String = ""
 )
 
 /**

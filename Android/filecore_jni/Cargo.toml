@@ -1,0 +1,21 @@
+[package]
+name = "filecore_jni"
+version = "0.1.0"
+edition = "2021"
+description = "filecore 的 Android JNI 包装：blake3 叶子/树根/整文件描述计算走 Rust 原生（与服务端 file_lib 逐字节一致）"
+
+[lib]
+name = "filecore_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+filecore = { path = "../../new_server/file_lib" }
+
+# 依赖 crate 的 profile 由本（根）crate 决定，与 file_lib 自身配置保持一致
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1
+# 必须 unwind：JNI 边界的 catch_unwind 依赖它，abort 会直接带崩 app 进程
+panic = "unwind"

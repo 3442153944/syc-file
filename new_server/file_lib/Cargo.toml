@@ -8,7 +8,8 @@ description = "文件同步上传核心：预分配、乱序分片定位写(句�
 [lib]
 name = "filecore"
 # staticlib：产出 libfilecore.a，供 Go 通过 cgo 静态链接
-crate-type = ["staticlib"]
+# rlib：供 Android/filecore_jni 等 Rust 包装 crate 作为依赖复用同一实现
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 blake3 = { version = "1", features = ["rayon"] }

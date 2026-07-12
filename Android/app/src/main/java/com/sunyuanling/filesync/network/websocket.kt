@@ -59,9 +59,16 @@ object WebSocketManager {
     private val _connectionState = MutableStateFlow<WsState>(WsState.Disconnected)
     val connectionState: StateFlow<WsState> = _connectionState.asStateFlow()
 
-    /** 消息流 */
+    /** 消息流（StateFlow 只保留最新一条，快速连发会丢；新订阅者用 events） */
     private val _messageFlow = MutableStateFlow<WsMessage?>(null)
     val messageFlow: StateFlow<WsMessage?> = _messageFlow.asStateFlow()
+
+    /**
+     * 不丢消息的事件流（缓冲 256 条）：同步引擎等需要逐条处理的订阅者用这个。
+     * messageFlow 保留给只关心"最新状态"的旧订阅者。
+     */
+    private val _events = MutableSharedFlow<WsMessage>(extraBufferCapacity = 256)
+    val events: SharedFlow<WsMessage> = _events.asSharedFlow()
 
     /**
      * 连接到服务器
@@ -127,11 +134,15 @@ object WebSocketManager {
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    _messageFlow.value = WsMessage.Text(text)
+                    val msg = WsMessage.Text(text)
+                    _messageFlow.value = msg
+                    _events.tryEmit(msg)
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    _messageFlow.value = WsMessage.Binary(bytes.toByteArray())
+                    val msg = WsMessage.Binary(bytes.toByteArray())
+                    _messageFlow.value = msg
+                    _events.tryEmit(msg)
                 }
 
                 override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {

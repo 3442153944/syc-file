@@ -15,7 +15,7 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	f.GET("/download", HandlerFuncDownload(db, redisClient))
 	f.POST("/upload", HandlerFuncUpload(db, redisClient))
 	// 分片上传（重写版）
-	f.POST("/upload/init", HandlerFuncUploadInit(db, redisClient))
+	f.POST("/upload/init", HandlerFuncUploadInit(db, redisClient, engine))
 	f.GET("/upload/status", HandlerFuncUploadStatus(db, redisClient))
 	f.POST("/upload/chunk", HandlerFuncUploadChunk(db, redisClient))
 	f.POST("/upload/complete", HandlerFuncUploadComplete(db, redisClient, engine))

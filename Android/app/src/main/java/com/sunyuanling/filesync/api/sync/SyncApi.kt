@@ -59,4 +59,39 @@ object SyncApi {
     suspend fun listFolders(): Result<ApiResponse<List<SyncFolderInfo>?>> {
         return Request.getSuspend<ApiResponse<List<SyncFolderInfo>?>>(ApiRoutes.SYNC_FOLDERS)
     }
+
+    // ==================== 探测上报（客户端 → 服务端） ====================
+
+    /** 上报单文件变更（必须先上传成功；带 base_hash 供服务端 CAS）。 */
+    suspend fun notify(params: SyncNotifyParams): Result<ApiResponse<Unit?>> {
+        return Request.postSuspend<ApiResponse<Unit?>, SyncNotifyParams>(ApiRoutes.SYNC_NOTIFY, params)
+    }
+
+    /** 上报全量扫描清单，服务端与 trunk 比对后补派任务（离线追赶）。 */
+    suspend fun scan(params: SyncScanParams): Result<ApiResponse<Unit?>> {
+        return Request.postSuspend<ApiResponse<Unit?>, SyncScanParams>(ApiRoutes.SYNC_SCAN, params)
+    }
+
+    // ==================== 任务执行回报 ====================
+
+    /** 任务完成（download 回传落盘 hash 供服务端校验）。 */
+    suspend fun completeTask(id: Long, fileHash: String = ""): Result<ApiResponse<Unit?>> {
+        return Request.postSuspend<ApiResponse<Unit?>, TaskCompleteParams>(
+            ApiRoutes.SYNC_TASK_COMPLETE.format(id.toString()), TaskCompleteParams(fileHash)
+        )
+    }
+
+    /** 任务失败（计入重试次数，由服务端 Reaper 重派）。 */
+    suspend fun failTask(id: Long, error: String): Result<ApiResponse<Unit?>> {
+        return Request.postSuspend<ApiResponse<Unit?>, TaskFailedParams>(
+            ApiRoutes.SYNC_TASK_FAILED.format(id.toString()), TaskFailedParams(error)
+        )
+    }
+
+    /** 目标文件被占用：转 waiting_unlock，不计入重试次数。 */
+    suspend fun blockTask(id: Long, reason: String): Result<ApiResponse<Unit?>> {
+        return Request.postSuspend<ApiResponse<Unit?>, TaskBlockedParams>(
+            ApiRoutes.SYNC_TASK_BLOCKED.format(id.toString()), TaskBlockedParams(reason)
+        )
+    }
 }

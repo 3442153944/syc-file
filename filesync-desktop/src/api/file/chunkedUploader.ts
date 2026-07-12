@@ -148,11 +148,20 @@ async function runOnce(
   desc: Description,
   onProgress: (sent: number, total: number) => void,
 ): Promise<UploadCompleteData> {
-  const init = await callInit(file.name, remoteDir, desc)
+  const init = await callInit(file.name, remoteDir, desc, options.deviceId)
 
+  // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
+  // 不能调 complete（会 404 会话不存在），结果就地合成。
   if (init.instant) {
     onProgress(desc.totalSize, desc.totalSize)
-    return completeUpload(init.upload_id, options.deviceId)
+    return {
+      file_id: 0,
+      file_name: file.name,
+      storage_path: remoteDir,
+      file_size: desc.totalSize,
+      file_hash: desc.fileHashHex,
+      synced: true,
+    }
   }
 
   const missing: number[] =
@@ -224,6 +233,7 @@ async function callInit(
   name: string,
   remoteDir: string,
   desc: Description,
+  deviceId: string,
 ): Promise<UploadInitData> {
   const data = await httpPost<UploadInitData>('/file/upload/init', {
     path: remoteDir,
@@ -234,6 +244,8 @@ async function callInit(
     merkle_root: desc.merkleRootHex,
     file_hash: desc.fileHashHex,
     leaf_hashes: desc.leafHashesHex,
+    // 秒传在 init 阶段直接完成，服务端同步派发需排除源设备
+    device_id: deviceId,
   })
   return data
 }
