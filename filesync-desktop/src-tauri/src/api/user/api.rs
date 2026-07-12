@@ -20,9 +20,14 @@ pub async fn register(client: &ApiClient, params: RegisterParams) -> Result<ApiR
     client.post(routes::USER_REGISTER, &params).await
 }
 
-/// 重置密码
+/// 重置密码（忘记密码场景，需 username + email/phone 至少两项）
 pub async fn reset_password(client: &ApiClient, params: ResetPasswordParams) -> Result<ApiResponse<serde_json::Value>, String> {
     client.post(routes::USER_RESET_PASSWORD, &params).await
+}
+
+/// 修改密码（已登录场景，需 old_password 验证）
+pub async fn change_password(client: &ApiClient, params: ChangePasswordParams) -> Result<ApiResponse<serde_json::Value>, String> {
+    client.post(routes::USER_CHANGE_PASSWORD, &params).await
 }
 
 /// 更新用户信息（multipart，调用方需传入已构造好的 Form）

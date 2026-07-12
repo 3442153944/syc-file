@@ -6,52 +6,33 @@ import java.util.*
 
 object TimeUtils {
 
-    /**
-     * 格式化时间戳为字符串
-     * @param timestamp 时间戳（毫秒）
-     * @param pattern 格式，默认 "yyyy-MM-dd HH:mm:ss"
-     */
-    fun format(timestamp: Long, pattern: String = "yyyy-MM-dd HH:mm:ss"): String {
-        val sdf = SimpleDateFormat(pattern, Locale.getDefault())
-        return sdf.format(Date(timestamp))
+    /** ThreadLocal 缓存 SimpleDateFormat，避免每次 new（列表滚动 GC 大户）。 */
+    private val fmtCache = object : ThreadLocal<MutableMap<String, SimpleDateFormat>>() {
+        override fun initialValue(): MutableMap<String, SimpleDateFormat> = HashMap()
     }
 
-    /**
-     * 格式化 Date 对象
-     */
-    fun format(date: Date, pattern: String = "yyyy-MM-dd HH:mm:ss"): String {
-        val sdf = SimpleDateFormat(pattern, Locale.getDefault())
-        return sdf.format(date)
-    }
+    private fun cachedFmt(pattern: String): SimpleDateFormat =
+        fmtCache.get().getOrPut(pattern) { SimpleDateFormat(pattern, Locale.getDefault()) }
 
-    /**
-     * 获取当前时间戳（毫秒）
-     */
+    fun format(timestamp: Long, pattern: String = "yyyy-MM-dd HH:mm:ss"): String =
+        cachedFmt(pattern).format(Date(timestamp))
+
+    fun format(date: Date, pattern: String = "yyyy-MM-dd HH:mm:ss"): String =
+        cachedFmt(pattern).format(date)
+
     fun now(): Long = System.currentTimeMillis()
 
-    /**
-     * 获取当前时间字符串
-     */
-    fun nowString(pattern: String = "yyyy-MM-dd HH:mm:ss"): String {
-        return format(now(), pattern)
-    }
+    fun nowString(pattern: String = "yyyy-MM-dd HH:mm:ss"): String =
+        format(now(), pattern)
 
-    /**
-     * 解析时间字符串为时间戳
-     */
     fun parse(timeString: String, pattern: String = "yyyy-MM-dd HH:mm:ss"): Long? {
         return try {
-            val sdf = SimpleDateFormat(pattern, Locale.getDefault())
-            sdf.parse(timeString)?.time
+            cachedFmt(pattern).parse(timeString)?.time
         } catch (e: Exception) {
             null
         }
     }
 
-    /**
-     * 计算时间差（返回友好的字符串）
-     * 例如：刚刚、1分钟前、2小时前、3天前
-     */
     fun timeAgo(timestamp: Long): String {
         val diff = now() - timestamp
         return when {
@@ -63,16 +44,11 @@ object TimeUtils {
         }
     }
 
-    /**
-     * 格式化时长（毫秒转为可读格式）
-     * 例如：1小时23分45秒
-     */
     fun formatDuration(milliseconds: Long): String {
         val seconds = milliseconds / 1000
         val hours = seconds / 3600
         val minutes = (seconds % 3600) / 60
         val secs = seconds % 60
-
         return buildString {
             if (hours > 0) append("${hours}小时")
             if (minutes > 0) append("${minutes}分钟")

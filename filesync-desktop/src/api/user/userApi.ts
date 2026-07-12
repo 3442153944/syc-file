@@ -36,3 +36,32 @@ export async function resetPassword(username: string, oldPassword: string, newPa
   }
   return httpPost('/user/reset-password', { username, old_password: oldPassword, new_password: newPassword })
 }
+
+export async function changePassword(oldPassword: string, newPassword: string): Promise<unknown> {
+  if (isTauri()) {
+    return invoke('change_password', { oldPassword, newPassword })
+  }
+  return httpPost('/user/change-password', { old_password: oldPassword, new_password: newPassword })
+}
+
+export async function updateProfile(updates: {
+  username?: string
+  email?: string
+  phone?: string
+  avatarPath?: string
+}): Promise<unknown> {
+  if (isTauri()) {
+    return invoke('update_profile', {
+      username: updates.username ?? null,
+      email: updates.email ?? null,
+      phone: updates.phone ?? null,
+      avatarPath: updates.avatarPath ?? null,
+    })
+  }
+  // Web 模式：简单的 JSON 更新（不支持头像文件）
+  const body: Record<string, string> = {}
+  if (updates.username) body.username = updates.username
+  if (updates.email) body.email = updates.email
+  if (updates.phone) body.phone = updates.phone
+  return httpPost('/user/update-info', body)
+}

@@ -270,10 +270,47 @@ async fn reset_password(
     old_password: String,
     new_password: String,
     config: State<'_, SharedSyncConfig>,
-) -> Result<serde_json::Value, String> {
+) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = user_api::reset_password(&client, ResetPasswordParams { username, old_password, new_password }).await?;
-    api_data(resp, "reset_password")
+    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+}
+
+/// 修改密码（已登录场景，需旧密码验证）
+#[tauri::command]
+async fn change_password(
+    old_password: String,
+    new_password: String,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let resp = user_api::change_password(&client, ChangePasswordParams { old_password, new_password }).await?;
+    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+}
+
+/// 更新用户资料（multipart，可选头像文件）
+#[tauri::command]
+async fn update_profile(
+    username: Option<String>,
+    email: Option<String>,
+    phone: Option<String>,
+    avatar_path: Option<String>,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let mut form = reqwest::multipart::Form::new();
+    if let Some(u) = username { form = form.text("username", u); }
+    if let Some(e) = email { form = form.text("email", e); }
+    if let Some(p) = phone { form = form.text("phone", p); }
+    if let Some(path) = avatar_path {
+        let p = std::path::Path::new(&path);
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("avatar").to_string();
+        let bytes = std::fs::read(p).map_err(|e| format!("读取头像文件失败: {}", e))?;
+        let part = reqwest::multipart::Part::bytes(bytes).file_name(name);
+        form = form.part("avatar", part);
+    }
+    let resp = user_api::update_info(&client, form).await?;
+    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
 }
 
 // ── 文件域 commands ───────────────────────────────────────────────────────────
@@ -601,7 +638,7 @@ pub fn run() {
             add_folder_mapping, remove_folder_mapping,
             start_sync, stop_sync, is_sync_running,
             // 用户域
-            login, verify, register, reset_password,
+            login, verify, register, reset_password, update_profile, change_password,
             // 文件域
             get_available_disks, traverse_directory, upload_file, delete_file,
             build_download_url, get_download_history, delete_download_history,

@@ -25,6 +25,7 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	user.RegisterUserRouter(v1, db, redisClient)
 	file.RegisterFileRouter(v1, db, redisClient, engine)
 	v1.POST("/user/update-info", user.HandlerFuncUpdateUserInfo(db, redisClient))
+	v1.POST("/user/change-password", user.HandlerFuncChangePassword(db, redisClient))
 	ws.RegisterWSRouter(v1, db, redisClient)
 	sync.RegisterSyncRouter(v1, engine)
 }

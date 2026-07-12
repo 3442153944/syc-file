@@ -54,6 +54,21 @@ export const router = createRouter({
                     path: "transfers",
                     name: "Transfers",
                     component: () => import("../views/transfer/TransferList.vue")
+                },
+                {
+                    path: "person/center",
+                    name: "PersonCenter",
+                    component: () => import("../views/person/PersonalCenter.vue")
+                },
+                {
+                    path: "person/edit",
+                    name: "PersonEdit",
+                    component: () => import("../views/person/EditProfile.vue")
+                },
+                {
+                    path: "person/password",
+                    name: "PersonPassword",
+                    component: () => import("../views/person/ChangePassword.vue")
                 }
             ]
         },

@@ -1,7 +1,5 @@
 // ui/viewModel/sync/SyncListViewModel.kt
-// 职责：同步列表页数据源——同步记录（/sync/tasks）+ 待处理事项
-// （本设备待执行任务 /sync/tasks/pending + 冲突 /sync/conflicts），
-// 以及冲突的 resolve / delete 操作。
+// 职责：同步列表页数据源——同步记录（分页加载）+ 待处理事项。
 package com.sunyuanling.filesync.ui.viewModel.sync
 
 import android.app.Application
@@ -21,9 +19,12 @@ import kotlinx.coroutines.launch
 
 data class SyncListUiState(
     val loading: Boolean = false,
+    val loadingMore: Boolean = false,
     val error: String? = null,
-    /** 同步记录（全部状态，时间倒序由后端返回顺序决定） */
+    /** 同步记录（分页追加） */
     val records: List<SyncTaskInfo> = emptyList(),
+    val hasMore: Boolean = false,
+    val totalRecords: Long = 0,
     /** 本设备待执行任务 */
     val pendingTasks: List<SyncTaskInfo> = emptyList(),
     /** 待处理冲突 */
@@ -41,11 +42,15 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
         DeviceInfoUtil.getDeviceId(getApplication())
     }
 
+    private var currentPage = 0
+    private val pageSize = 10
+
     fun refresh() {
         if (_uiState.value.loading) return
-        _uiState.value = _uiState.value.copy(loading = true, error = null)
+        currentPage = 0
+        _uiState.value = _uiState.value.copy(loading = true, error = null, records = emptyList(), hasMore = false)
         viewModelScope.launch {
-            val recordsDeferred = async { SyncApi.listTasks(limit = 200) }
+            val recordsDeferred = async { SyncApi.listTasksPaged(page = 1, pageSize = pageSize) }
             val pendingDeferred = async { SyncApi.pendingTasks(deviceId) }
             val conflictsDeferred = async { SyncApi.listConflicts() }
 
@@ -56,10 +61,14 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
             val firstError = listOf(records, pending, conflicts)
                 .firstOrNull { it.isFailure }?.exceptionOrNull()?.message
 
+            val page = records.getOrNull()?.data
+            currentPage = 1
             _uiState.value = _uiState.value.copy(
                 loading = false,
                 error = firstError,
-                records = records.getOrNull()?.data.orEmpty(),
+                records = page?.list.orEmpty(),
+                hasMore = page != null && page.list.size >= pageSize,
+                totalRecords = page?.total ?: 0,
                 pendingTasks = pending.getOrNull()?.data.orEmpty(),
                 conflicts = conflicts.getOrNull()?.data.orEmpty(),
             )
@@ -67,7 +76,33 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 解决冲突：resolution = accept_server / keep_local，成功后从列表移除。 */
+    /** 加载下一页（追加到现有列表尾部）。 */
+    fun loadMore() {
+        val s = _uiState.value
+        if (s.loadingMore || !s.hasMore) return
+        val nextPage = currentPage + 1
+        _uiState.value = s.copy(loadingMore = true)
+        viewModelScope.launch {
+            SyncApi.listTasksPaged(page = nextPage, pageSize = pageSize)
+                .onSuccess { resp ->
+                    if (resp.code == 200 && resp.data != null) {
+                        val page = resp.data
+                        currentPage = nextPage
+                        _uiState.value = _uiState.value.copy(
+                            loadingMore = false,
+                            records = _uiState.value.records + page.list,
+                            hasMore = page.list.size >= pageSize,
+                        )
+                    } else {
+                        _uiState.value = _uiState.value.copy(loadingMore = false, hasMore = false)
+                    }
+                }
+                .onFailure { e ->
+                    _uiState.value = _uiState.value.copy(loadingMore = false, error = "加载失败: ${e.message}")
+                }
+        }
+    }
+
     fun resolveConflict(id: Long, resolution: String) {
         markBusy(id, true)
         viewModelScope.launch {
@@ -84,11 +119,6 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /**
-     * 批量解决全部待处理冲突（以服务器为准的两种取舍）：
-     * - accept_server：放弃本地更改，主目录收敛服务端版本（强制对齐）；
-     * - keep_local  ：本地更改已暂存 .syncpending，以服务端当前版本为 base 重新上报。
-     */
     fun resolveAllConflicts(resolution: String) {
         val targets = _uiState.value.conflicts.map { it.id }
         if (targets.isEmpty()) return
@@ -106,12 +136,8 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 与服务器重新对齐：触发引擎一轮追赶（执行积压任务 + scan 比对补齐）。 */
-    fun realign() {
-        SyncEngine.triggerCatchUp()
-    }
+    fun realign() { SyncEngine.triggerCatchUp() }
 
-    /** 删除冲突记录（不做取舍，仅清理残留）。 */
     fun deleteConflict(id: Long) {
         markBusy(id, true)
         viewModelScope.launch {
@@ -137,7 +163,6 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val TAG = "SyncListVM"
 
-        /** sync_status → 中文标签 */
         fun statusLabel(status: String): String = when (status) {
             "pending" -> "待处理"
             "syncing" -> "同步中"
@@ -147,7 +172,6 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
             else -> status.ifEmpty { "未知" }
         }
 
-        /** task_type → 中文标签 */
         fun typeLabel(type: String): String = when (type) {
             "download" -> "下载"
             "upload" -> "上传"

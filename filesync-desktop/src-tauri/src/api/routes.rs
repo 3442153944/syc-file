@@ -12,6 +12,7 @@ pub const USER_VERIFY: &str = "/user/verify";
 
 // ── 用户（需 Token） ──────────────────────────────────────────────────────
 pub const USER_UPDATE_INFO: &str = "/user/update-info";
+pub const USER_CHANGE_PASSWORD: &str = "/user/change-password";
 
 // ── 文件（需 Token） ──────────────────────────────────────────────────────
 pub const FILE_AVAILABLE_DISKS: &str = "/file/available-disks";

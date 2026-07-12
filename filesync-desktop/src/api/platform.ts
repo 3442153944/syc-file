@@ -54,6 +54,18 @@ export function clearToken(): void {
     localStorage.removeItem(KEY_TOKEN)
 }
 
+// ── 头像 URL ───────────────────────────────────────────────────────────────────
+// 后端存的是相对路径如 /static/avatar/xxx.png，Tauri 需拼服务器地址
+
+export function avatarUrl(relativePath: string | undefined | null): string {
+    if (!relativePath) return ''
+    if (relativePath.startsWith('http://') || relativePath.startsWith('https://')) {
+        return relativePath
+    }
+    const base = getServerUrl().replace(/\/+$/, '')
+    return base + (relativePath.startsWith('/') ? '' : '/') + relativePath
+}
+
 // ── device ID ─────────────────────────────────────────────────────────────────
 // Tauri 模式由 Rust 生成并持有；web 模式在 localStorage 生成一次后复用。
 

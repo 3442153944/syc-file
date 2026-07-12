@@ -100,8 +100,8 @@ fn default_max_age() -> u32 { 7 }
 impl Default for SyncConfig {
     fn default() -> Self {
         SyncConfig {
-            server_url: "http://localhost:8991".into(),
-            ws_url: "ws://localhost:8991".into(),
+            server_url: "https://ddns.sunyuanling.cn:8443/file".into(),
+            ws_url: "wss://ddns.sunyuanling.cn:8443/file".into(),
             token: String::new(),
             device_id: device::generate_device_id(),
             device_name: device::hostname(),

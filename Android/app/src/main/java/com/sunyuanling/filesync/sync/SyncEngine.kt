@@ -134,8 +134,6 @@ object SyncEngine {
         val ctx = context.applicationContext
         appContext = ctx
         deviceId = DeviceInfoUtil.getDeviceId(ctx)
-        SyncMappingStore.load()
-        SyncBaseStore.load()
 
         val s = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         scope = s
@@ -331,6 +329,8 @@ object SyncEngine {
 
     private suspend fun catchUp() = catchUpMutex.withLock {
         if (!Request.hasToken()) return@withLock
+        SyncMappingStore.load()
+        SyncBaseStore.load()
         refreshFolders()
         rebuildWatchers()
 

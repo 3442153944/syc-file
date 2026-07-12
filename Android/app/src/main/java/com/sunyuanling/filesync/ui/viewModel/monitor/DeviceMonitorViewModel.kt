@@ -157,32 +157,16 @@ class DeviceMonitorViewModel : ViewModel() {
             }
         }
 
+        /** 将 Go RFC3339Nano 时间字符串解析为 epoch 毫秒。失败返回 0。 */
+        @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.O)
         fun parseIsoToMillis(iso: String): Long {
             if (iso.isBlank()) return 0L
-            // 规范化 Go time.Time 的 RFC3339Nano 输出：
-            // 1) 末尾 'Z' → "+00:00"
-            // 2) 把任意位数的小数秒截断/补齐为 3 位毫秒
-            var s = iso.trim()
-            if (s.endsWith("Z")) s = s.substring(0, s.length - 1) + "+00:00"
-            s = Regex("\\.(\\d+)").replace(s) { m ->
-                val frac = m.groupValues[1].take(3).padEnd(3, '0')
-                ".$frac"
+            return try {
+                val parsed = java.time.ZonedDateTime.parse(iso.trim())
+                parsed.toInstant().toEpochMilli()
+            } catch (_: Exception) {
+                0L
             }
-            val fmts = arrayOf(
-                "yyyy-MM-dd'T'HH:mm:ss.SSSXXX", // +08:00
-                "yyyy-MM-dd'T'HH:mm:ss.SSSZ",   // +0800
-                "yyyy-MM-dd'T'HH:mm:ssXXX",
-                "yyyy-MM-dd'T'HH:mm:ssZ",
-                "yyyy-MM-dd'T'HH:mm:ss",
-            )
-            for (f in fmts) {
-                try {
-                    val sdf = SimpleDateFormat(f, Locale.getDefault())
-                    return sdf.parse(s)?.time ?: continue
-                } catch (_: Exception) {
-                }
-            }
-            return 0L
         }
     }
 }

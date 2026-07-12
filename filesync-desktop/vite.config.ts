@@ -44,10 +44,18 @@ export default defineConfig(async ({mode}) => {
             port: 1420,
             proxy: {
                 '/file': {
-                    target: 'http://localhost:8991', // 你的 Go 后端地址
+                    target: 'https://ddns.sunyuanling.cn:8443/file',
                     changeOrigin: true,
-                    rewrite: (path) => path.replace(/^\/file/, '') // 把 /file 去掉，变成 /v1/user/login 发给后端
-                }
+                    rewrite: (path) => path.replace(/^\/file/, '')
+                },
+                // '/static': {
+                //     target: 'https://ddns.sunyuanling.cn:8443/file',
+                //     changeOrigin: true,
+                // },
+                '/v1': {
+                    target: 'https://ddns.sunyuanling.cn:8443/file',
+                    changeOrigin: true,
+                },
             },
             strictPort: true,
             host: host || false,

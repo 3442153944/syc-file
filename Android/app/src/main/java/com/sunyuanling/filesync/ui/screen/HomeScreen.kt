@@ -3,6 +3,7 @@ package com.sunyuanling.filesync.ui.screen
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.*
@@ -26,10 +27,16 @@ import com.sunyuanling.filesync.ui.viewModel.home.DeviceType
 import com.sunyuanling.filesync.ui.viewModel.home.DevicesViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.HomeViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.RecentFilesViewModel
-import com.sunyuanling.filesync.ui.viewModel.home.StorageInfo
 import com.sunyuanling.filesync.ui.viewModel.home.StorageViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.SyncStatus
 import com.sunyuanling.filesync.ui.viewModel.home.SyncStatusViewModel
+
+private fun formatFileSize(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+    bytes < 1024 * 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    else -> "%.2f GB".format(bytes / (1024.0 * 1024 * 1024))
+}
 
 @Composable
 fun HomeScreen(
@@ -191,43 +198,42 @@ fun HomeScreen(
         // 在线设备列表
         if (devices.isNotEmpty()) {
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "已连接设备",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    devices.forEach { device ->
-                        OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier.padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Icon(
-                                    imageVector = when (device.deviceType) {
-                                        DeviceType.COMPUTER -> Icons.Default.Computer
-                                        DeviceType.SMARTPHONE -> Icons.Default.Phone
-                                        else -> Icons.Default.Devices
-                                    },
-                                    contentDescription = null,
-                                    tint = if (device.isOnline)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(text = device.name, fontWeight = FontWeight.Medium)
-                                    Text(
-                                        text = if (device.isOnline) "在线" else "离线",
-                                        fontSize = 12.sp,
-                                        color = if (device.isOnline)
-                                            MaterialTheme.colorScheme.primary
-                                        else
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
+                Text(
+                    text = "已连接设备",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+            items(devices, key = { it.id }) { device ->
+                OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = when (device.deviceType) {
+                                DeviceType.COMPUTER -> Icons.Default.Computer
+                                DeviceType.SMARTPHONE -> Icons.Default.Phone
+                                else -> Icons.Default.Devices
+                            },
+                            contentDescription = null,
+                            tint = if (device.isOnline)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = device.name, fontWeight = FontWeight.Medium)
+                            Text(
+                                text = if (device.isOnline) "在线" else "离线",
+                                fontSize = 12.sp,
+                                color = if (device.isOnline)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }
@@ -262,55 +268,56 @@ fun HomeScreen(
         }
 
         // 最近文件
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (recentFiles.isNotEmpty()) {
+            item {
                 Text(
                     text = "最近下载",
                     fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
-                if (recentFiles.isEmpty()) {
-                    Text(
-                        text = "暂无下载记录",
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    recentFiles.forEach { file ->
-                        OutlinedCard(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    navController.navigateToDetail(FileDetailDestination(file.id))
-                                }
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(16.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = file.name,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = StorageInfo().formatSize(file.size),
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
+            }
+            items(recentFiles, key = { it.id }) { file ->
+                OutlinedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            navController.navigateToDetail(FileDetailDestination(file.id))
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = file.name,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = formatFileSize(file.size),
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }
+            }
+        } else {
+            item {
+                Text(
+                    text = "暂无下载记录",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 

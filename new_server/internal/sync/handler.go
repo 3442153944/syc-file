@@ -157,6 +157,9 @@ func (h *APIHandler) ListTasks(c *gin.Context) {
 	}
 
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	if limit <= 0 {
+		limit = 10
+	}
 	ts, err := h.engine.ListTasks(userID, status, deviceID, limit)
 	if err != nil {
 		jsonErr(c, 500, err.Error())

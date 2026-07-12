@@ -28,6 +28,42 @@ object SyncApi {
         return Request.getSuspend<ApiResponse<List<SyncTaskInfo>?>>(ApiRoutes.SYNC_TASKS, query)
     }
 
+    /** 分页查询同步任务（虚拟滚动用）。 */
+    data class SyncTaskPage(
+        val list: List<SyncTaskInfo> = emptyList(),
+        val total: Long = 0,
+        val page: Int = 0,
+        val pageSize: Int = 0,
+    )
+
+    @kotlinx.serialization.Serializable
+    private data class SyncTaskPageRaw(
+        val list: List<SyncTaskInfo> = emptyList(),
+        val total: Long = 0,
+        val page: Int = 0,
+        @kotlinx.serialization.SerialName("page_size")
+        val pageSize: Int = 0,
+    )
+
+    suspend fun listTasksPaged(
+        page: Int = 1,
+        pageSize: Int = 10,
+        status: String = "",
+        deviceId: String = "",
+    ): Result<ApiResponse<SyncTaskPage>> {
+        val query = buildMap {
+            put("page", page.toString())
+            put("page_size", pageSize.toString())
+            if (status.isNotEmpty()) put("status", status)
+            if (deviceId.isNotEmpty()) put("device_id", deviceId)
+        }
+        return Request.getSuspend<ApiResponse<SyncTaskPageRaw>>(ApiRoutes.SYNC_TASKS, query).map { raw ->
+            ApiResponse(raw.code, raw.message, raw.data?.let {
+                SyncTaskPage(it.list, it.total, it.page, it.pageSize)
+            })
+        }
+    }
+
     /** 本设备的待执行任务（后端按 target_device_id 过滤 pending 态）。 */
     suspend fun pendingTasks(deviceId: String): Result<ApiResponse<List<SyncTaskInfo>?>> {
         return Request.getSuspend<ApiResponse<List<SyncTaskInfo>?>>(

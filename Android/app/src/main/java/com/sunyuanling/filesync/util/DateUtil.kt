@@ -7,6 +7,13 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.ConcurrentHashMap
+
+/** 缓存 DateTimeFormatter，避免每次 ofPattern 重复解析模式（列表滚动时频繁调用是 GC 大户）。 */
+private val fmtCache = ConcurrentHashMap<String, DateTimeFormatter>()
+
+private fun cachedFmt(pattern: String): DateTimeFormatter =
+    fmtCache.getOrPut(pattern) { DateTimeFormatter.ofPattern(pattern) }
 
 /**
  * 格式化 ISO 时间字符串
@@ -19,7 +26,7 @@ fun formatDate(pattern: String, value: String): String {
     return try {
         val parsed = ZonedDateTime.parse(value)
             .withZoneSameInstant(ZoneId.systemDefault())
-        parsed.format(DateTimeFormatter.ofPattern(pattern))
+        parsed.format(cachedFmt(pattern))
     } catch (e: Exception) {
         value
     }
@@ -34,7 +41,7 @@ fun formatDate(pattern: String, millis: Long): String {
     return try {
         val instant = Instant.ofEpochMilli(millis)
         val zdt = instant.atZone(ZoneId.systemDefault())
-        zdt.format(DateTimeFormatter.ofPattern(pattern))
+        zdt.format(cachedFmt(pattern))
     } catch (e: Exception) {
         ""
     }

@@ -30,3 +30,9 @@ pub struct UpdateUserInfoParams {
     pub email: Option<String>,
     pub phone: Option<String>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChangePasswordParams {
+    pub old_password: String,
+    pub new_password: String,
+}
