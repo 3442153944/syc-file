@@ -60,11 +60,23 @@ export const useTransferStore = defineStore('transfer', () => {
   const conflicts = ref<SyncConflict[]>([])
 
   let unlisteners: UnlistenFn[] = []
+  let wsUnlisten: UnlistenFn | null = null
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let clockTimer: ReturnType<typeof setInterval> | null = null
   // 响应式时钟：computed 里裸用 Date.now() 没有响应性，时间流逝不会触发重算，
   // 曾导致「同步完成后指示器永远转圈」。
   const now = ref(Date.now())
+
+  // ── WS 状态提前注册（App.vue 调用，防事件丢失）─────────────────────────────
+  async function initWs() {
+    if (wsUnlisten || !isTauri()) return
+    try {
+      const { listen } = await import('@tauri-apps/api/event')
+      wsUnlisten = await listen<{ connected: boolean; message: string }>('ws-status', (e) => {
+        wsConnected.value = e.payload.connected
+      })
+    } catch { /* 非 Tauri */ }
+  }
 
   // ── getters ──────────────────────────────────────────────────────────────
   const activeUploads = computed(() => uploads.value.filter((u) => u.status === 'uploading'))
@@ -104,6 +116,7 @@ export const useTransferStore = defineStore('transfer', () => {
   async function init() {
     if (!isTauri()) return
     if (unlisteners.length > 0) return // 防重复
+    await initWs() // 提前注册，init() 被延迟调用时补位
     unlisteners = [
       await listen<{ path: string; sent: number; total: number }>(
         'upload-progress-byte',
@@ -196,6 +209,12 @@ export const useTransferStore = defineStore('transfer', () => {
         syncEngineRunning.value = await invoke<boolean>('is_sync_running')
       }
       await refreshEngine()
+
+      // 登录后补位：setup 阶段无 token 未能启动，现在尝试
+      if (!syncEngineRunning.value) {
+        try { await invoke('start_sync'); await refreshEngine() } catch { /* 静默 */ }
+      }
+
       pollTimer = setInterval(async () => {
         await refreshEngine()
         await refreshSyncData()
@@ -220,6 +239,8 @@ export const useTransferStore = defineStore('transfer', () => {
   function dispose() {
     unlisteners.forEach((fn) => fn())
     unlisteners = []
+    wsUnlisten?.()
+    wsUnlisten = null
     if (pollTimer) clearInterval(pollTimer)
     pollTimer = null
     if (clockTimer) clearInterval(clockTimer)
@@ -292,6 +313,7 @@ export const useTransferStore = defineStore('transfer', () => {
     syncing,
     indicator,
     init,
+    initWs,
     dispose,
     refreshSyncData,
     startManualUpload,

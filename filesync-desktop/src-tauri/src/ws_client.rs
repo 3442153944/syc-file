@@ -11,6 +11,7 @@ use crate::api::{
     ws::types::{ConflictContent, ConflictResolvedContent, TaskCreatedContent, WsEnvelope},
 };
 use crate::base_store;
+use crate::catch_up;
 use crate::chunked_uploader::{self, UploadOptions};
 use crate::config::SharedSyncConfig;
 use crate::logger;
@@ -69,13 +70,13 @@ enum PublishErr {
 
 pub fn start_ws_client(
     config: SharedSyncConfig,
-    _upload_tx: mpsc::Sender<UploadTask>,
+    upload_tx: mpsc::Sender<UploadTask>,
     app: AppHandle,
 ) {
-    tokio::spawn(run_ws_loop(config, app));
+    tokio::spawn(run_ws_loop(config, upload_tx, app));
 }
 
-async fn run_ws_loop(config: SharedSyncConfig, app: AppHandle) {
+async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTask>, app: AppHandle) {
     let mut backoff = 1u64;
     loop {
         let (ws_url, token, device_id, device_name) = {
@@ -104,7 +105,7 @@ async fn run_ws_loop(config: SharedSyncConfig, app: AppHandle) {
                 backoff = 1;
                 logger::info("ws", "已连接到服务器");
                 emit_ws_status(&app, true, "已连接到服务器");
-                handle_session(ws_stream, &config, &app).await;
+                handle_session(ws_stream, &config, &upload_tx, &app).await;
                 logger::warn("ws", "连接断开，正在重连…");
                 emit_ws_status(&app, false, "连接断开，正在重连...");
             }
@@ -124,8 +125,11 @@ async fn handle_session(
         + SinkExt<Message>
         + Unpin,
     config: &SharedSyncConfig,
+    upload_tx: &mpsc::Sender<UploadTask>,
     app: &AppHandle,
 ) {
+    catch_up::catch_up_all_folders(config, upload_tx, app).await;
+
     while let Some(msg) = ws.next().await {
         match msg {
             Ok(Message::Text(text)) => on_text(&text, config, app).await,
@@ -266,7 +270,7 @@ async fn do_download(
     match download_and_publish(&client, remote_dir, &file_name, expected_hash.as_deref(), &local_root, &safe_rel).await {
         Ok(hash) => {
             sync_api::complete_task(&client, task_id, &hash).await.ok();
-            base_store::set(folder_id, &relative_path, &hash);
+            base_store::set_with_file(folder_id, &relative_path, &hash, &local_root.join(&safe_rel));
             logger::info("download", format!("已下载并发布: {}", relative_path));
             app.emit("download-progress", serde_json::json!({
                 "path": final_str, "status": "done", "taskId": task_id
@@ -372,7 +376,7 @@ async fn on_conflict(cf: ConflictContent, config: &SharedSyncConfig, app: &AppHa
     };
     let client = ApiClient::new(&server_url, &token);
     match download_and_publish(&client, remote_dir.clone(), &cf.file_name, Some(cf.server_hash.as_str()), &local_root, &safe_rel).await {
-        Ok(h) => base_store::set(cf.folder_id, &cf.relative_path, &h),
+        Ok(h) => base_store::set_with_file(cf.folder_id, &cf.relative_path, &h, &local_root.join(&safe_rel)),
         Err(_) => logger::warn("conflict", "收敛服务端版本失败，将于重连扫描后补齐"),
     }
 
@@ -473,7 +477,7 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         is_dir: false,
         mtime: Some(now_secs()),
     }).await.ok();
-    base_store::set(pc.folder_id, &pc.relative_path, &hash);
+    base_store::set_with_file(pc.folder_id, &pc.relative_path, &hash, &pc.quarantine);
 
     // 3) 把本地版本放回主目录（覆盖刚收敛的服务端版本）
     if let Some(root) = resolve_local_root(config, pc.folder_id) {

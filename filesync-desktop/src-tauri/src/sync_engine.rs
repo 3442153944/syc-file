@@ -150,6 +150,7 @@ async fn flush_debounce(
                         remote_dir,
                         folder_id,
                         relative_path: rel,
+                        action: "modify".into(),
                     })
                     .await
                     .ok();
@@ -282,6 +283,7 @@ async fn walk_and_enqueue(
                         remote_dir,
                         folder_id,
                         relative_path: rel,
+                        action: "modify".into(),
                     };
                     if tx.send(task).await.is_ok() {
                         count += 1;
@@ -349,7 +351,7 @@ fn find_mapping(config: &SharedSyncConfig, path: &PathBuf) -> Option<(u64, Strin
 
 // ── 过滤规则 ─────────────────────────────────────────────────────────────────
 
-fn should_ignore(path: &PathBuf) -> bool {
+pub fn should_ignore(path: &PathBuf) -> bool {
     let name = match path.file_name() {
         Some(n) => n.to_string_lossy().to_lowercase(),
         None => return true,
@@ -360,6 +362,10 @@ fn should_ignore(path: &PathBuf) -> bool {
         || name.starts_with('.')
         || name == "thumbs.db"
         || name == "desktop.ini"
+        || name.ends_with(".crdownload")
+        || name.ends_with(".part")
+        || name == ".synctmp"
+        || name == ".syncpending"
     {
         return true;
     }

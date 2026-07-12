@@ -56,6 +56,7 @@ pub struct ScanItem {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScanReport {
+    pub device_id: String,
     pub folder_id: u64,
     pub items: Vec<ScanItem>,
 }

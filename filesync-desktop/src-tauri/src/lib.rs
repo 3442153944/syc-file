@@ -1,5 +1,7 @@
 mod api;
 mod app_paths;
+mod base_store;
+mod catch_up;
 mod chunked_uploader;
 mod config;
 mod device;
@@ -8,10 +10,10 @@ mod sync_engine;
 mod upload_worker;
 mod watcher;
 mod ws_client;
-mod base_store;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use api::client::ApiClient;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use api::user::{api as user_api, params::*, response::*};
@@ -162,14 +164,11 @@ fn remove_folder_mapping(local_path: String, config: State<SharedSyncConfig>) {
     config.write().folder_mappings.retain(|m| m.local_path != local_path);
 }
 
-/// 启动同步引擎：先从服务器拉取 sync_folders 填充内存缓存，再启动引擎和文件监听
-#[tauri::command]
-async fn start_sync(
-    engine: State<'_, SharedSyncEngine>,
-    config: State<'_, SharedSyncConfig>,
-    app_handle: tauri::AppHandle,
+async fn do_start_sync(
+    config: &SharedSyncConfig,
+    engine: &SharedSyncEngine,
+    app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
-    // 1. 从服务器拉最新 folder 列表，刷新内存缓存
     let client = make_client(&config.read())?;
     let resp = sync_api::list_folders(&client).await?;
     if resp.is_ok() {
@@ -187,26 +186,36 @@ async fn start_sync(
         }
     }
 
-    // 2. 启动引擎
-    start_sync_engine(&engine, config.inner().clone(), app_handle)?;
+    start_sync_engine(engine, config.clone(), app_handle.clone())?;
 
-    // 3. 监听所有本地路径
     let paths: Vec<PathBuf> = config.read().folder_mappings
         .iter().map(|m| PathBuf::from(&m.local_path)).collect();
     if paths.is_empty() {
         logger::warn("sync", "未配置任何同步目录，引擎已启动但不会监听任何文件。请先在「同步管理」创建同步文件夹。");
     }
     for p in &paths {
-        match engine_watch_path(&engine, p.clone()) {
+        match engine_watch_path(engine, p.clone()) {
             Ok(_) => logger::info("sync", format!("开始监听同步目录: {}", p.display())),
             Err(e) => logger::error("sync", format!("监听目录失败 {}: {}", p.display(), e)),
         }
     }
 
-    // 4. 首次全量同步：把尚无基线的本地文件入上传队列（多线程上传）
-    engine_enqueue_initial_sync(&engine, config.inner());
+    engine_enqueue_initial_sync(engine, config);
     logger::info("sync", format!("同步引擎已启动，监听 {} 个目录", paths.len()));
     Ok(())
+}
+
+/// 启动同步引擎：先从服务器拉取 sync_folders 填充内存缓存，再启动引擎和文件监听
+#[tauri::command]
+async fn start_sync(
+    engine: State<'_, SharedSyncEngine>,
+    config: State<'_, SharedSyncConfig>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    if engine.lock().is_some() {
+        return Ok(()); // 已在运行，幂等
+    }
+    do_start_sync(&config, &engine, &app_handle).await
 }
 
 #[tauri::command]
@@ -554,6 +563,26 @@ pub fn run() {
             let tools = SubmenuBuilder::new(app, "工具").item(&open_logs).build()?;
             let menu = MenuBuilder::new(app).item(&tools).build()?;
             app.set_menu(menu)?;
+
+            // 同步默认启用：延迟 1s 后自动启动（等 app 就绪 + token 可能已加载）
+            {
+                let cfg = shared_config.clone();
+                let eng = app.state::<SharedSyncEngine>().inner().clone();
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(1));
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        if cfg.read().token.is_empty() || eng.lock().is_some() {
+                            return;
+                        }
+                        if let Err(e) = do_start_sync(&cfg, &eng, &handle).await {
+                            logger::warn("app", format!("自动启动同步失败（可手动启动）: {}", e));
+                        }
+                    });
+                });
+            }
+
             Ok(())
         })
         .on_menu_event(|app, event| {

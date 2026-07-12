@@ -9,7 +9,7 @@
 
 这是一个**个人自托管文件传输/同步系统**，三端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
 
-⚠ **同步链路现状**：Go 后端同步引擎已全链路实现（Redis 队列 + worker 调度 + base CAS 冲突检测 + WS 派发，见 §4.11）。**Windows 桌面端同步上报/执行链路已接通**（`file_changed` 带 `base_hash` 上报、`task_created` 原子发布执行、冲突隔离、`waiting_unlock`、多线程全量同步、日志窗口，见 §3B.6）。**WS 认证问题已修复**（`ws_client.rs` URL 补齐 `/v1/ws/connect` 路径）。**三端统一分片上传协议（blake3）已落地**——后端 `file_lib`(Rust cgo) + `upload/init|chunk|complete`，桌面端 Rust `chunked_uploader.rs` + TS `chunkedUploader.ts`，Android `ChunkedUploader.kt`+`Blake3Util.kt`（哈希三端逐字节一致，见 §9.5）。Android 端仍无文件监听守护。
+⚠ **同步链路现状（2026-07-12）**：**同步核心已闭环、双向真机实测通过**。Go 后端同步引擎全链路实现（Redis 队列 + worker + base CAS + 冲突保留两者 + scan 追赶比对 + **同内容幂等吸收/回声抑制** + 物理文件缺失自愈，见 §4.11）；**Windows 端**探测→上传→上报→执行闭环（§3B.6）；**Android 端**同步引擎落地（task 执行 + FileObserver 探测 + 连接追赶 + 冲突隔离 + 保活服务，§3.11），Windows↔Android 双向同步实测可用。**三端统一分片上传协议（blake3）**：`file_lib` v3（`fc_describe`）经 cgo（服务端）/JNI（安卓 `filecore_jni`，缺 .so 回退纯 Java）/原生（桌面）复用同一实现。**剩余核心尾巴见 §6.3 待办清单**（桌面端离线追赶补传为首位）。
 
 ---
 
@@ -347,9 +347,13 @@ isTauri() == false  →  http.ts fetch() → Go 服务器（Web 部署模式）
 
 - ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径（原 `{ws_url}?token=...` 打到根路径 404）。Go 端 `AuthToken` 已正确支持 query token 回退、`RequireAuth` 拦截正确。
 - ✅ ~`upload_file` / `keep_local_reupload` 一次性读整文件到内存~ → 改走 `chunked_uploader`（流式 blake3 + 分片定位写），大文件无需整读入内存。
-- P2 离线期间被改的「已基线」文件不会被首次全量同步重传（`initial_sync` 只推无基线文件，缺带 hash 的 scan 比对）。
+- **P1【待办·核心尾巴】桌面端离线追赶机制**：离线期间被改/被删的「已基线」文件，重连后不会补传/补报（`initial_sync` 只推无基线文件）。桌面是主要控制端与管理端，需对齐 Android `SyncEngine.catchUpFolder` 的两阶段追赶（§3.11）：
+  ① 每次 WS 连上：遍历 folder，stat(size/mtime) 与 base_store 比对 → 变了重算 blake3 ≠ base 则上传+notify(带 base 走 CAS)；本地已删且有基线 → notify(delete)；
+  ② 然后发 `POST /sync/scan` 全量清单，服务端比对 trunk 补派 download/delete（元数据级，只传差异）。
+  前置小改：base_store 需存 size/mtime 快照（现仅 hash），否则每次追赶全量重算哈希。
+- P2 重命名/移动语义：rename 被当成 delete+create（秒传兜住流量，但 trunk 版本历史断裂，目录级 rename 放大成一堆任务）。notify/inotify 的 MOVED_FROM/TO 有 cookie 可配对，待做 move 上报协议。
 - P3 服务器地址设置页缺失：`set_sync_config` 已能持久化 `config.yml`，缺填地址的 UI。
-- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「等文件 size/mtime 稳定 N 秒再上报」，可能抓到保存中间态。
+- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「等文件 size/mtime 稳定 N 秒再上报」，可能抓到保存中间态（Android 端已有 2s 稳定窗 + 复查，桌面未对齐）。
 - 经 `/file/delete` 删同步目录内文件仅 `os.Remove`，不更新 trunk、不传播同步（属手动管理；但 `delete_file` API 已被同步 delete-before-upload 复用）。
 
 ---
@@ -543,14 +547,21 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 当前主要落差：**Windows 桌面端同步已闭环、实测可用**，仅「冲突待办/同步任务列表」UI 简陋（传输列表/进度面板已有，但冲突收件箱语义仍弱）；**Android 端同步未做**（无探测）。
 
-建议优先级：
-① **桌面端「冲突收件箱/同步任务列表」UI**（同步功能已通，界面简陋；冲突待办语义见 §9.2）
-② 桌面端设置页面（服务器地址 UI）
-③ ✅ ~分片文件传输协议~替代单缓冲上传（已实现，见 §9.5）
-④ 修构建（venv 密钥纳入安全分发）
-⑤ 清死代码 + 补/删空分层目录
-⑥ 修安全（凭证加密、收窄权限/CORS、接线 RequireRole）
-⑦ Android 同步（root daemon + FileObserver）
+**当前待办清单（2026-07-12 更新，按优先级）：**
+
+**核心尾巴（不做完不算"同步核心完成"）**
+① **桌面端离线追赶机制**（P1，详见 §3B.6 待办）：对齐 Android 的两阶段追赶——连上后先补传本地离线变更（stat+hash 对基线，带 base 走 CAS）+ 补报本地删除，再 `POST /sync/scan` 交服务端比对补齐。桌面是主控端/管理端，这是数据会真丢传播的最后一个口子。
+② **服务端 sync 引擎集成测试**：CAS 快进/冲突/scan 比对/幂等吸收/物理缺失自愈——同步是状态机系统，目前零自动化覆盖，全靠三端手工联调，每次改动都有回归风险（本轮 LIKE 转义/schema 漂移/秒传协议/回声循环四个事故均为实测暴露）。
+③ **公网安全一轮**（服务经 DDNS 公网暴露中，安全项不是"完善"是必修）：CORS `*`、WS `CheckOrigin:true`、`RequireRole` 未接线、venv 密钥分发、download token 走 query（进访问日志）、Android 明文记住密码。
+
+**完善级（核心闭环后的体验/健壮性迭代）**
+④ 重命名/移动语义（MOVED cookie 配对，避免 delete+create 断版本史）
+⑤ Office 稳定窗（桌面对齐安卓的 2s 稳定窗+复查）
+⑥ 冲突 keep_local 子目录回放（安卓按根目录名回放，靠重扫兜底）
+⑦ 桌面端服务器地址设置 UI；清死代码/空目录；file_version 查看与回滚 UI
+⑧ 鸿蒙端（download_only 客户端，协议现成）；root 看门狗模块；应用内更新（§9.4）
+
+已完成项（历史）：~桌面冲突收件箱/任务列表 UI~（传输列表 + 同步记录分页/清理已落地）、~分片传输协议~（§9.5）、~Android 同步~（§3.11）。
 
 ---
 
@@ -577,9 +588,10 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 **Windows 桌面端**
 - ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径，Go 端认证链路经验证正确。
 - ✅ ~`upload_file` / `keep_local_reupload` 整文件读内存~ → 改走 `chunked_uploader`（流式 blake3 + 分片定位写 + Merkle 合并）。
-- P2 离线期间被改的「已基线」文件不会被首次全量同步重传（`initial_sync` 只推无基线文件，缺带 hash 的 scan 比对）。
+- **P1【待办】桌面端离线追赶机制**（主控端补传本地离线变更 + scan 比对，详见 §3B.6 / §6.3①）。
+- P2 重命名/移动语义：rename 当 delete+create 处理，trunk 版本史断裂（§6.3④）。
 - P3 服务器地址设置页缺失：`set_sync_config` 已持久化 `config.yml`，缺填地址 UI。
-- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「size/mtime 稳定 N 秒再上报」。
+- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「size/mtime 稳定 N 秒再上报」（安卓已有稳定窗，桌面未对齐）。
 - ✅ ~`file_changed` 上报 / `task_created` 执行待接线~ → 已落地：上传带 `base_hash`、原子发布(.synctmp)、冲突隔离(.syncpending)、`waiting_unlock`、多线程全量同步（见 §3B.6）。
 - ✅ ~配置无持久化~ → `config/config.yml`（exe 同级 `config/`+`sync/`+`log/`），`base_store` 持久化 `config/state.json`；`LogConfig` 持久化（level/file/console/format/max_size/max_backup/max_age）。
 - ✅ ~无日志可见~ → 全局 `logger`（级别过滤 + 按大小轮转 lumberjack + 可选 stderr）+ 独立日志窗口（菜单 / `Ctrl+Alt+T`）。
@@ -704,4 +716,6 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 ---
 
-*本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。§9 后端 + Windows 客户端已转正（见 §4.11 / §3B.6）。§9.5 分片传输协议已三端落地（✅，已从 §6.3③ 移除）；§6.2#7 已标✅。剩余 Android 同步接入与桌面端冲突收件箱 UI 待落地。*
+*本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。*
+
+*进度快照（2026-07-12）：**同步核心已闭环**——后端引擎（§4.11，含幂等吸收/自愈）+ Windows（§3B.6）+ Android（§3.11）双向真机实测通过；三端统一 blake3 分片协议（§9.5，file_lib v3 三端复用）；待处理/记录管理（安卓批量处理、桌面分页+清理）已落地。**剩余核心尾巴见 §6.3 待办清单**：① 桌面端离线追赶（P1）② sync 引擎集成测试 ③ 公网安全；其后进入完善级迭代。*

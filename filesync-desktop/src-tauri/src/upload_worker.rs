@@ -23,6 +23,8 @@ pub struct UploadTask {
     pub remote_dir: String,
     pub folder_id: u64,
     pub relative_path: String,
+    /// create / modify（空串回退 "modify" 兼容旧调用方）
+    pub action: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,7 +80,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     // watcher 抓到，原样回传只会让服务端再派发一圈（乒乓循环）。直接跳过。
     if let Some(base) = crate::base_store::get(task.folder_id, &task.relative_path) {
         if let Ok(cur) = chunked_uploader::file_blake3_hex(&task.local_path) {
-            if cur == base {
+            if cur == base.hash {
                 crate::logger::debug("upload", format!("内容与基线一致，跳过回传: {}", task.relative_path));
                 return;
             }
@@ -132,7 +134,8 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
 
     let folder_id = task.folder_id;
     let rel = task.relative_path.clone();
-    let base_hash = crate::base_store::get(folder_id, &rel);
+    let base_hash = crate::base_store::get(folder_id, &rel).map(|b| b.hash);
+    let action = if task.action.is_empty() { "modify" } else { &task.action };
 
     sync_api::notify(
         &client,
@@ -141,7 +144,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
             folder_id,
             relative_path: rel.clone(),
             file_name,
-            action: "modify".into(),
+            action: action.into(),
             file_size: Some(file_size),
             file_hash: Some(file_hash.clone()),
             base_hash,
@@ -153,7 +156,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     .ok();
 
     // 上传被接受后，trunk hash 即为本次内容；更新基线（若实际冲突，conflict 处理会再纠正）。
-    crate::base_store::set(folder_id, &rel, &file_hash);
+    crate::base_store::set_with_file(folder_id, &rel, &file_hash, &task.local_path);
     crate::logger::info("upload", format!("已上传并上报: {} ({} bytes)", rel, file_size));
 
     emit_progress(app, &path_str, "done", None);

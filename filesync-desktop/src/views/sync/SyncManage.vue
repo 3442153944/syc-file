@@ -1,6 +1,5 @@
 <script setup lang="ts">
 // 同步管理：创建同步文件夹、启动/停止同步引擎、查看状态与冲突待办。
-// 直接粘贴文件到目录不会自动同步——必须先在这里创建同步文件夹并启动同步。
 import {ref, onMounted, onUnmounted, computed, h} from 'vue'
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {listen, type UnlistenFn} from '@tauri-apps/api/event'
@@ -16,15 +15,17 @@ import {
   listConflicts, resolveConflict, deleteConflict,
 } from '@/api/sync/syncApi'
 import type {SyncFolder, SyncConflict} from '@/api/sync/syncTypes'
+import {useTransferStore} from '@/store/useTransferStore'
 
 const message = useMessage()
 const dialog = useDialog()
 const router = useRouter()
 const inTauri = isTauri()
+const transferStore = useTransferStore()
 
 const running = ref(false)
-const wsConnected = ref(false)
-const wsMessage = ref('未连接')
+const wsConnected = computed(() => transferStore.wsConnected)
+const wsMessage = ref('')
 const deviceId = ref('')
 const syncRoot = ref('')
 
@@ -44,9 +45,8 @@ let unlistenConflict: UnlistenFn | null = null
 
 const statusTag = computed(() => {
   if (!running.value) return {type: 'default' as const, text: '未启动'}
-  return wsConnected.value
-      ? {type: 'success' as const, text: '同步中（已连接）'}
-      : {type: 'warning' as const, text: '同步中（连接断开）'}
+  if (!wsConnected.value) return {type: 'warning' as const, text: '同步中（连接断开）'}
+  return {type: 'success' as const, text: '同步中（已连接）'}
 })
 
 async function refreshAll() {
@@ -207,7 +207,6 @@ onMounted(async () => {
   await refreshAll()
   if (!inTauri) return
   unlistenWs = await listen<{ connected: boolean; message: string }>('ws-status', (e) => {
-    wsConnected.value = e.payload.connected
     wsMessage.value = e.payload.message
   })
   unlistenConflict = await listen('sync-conflict', async () => {

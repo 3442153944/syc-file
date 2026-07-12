@@ -2,6 +2,7 @@
 import { NMessageProvider, NDialogProvider, NNotificationProvider } from 'naive-ui'
 import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { useTransferStore } from './store/useTransferStore'
 import LogViewer from './views/logs/LogViewer.vue'
 
 // 日志窗口（label === 'logs'）只渲染 LogViewer，跳过主应用路由。
@@ -13,6 +14,9 @@ if (isTauri()) {
     isLogWindow = false
   }
 }
+
+// 尽早注册 WS 状态监听，防止 Rust setup 自动启动早于 home.vue 挂载
+useTransferStore().initWs()
 </script>
 
 <template>

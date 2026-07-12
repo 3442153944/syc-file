@@ -57,6 +57,13 @@ const handleLogin = async () => {
     }
 
     message.success('登录成功')
+
+    // 登录成功后自动启动同步引擎
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('start_sync')
+    } catch { /* 未配置同步文件夹等正常情况 */ }
+
     await router.push({name: 'Home'})
   } catch (error) {
     console.error('登录失败', error)
