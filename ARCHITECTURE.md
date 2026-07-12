@@ -9,7 +9,7 @@
 
 这是一个**个人自托管文件传输/同步系统**，三端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
 
-⚠ **同步链路现状（2026-07-12）**：**同步核心已闭环、双向真机实测通过**。Go 后端同步引擎全链路实现（Redis 队列 + worker + base CAS + 冲突保留两者 + scan 追赶比对 + **同内容幂等吸收/回声抑制** + 物理文件缺失自愈，见 §4.11）；**Windows 端**探测→上传→上报→执行闭环（§3B.6）；**Android 端**同步引擎落地（task 执行 + FileObserver 探测 + 连接追赶 + 冲突隔离 + 保活服务，§3.11），Windows↔Android 双向同步实测可用。**三端统一分片上传协议（blake3）**：`file_lib` v3（`fc_describe`）经 cgo（服务端）/JNI（安卓 `filecore_jni`，缺 .so 回退纯 Java）/原生（桌面）复用同一实现。**剩余核心尾巴见 §6.3 待办清单**（桌面端离线追赶补传为首位）。
+⚠ **同步链路现状（2026-07-12）**：**同步核心已闭环、双向真机实测通过**。Go 后端同步引擎全链路实现（Redis 队列 + worker + base CAS + 冲突保留两者 + scan 追赶比对 + **同内容幂等吸收/回声抑制** + 物理文件缺失自愈，见 §4.11）；**Windows 端**探测→上传→上报→执行闭环（§3B.6）+ **离线追赶机制已落地**（`catch_up.rs`：两阶段 stat 比对 + scan）+ **同步默认启用**（setup 自动启动 + 登录后补位）+ **个人中心/资料编辑/密码修改/头像** + **服务器地址设置**（`ServerSettings.vue`）；**Android 端**同步引擎落地（task 执行 + FileObserver 探测 + 连接追赶 + 冲突隔离 + 保活服务，§3.11），Windows↔Android 双向同步实测可用；**同步列表分页加载**（每页 10 条，滚动到底自动追加，FAB 回到顶部）+ **GC 优化**（`DateUtil`/`TimeUtils`/`parseIsoToMillis` 缓存格式化器，`HomeScreen` `forEach` 改 `items` 懒渲染）。**三端统一分片上传协议（blake3）**：`file_lib` v3（`fc_describe`）经 cgo（服务端）/JNI（安卓 `filecore_jni`，缺 .so 回退纯 Java）/原生（桌面）复用同一实现。**剩余核心尾巴见 §6.3 待办清单**（公网安全为首位）。
 
 ---
 
@@ -257,8 +257,8 @@ filesync-desktop/
 │  │  ├ user/ userApi.ts + userTypes.ts
 │  │  ├ file/ fileApi.ts + fileTypes.ts + chunkedUploader.ts(@noble/hashes blake3，Web 模式分片)
 │  │  └ sync/ syncApi.ts + syncTypes.ts
-│  ├ competent/               页面级 composable（login/register/resetPassword/home）
-│  ├ views/                   Vue 页面（dashboard/file/catalog/monitor/sync + transfer/ + logs/）
+│  ├ competent/               页面级 composable（login/register/resetPassword/home + ServerSettings.vue）
+│  ├ views/                   Vue 页面（dashboard/file/catalog/monitor/sync + transfer/ + logs/ + person/（PersonalCenter/EditProfile/ChangePassword））
 │  ├ router/ store/ models/   路由 + Pinia store（含 useTransferStore.ts）+ 旧类型（兼容保留）
 │  └ request/                 @syl/base-request workspace 包（已迁移，保留空壳）
 └ src-tauri/src/
@@ -275,9 +275,11 @@ filesync-desktop/
    │  ├ sync/ api+params+response.rs
    │  └ ws/ types.rs
    ├ chunked_uploader.rs      blake3+Merkle+并发分片+断点续传+秒传+SessionGone 重试一次+file_blake3_hex
-   ├ sync_engine.rs           文件 watcher + 防抖 + 上传调度
-   ├ upload_worker.rs         自动同步上传 worker（走 chunked + delete-before-upload）
-   ├ ws_client.rs             WebSocket 连接（download_and_publish 走 blake3 校验；keep_local_reupload 走 chunked）
+   ├ base_store.rs            BaseEntry {hash,size,mtime} 基线存储（old-format 自动迁移）
+   ├ catch_up.rs              离线追赶：Phase1 stat 比对 + Phase2 scan 全量清单
+   ├ sync_engine.rs           文件 watcher + 防抖 + 上传调度（should_ignore pub，含 .synctmp/.syncpending）
+   ├ upload_worker.rs         自动同步上传 worker（走 chunked + delete-before-upload + action 字段）
+   ├ ws_client.rs             WebSocket 连接（download_and_publish 走 blake3 校验；keep_local_reupload 走 chunked；WS 连接后自动 catch_up）
    └ watcher.rs               基础监听（监控页用）
 ```
 
@@ -299,11 +301,11 @@ isTauri() == false  →  http.ts fetch() → Go 服务器（Web 部署模式）
 | 域 | Commands |
 |---|---|
 | 配置 | `set_sync_config`(可选 `log_level` 热切换), `get_sync_config`, `get_device_id` |
-| 用户 | `login`（写 token 到 SyncConfig）, `verify`, `register`, `reset_password` |
+| 用户 | `login`（写 token 到 SyncConfig）, `verify`, `register`, `reset_password`, `update_profile`（multipart 表单+头像）, `change_password`（需旧密码验证，从 token 取当前用户） |
 | 文件 | `get_available_disks`, `traverse_directory`, `upload_file`（本地路径→分片上传 blake3，emit `upload-progress-byte`）, `build_download_url`, `get_download_history`, `delete_download_history`, `delete_file`（文件管理 + 同步 delete-before-upload 复用）, `open_log_window_cmd` |
-| 同步文件夹 | `create_sync_folder`（写服务器+自动加入 watcher）, `list_sync_folders`, `delete_sync_folder`（写服务器+清内存缓存） |
-| 同步任务 | `list_pending_tasks`, `list_conflicts`, `delete_conflict` |
-| 引擎 | `start_sync`（拉服务器 folders→填充缓存→启动引擎）, `stop_sync`, `is_sync_running` |
+| 同步文件夹 | `create_sync_folder`（写服务器+自动加入 watcher）, `list_sync_folders`, `delete_sync_folder`（写服务器+清内存缓存）, `update_sync_folder` |
+| 同步任务 | `list_pending_tasks`, `list_sync_tasks`(分页), `clear_sync_tasks`(批量清理), `list_conflicts`, `resolve_conflict`, `delete_conflict` |
+| 引擎 | `start_sync`（拉服务器 folders→填充缓存→启动引擎，幂等）, `stop_sync`, `is_sync_running` |
 | 监听 | `add_watch`, `remove_watch`, `list_watches`（基础监控页用） |
 | 映射（低级） | `add_folder_mapping`, `remove_folder_mapping` |
 
@@ -345,16 +347,16 @@ isTauri() == false  →  http.ts fetch() → Go 服务器（Web 部署模式）
 
 #### 仍存在的问题
 
-- ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径（原 `{ws_url}?token=...` 打到根路径 404）。Go 端 `AuthToken` 已正确支持 query token 回退、`RequireAuth` 拦截正确。
-- ✅ ~`upload_file` / `keep_local_reupload` 一次性读整文件到内存~ → 改走 `chunked_uploader`（流式 blake3 + 分片定位写），大文件无需整读入内存。
-- **P1【待办·核心尾巴】桌面端离线追赶机制**：离线期间被改/被删的「已基线」文件，重连后不会补传/补报（`initial_sync` 只推无基线文件）。桌面是主要控制端与管理端，需对齐 Android `SyncEngine.catchUpFolder` 的两阶段追赶（§3.11）：
-  ① 每次 WS 连上：遍历 folder，stat(size/mtime) 与 base_store 比对 → 变了重算 blake3 ≠ base 则上传+notify(带 base 走 CAS)；本地已删且有基线 → notify(delete)；
-  ② 然后发 `POST /sync/scan` 全量清单，服务端比对 trunk 补派 download/delete（元数据级，只传差异）。
-  前置小改：base_store 需存 size/mtime 快照（现仅 hash），否则每次追赶全量重算哈希。
-- P2 重命名/移动语义：rename 被当成 delete+create（秒传兜住流量，但 trunk 版本历史断裂，目录级 rename 放大成一堆任务）。notify/inotify 的 MOVED_FROM/TO 有 cookie 可配对，待做 move 上报协议。
-- P3 服务器地址设置页缺失：`set_sync_config` 已能持久化 `config.yml`，缺填地址的 UI。
-- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「等文件 size/mtime 稳定 N 秒再上报」，可能抓到保存中间态（Android 端已有 2s 稳定窗 + 复查，桌面未对齐）。
-- 经 `/file/delete` 删同步目录内文件仅 `os.Remove`，不更新 trunk、不传播同步（属手动管理；但 `delete_file` API 已被同步 delete-before-upload 复用）。
+- ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径。
+- ✅ ~`upload_file` / `keep_local_reupload` 一次性读整文件到内存~ → 改走 `chunked_uploader`。
+- ✅ ~桌面端离线追赶机制~ → `catch_up.rs` 两阶段追赶：Phase1 stat 比对本地变更上传+notify（带 base CAS），Phase2 `POST /sync/scan` 全量清单交服务端比对。`base_store.rs` 存 `BaseEntry {hash,size,mtime}`。
+- ✅ ~同步默认不启用~ → `lib.rs` `setup` 延迟 1s 自动启动 + `login.vue` 登录后补位 + `transferStore.init()` 兜底。
+- ✅ ~服务器地址设置页缺失~ → `ServerSettings.vue`（头部齿轮图标 + 对话框，保存到 Rust `config.yml` + localStorage）。
+- ✅ ~个人中心/资料编辑/密码修改~ → `PersonalCenter.vue`/`EditProfile.vue`/`ChangePassword.vue`，导航栏用户名头像+下拉入口。
+- ✅ ~后端无密码修改接口~ → 新增 `POST /v1/user/change-password`（`changePassword.go`，从 token 取当前用户+验旧密码）。
+- P2 重命名/移动语义：rename 被当成 delete+create。
+- P3 Office 稳定窗口未做（Android 端已有 2s 稳定窗 + 复查，桌面未对齐）。
+- 经 `/file/delete` 删同步目录内文件仅 `os.Remove`，不更新 trunk（属手动管理）。
 
 ---
 
@@ -407,6 +409,7 @@ new_server/
 公共（无需 token）：`GET /ping`、`POST /v1/ping`、`POST /v1/user/{register,login,reset-password,verify}`。
 私有（RequireAuth）：
 - `POST /v1/user/update-info`（multipart：username/email/phone + 可选头像）
+- `POST /v1/user/change-password`（需 Token，验旧密码→改新密码）
 - 文件 `POST /v1/file/{available-disks,traverse-directory,upload,download-history,delete-download-history,delete}`、`GET /v1/file/download`（支持 Range，query：path/name/device_id）
 - 分片上传（重写版，详见 §9.5）：`POST /v1/file/upload/init`、`GET /v1/file/upload/status`、`POST /v1/file/upload/chunk`、`POST /v1/file/upload/complete`。旧 `POST /v1/file/upload`（multipart）仍保留但桌面/安卓已弃用。
 - WebSocket：`GET /v1/ws/connect`、`GET /v1/ws/my-devices`（所有人，自己的连接）、`GET /v1/ws/online`（**仅 admin**，所有在线用户设备）、`GET /v1/ws/stats`、`GET /v1/ws/user/:id/connections`、`POST /v1/ws/{send,broadcast,group,group/send}`、`DELETE /v1/ws/{conn/:conn_id,user/:id,device/:device_id}`、`GET /v1/ws/group/:name/users`
@@ -550,9 +553,10 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 **当前待办清单（2026-07-12 更新，按优先级）：**
 
 **核心尾巴（不做完不算"同步核心完成"）**
-① **桌面端离线追赶机制**（P1，详见 §3B.6 待办）：对齐 Android 的两阶段追赶——连上后先补传本地离线变更（stat+hash 对基线，带 base 走 CAS）+ 补报本地删除，再 `POST /sync/scan` 交服务端比对补齐。桌面是主控端/管理端，这是数据会真丢传播的最后一个口子。
-② **服务端 sync 引擎集成测试**：CAS 快进/冲突/scan 比对/幂等吸收/物理缺失自愈——同步是状态机系统，目前零自动化覆盖，全靠三端手工联调，每次改动都有回归风险（本轮 LIKE 转义/schema 漂移/秒传协议/回声循环四个事故均为实测暴露）。
-③ **公网安全一轮**（服务经 DDNS 公网暴露中，安全项不是"完善"是必修）：CORS `*`、WS `CheckOrigin:true`、`RequireRole` 未接线、venv 密钥分发、download token 走 query（进访问日志）、Android 明文记住密码。
+① ✅ ~~桌面端离线追赶机制~~ → `catch_up.rs` 已落地，对齐 Android 两阶段追赶。✅ ~~桌面端同步默认启用~~ → setup 自动启动 + 登录补位。✅ ~~服务器地址设置 UI~~ → `ServerSettings.vue`。
+② **服务端 sync 引擎集成测试**：CAS 快进/冲突/scan 比对/幂等吸收/物理缺失自愈——同步是状态机系统，目前零自动化覆盖，全靠三端手工联调。
+③ **公网安全一轮**（服务经 DDNS 公网暴露中）：CORS `*`、WS `CheckOrigin:true`、`RequireRole` 未接线、venv 密钥分发、download token 走 query（进访问日志）、Android 明文记住密码。
+④ **Android 列表 GC 崩溃**：主页 `forEach` 在 `item{}` 内非懒渲染 + `parseIsoToMillis` 每次 new Regex/SimpleDateFormat——已修复为 `items()` 懒渲染 + `ZonedDateTime.parse` 零分配 + `DateUtil`/`TimeUtils` 缓存；`SyncListScreen` 改分页 10 条+滚动加载更多+FAB 回顶。待真机验证。
 
 **完善级（核心闭环后的体验/健壮性迭代）**
 ④ 重命名/移动语义（MOVED cookie 配对，避免 delete+create 断版本史）
@@ -578,28 +582,33 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - P2 `/user/register` 响应无 code 致前端校验恒失败（`update-info` 仍走 multipart 绕过 `Request`）。
 - P3 `router/AppRoute.kt` 死代码；`MonitorScreen.kt` 内塞 FileDetail/Search/About 多屏；分页模型重复。
 - P1 **同步客户端待接线**：`AppConfig.autoSyncEnabled/autoSyncIntervalMs/syncOnWifiOnly` 仍无调度器消费；无 `SyncEngine`/root daemon/FileObserver；后端同步引擎已就绪（§4.11），需 Android 侧补上报 `file_changed`+接 `task_created`（契约 `SYNC_PROTOCOL.md`）。（注：上传链路已改分片，但同步探测仍未接 → **[未接线] autoSync** 维持）
-- ✅ ~`FileUploadViewModel` 走 multipart `checkFile`/`uploadFile`，缺取消/并发/字节进度~ → 改走 `ChunkedUploader`（分片+blake3+并发+字节进度+取消+SessionGone 自愈），删旧 multipart 接口（见 §3.6）。
-- ✅ ~`DevicesViewModel` 桩~ → 改为调 `WsApi.getMyDevices` 返回真实在线设备数。
-- ✅ ~下载状态多实例/进度不同步/暂停恢复失效~ → `DownloadController` 单例收敛 + 前台服务 + 通知栏 action。
-- ✅ ~`DownloadList` deviceId 类型混用~ → `DownloadItem` 加 `deviceId` 字段。
-- ✅ ~`DownloadRepository`/`TransferScreen`/`TransmissionList`/`MicroTransmissionCard` 废弃文件~ → 已删除。
-- ✅ ~监控路由 bug（`MonitorDestination` 双注册）~ → `MonitorGraph` 改绑 `MonitorListDestination`。
+- ✅ ~`FileUploadViewModel` 走 multipart~ → 改走 `ChunkedUploader`。
+- ✅ ~`DevicesViewModel` 桩~ → 调 `WsApi.getMyDevices` 返回真实设备数。
+- ✅ ~下载状态多实例/进度不同步~ → `DownloadController` 单例 + 前台服务。
+- ✅ ~`DownloadList` deviceId 类型混用~ → `DownloadItem` 加 `deviceId`。
+- ✅ ~废弃文件清理~ → 已删除。
+- ✅ ~监控路由 bug~ → 改绑 `MonitorListDestination`。
+- ✅ ~同步记录不分页/GC 崩溃~ → `SyncListScreen` 分页 10 条+滚动加载+FAB 回顶；`HomeScreen` `forEach`→`items()`；`DateUtil`/`TimeUtils`/`parseIsoToMillis` 缓存格式化器。
 
 **Windows 桌面端**
-- ✅ ~WS 连接认证失败~ → `ws_client.rs` URL 补齐 `/v1/ws/connect` 路径，Go 端认证链路经验证正确。
-- ✅ ~`upload_file` / `keep_local_reupload` 整文件读内存~ → 改走 `chunked_uploader`（流式 blake3 + 分片定位写 + Merkle 合并）。
-- **P1【待办】桌面端离线追赶机制**（主控端补传本地离线变更 + scan 比对，详见 §3B.6 / §6.3①）。
-- P2 重命名/移动语义：rename 当 delete+create 处理，trunk 版本史断裂（§6.3④）。
-- P3 服务器地址设置页缺失：`set_sync_config` 已持久化 `config.yml`，缺填地址 UI。
-- P3 Office 稳定窗口未做：watcher 仅按 `~`/`.` 前缀过滤，未「size/mtime 稳定 N 秒再上报」（安卓已有稳定窗，桌面未对齐）。
-- ✅ ~`file_changed` 上报 / `task_created` 执行待接线~ → 已落地：上传带 `base_hash`、原子发布(.synctmp)、冲突隔离(.syncpending)、`waiting_unlock`、多线程全量同步（见 §3B.6）。
-- ✅ ~配置无持久化~ → `config/config.yml`（exe 同级 `config/`+`sync/`+`log/`），`base_store` 持久化 `config/state.json`；`LogConfig` 持久化（level/file/console/format/max_size/max_backup/max_age）。
-- ✅ ~无日志可见~ → 全局 `logger`（级别过滤 + 按大小轮转 lumberjack + 可选 stderr）+ 独立日志窗口（菜单 / `Ctrl+Alt+T`）。
-- ✅ ~`builder error`~ → `SyncConfig::default()` server_url 已改为 `http://localhost:8991`，`make_client()` 返回 `Result`。
-- ✅ ~两套 HTTP 客户端并存 / TS 直接 fetch~ → 网络层统一走 invoke / fetch fallback。
-- ✅ ~重启丢失 folder_mappings~ → `start_sync` 从服务器拉 `list_sync_folders` 重建缓存。
-- ✅ ~无统一传输可视化~ → 传输列表 UI 已落地（`useTransferStore.ts` + `TransferList.vue` 三 tab + `home.vue` 顶栏活动指示徽章）。
-- ✅ ~同步哈希不统一~ → 同步链路文件哈希统一 blake3（upload_worker / ws_client / base_store / 下载校验）。
+- ✅ ~WS 连接认证失败~ → URL 补齐 `/v1/ws/connect`。
+- ✅ ~`upload_file` / `keep_local_reupload` 整文件读内存~ → 改走 `chunked_uploader`。
+- ✅ ~桌面端离线追赶机制~ → `catch_up.rs` 两阶段追赶（§3B.6）。
+- ✅ ~同步默认不启用~ → setup 自动启动 + 登录补位 + 前端兜底。
+- ✅ ~服务器地址设置页缺失~ → `ServerSettings.vue`（齿轮图标+对话框）。
+- ✅ ~个人中心/资料编辑/密码修改~ → `person/` 三个页面 + 导航栏头像下拉入口。
+- ✅ ~后端无密码修改接口~ → 新增 `POST /v1/user/change-password`。
+- P2 重命名/移动语义：rename 当 delete+create 处理。
+- P3 Office 稳定窗口未做。
+- ✅ ~`file_changed` 上报 / `task_created` 执行待接线~ → 已落地。
+- ✅ ~配置无持久化~ → `config/config.yml` + `base_store` `config/state.json`。
+- ✅ ~无日志可见~ → `logger` + 独立日志窗口。
+- ✅ ~`builder error`~ → `SyncConfig::default()` server_url 默认值。
+- ✅ ~两套 HTTP 客户端并存~ → 统一走 invoke / fetch fallback。
+- ✅ ~重启丢失 folder_mappings~ → `start_sync` 从服务器拉取。
+- ✅ ~无统一传输可视化~ → `useTransferStore` + `TransferList.vue` + 顶栏指示徽章。
+- ✅ ~同步哈希不统一~ → 统一 blake3。
+- ✅ ~Vite 未代理 `/static`~/~ → `vite.config.ts` 加 `/static`+`/v1` 代理。
 
 **后端**
 - ✅ ~scan 比对恒 0 行~ → `scan.go` 的 `file_path LIKE 'E:\FileSync\%'` 中反斜杠被 MySQL LIKE 当转义符吃掉，永远匹配不到 Windows 路径 → 改 `ESCAPE '|'` + 元字符转义。此 bug 曾导致安卓离线追赶完全失效。
@@ -615,7 +624,9 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - ✅ ~`sync_task` 表无 handler/worker，file_sync 仅客户端间路由~ → 新增 `internal/sync/` 引擎 + worker + 冲突检测 + REST `/v1/sync/*`；`file_sync` 接入服务端编排。
 - ✅ ~路径校验重复且 `IsPathAllowed` 死代码~ → 提升为 `config.Conf.IsPathAllowed` 盘符前缀校验，file/sync 共用。
 - ✅ ~分片上传协议未实现~ → `file_lib/`(Rust 静态库 `libfilecore.a` + C ABI) + cgo `pkg/filecore/` + `pkg/upload_store/`(Redis 会话+位图) + handler `upload_chunked/upload_chunk/upload_complete/upload_janitor` + 路由 `/file/upload/{init,status,chunk,complete}`（见 §4.7 / §9.5）。
-- ✅ ~`upload_complete.go` 用 `c.PostForm` 读 `upload_id` 读不到 JSON body~ → 改 `ShouldBindJSON` 读取参数。
+- ✅ ~`upload_complete.go` 用 `c.PostForm` 读不到 JSON body~ → 改 `ShouldBindJSON`。
+- ✅ ~无密码修改接口~ → 新增 `POST /v1/user/change-password`（`changePassword.go`）。
+- ✅ ~`ListTasks` 无默认 limit~ → `limit <= 0` 时默认 10。
 
 ---
 
@@ -675,7 +686,7 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 ### 9.1 现状
 - **后端**：同步引擎 `internal/sync/` 全链路实现——Redis 队列(`sync:queue`)+文件锁+进度+计数、worker BRPOP 调度 + Reaper 超时重试/离线补发、冲突检测(hash 双变推 `conflict`+残留可 `DELETE /sync/conflicts/:id` 清理)、Folder CRUD/Task 回调/Scan 全量比对、WS `file_sync` 接入编排、REST `/v1/sync/*`。
 - **Windows（Rust 桌面端）**：**同步已闭环、实测可用**——稳定 `device_id` + `notify` watcher + blake3 + `file_changed` 上报 + ws_client 执行 `task_created`(download/delete/mkdir) + 冲突保留，同步上传/keep_local 已切分片协议（详见 §3B.6）。**短板**：冲突待办/同步任务列表 UI 简陋（但传输列表 `/transfers` + 顶栏指示已落地）。
-- **Android**：**未接**——无 root daemon / FileObserver，autoSync 标志暂无消费方（注：上传已改分片，但同步探测仍未接 → `autoSync` 维持 `[未接线]`）。
+- **Android**：✅ **已接**——`SyncEngine` 落地（task 执行 + FileObserver 探测上报 + 连接追赶 + 冲突隔离，§3.11）；同步列表分页 + GC 优化（`HomeScreen` `forEach`→`items`，`DateUtil`/`TimeUtils` 缓存格式化器，`SyncListScreen` 分页 10 条+滚动加载+FAB，后端 `ListTasks` 默认 limit=10）。
 
 ### 9.2 关键约束（已确认）
 - **探测在客户端**：同步厂家发生在客户端——Android 用 root daemon(`su` fork + FileObserver)主动探测上报；Windows 用 Rust watcher；鸿蒙无监听能力则当 `download_only` 客户端。后端只做"接收上报 → 编排 → 推任务给目标设备"。
@@ -718,4 +729,4 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 *本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。*
 
-*进度快照（2026-07-12）：**同步核心已闭环**——后端引擎（§4.11，含幂等吸收/自愈）+ Windows（§3B.6）+ Android（§3.11）双向真机实测通过；三端统一 blake3 分片协议（§9.5，file_lib v3 三端复用）；待处理/记录管理（安卓批量处理、桌面分页+清理）已落地。**剩余核心尾巴见 §6.3 待办清单**：① 桌面端离线追赶（P1）② sync 引擎集成测试 ③ 公网安全；其后进入完善级迭代。*
+*进度快照（2026-07-12）：**同步核心已闭环**——后端引擎（§4.11，含幂等吸收/自愈）+ Windows（§3B.6，含离线追赶/自动启动/个人中心/服务器设置）+ Android（§3.11，SyncEngine 完整闭环+GC 优化+分页）双向真机实测通过；三端统一 blake3 分片协议（§9.5）；`/user/change-password` 接口已补。**剩余核心尾巴见 §6.3 待办清单**：① sync 引擎集成测试 ② 公网安全 ③ Android 列表 GC 真机验证；其后进入完善级迭代。*
