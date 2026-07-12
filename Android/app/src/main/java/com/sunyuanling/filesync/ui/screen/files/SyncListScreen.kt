@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -59,8 +61,36 @@ fun SyncListScreen(navController: NavController) {
     val vm = viewModel<SyncListViewModel>()
     val state by vm.uiState.collectAsState()
     var tabIndex by remember { mutableIntStateOf(0) }
+    // 待确认的批量处理方式：accept_server / keep_local
+    var confirmResolution by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { vm.refresh() }
+
+    // 批量处理确认框（两种取舍本质都是"以服务器为准"，差别在本地更改的去向）
+    confirmResolution?.let { resolution ->
+        val acceptServer = resolution == "accept_server"
+        AlertDialog(
+            onDismissRequest = { confirmResolution = null },
+            title = { Text(if (acceptServer) "强制与服务器对齐" else "保留本地更改") },
+            text = {
+                Text(
+                    if (acceptServer)
+                        "将放弃全部 ${state.conflicts.size} 条冲突的本地更改，主目录收敛为服务器版本（本地分叉副本从 .syncpending 丢弃）。"
+                    else
+                        "本地更改已暂存在 .syncpending，将以服务器当前版本为基准重新上报，成为新版本并同步到其它设备。共 ${state.conflicts.size} 条。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.resolveAllConflicts(resolution)
+                    confirmResolution = null
+                }) { Text("确认") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmResolution = null }) { Text("取消") }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -125,6 +155,35 @@ fun SyncListScreen(navController: NavController) {
                         SyncTaskCard(task)
                     }
                 } else {
+                    // ---- 批量处理动作 ----
+                    item {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("批量处理", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = "两种方式最终都以服务器为准，区别在本地更改的去向",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End
+                                ) {
+                                    TextButton(
+                                        onClick = { vm.realign() },
+                                    ) { Text("重新对齐", fontSize = 13.sp) }
+                                    TextButton(
+                                        onClick = { confirmResolution = "accept_server" },
+                                        enabled = state.conflicts.isNotEmpty()
+                                    ) { Text("全部用服务器版", fontSize = 13.sp) }
+                                    TextButton(
+                                        onClick = { confirmResolution = "keep_local" },
+                                        enabled = state.conflicts.isNotEmpty()
+                                    ) { Text("全部保留本地", fontSize = 13.sp) }
+                                }
+                            }
+                        }
+                    }
                     // ---- 冲突 ----
                     if (state.conflicts.isNotEmpty()) {
                         item { SectionTitle("冲突（保留两者，需人工取舍）") }

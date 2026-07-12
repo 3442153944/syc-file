@@ -1,16 +1,85 @@
 <script setup lang="ts">
 // 传输列表：上传 / 下载 / 同步 三个 tab。
-// 数据来自 useTransferStore，store 在 home.vue 初始化时已挂载事件监听。
-import { onMounted, onBeforeUnmount, computed } from 'vue'
+// 数据来自 useTransferStore，store 在 home.vue 初始化时已挂载事件监听；
+// 「同步记录」为服务端分页数据（GET /sync/tasks?page=..），支持批量清理。
+import { onMounted, onBeforeUnmount, computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTransferStore } from '@/store/useTransferStore'
-import { NButton, NSpace, NEmpty, NTag, NProgress, NPopconfirm } from 'naive-ui'
+import { listSyncTasks, clearSyncTasks } from '@/api/sync/syncApi'
+import type { SyncTask } from '@/api/sync/syncTypes'
+import { useMessage } from 'naive-ui'
+import { NButton, NSpace, NEmpty, NTag, NProgress, NPopconfirm, NPagination, NSelect, NSpin } from 'naive-ui'
 
 const router = useRouter()
 const store = useTransferStore()
+const message = useMessage()
+
+// ── 服务端同步记录（分页）────────────────────────────────────────────────
+const taskList = ref<SyncTask[]>([])
+const taskTotal = ref(0)
+const taskPage = ref(1)
+const taskPageSize = ref(20)
+const taskStatus = ref('') // '' = 全部
+const taskLoading = ref(false)
+const taskStatusOptions = [
+  { label: '全部状态', value: '' },
+  { label: '已完成', value: 'completed' },
+  { label: '失败', value: 'failed' },
+  { label: '待处理', value: 'pending' },
+  { label: '同步中', value: 'syncing' },
+  { label: '等待解锁', value: 'waiting_unlock' },
+]
+
+async function loadTasks() {
+  taskLoading.value = true
+  try {
+    const page = await listSyncTasks(taskPage.value, taskPageSize.value, taskStatus.value)
+    taskList.value = page.list ?? []
+    taskTotal.value = page.total
+  } catch (e) {
+    message.error(`加载同步记录失败: ${e}`)
+  } finally {
+    taskLoading.value = false
+  }
+}
+
+function onTaskPageChange(p: number) {
+  taskPage.value = p
+  loadTasks()
+}
+
+function onTaskStatusChange() {
+  taskPage.value = 1
+  loadTasks()
+}
+
+async function clearFinishedTasks() {
+  try {
+    const n = await clearSyncTasks('')
+    message.success(`已清理 ${n} 条已完成/失败记录`)
+    taskPage.value = 1
+    await loadTasks()
+  } catch (e) {
+    message.error(`清理失败: ${e}`)
+  }
+}
+
+const taskStatusMeta = (s: string): { label: string; type: 'success' | 'error' | 'info' | 'warning' | 'default' } => {
+  switch (s) {
+    case 'completed': return { label: '已完成', type: 'success' }
+    case 'failed': return { label: '失败', type: 'error' }
+    case 'syncing': return { label: '同步中', type: 'info' }
+    case 'pending': return { label: '待处理', type: 'default' }
+    case 'waiting_unlock': return { label: '等待解锁', type: 'warning' }
+    default: return { label: s, type: 'default' }
+  }
+}
+const taskTypeLabel = (t: string): string =>
+  ({ download: '下载', delete: '删除', mkdir: '建目录', upload: '上传' })[t] ?? t
 
 onMounted(() => {
   store.refreshSyncData()
+  loadTasks()
 })
 onBeforeUnmount(() => {
   /* 不 dispose，store 生命周期跟随主布局，页面卸载只停刷新 */
@@ -163,7 +232,7 @@ const goBack = () => router.back()
           </div>
         </div>
 
-        <div class="block-title">活动日志</div>
+        <div class="block-title">活动日志（本次运行）</div>
         <div v-if="syncList.length === 0" class="empty">
           <n-empty description="暂无同步活动" />
         </div>
@@ -194,6 +263,60 @@ const goBack = () => router.back()
           </div>
         </div>
       </n-tab-pane>
+
+      <!-- ── 同步记录（服务端，分页）───────────────────────── -->
+      <n-tab-pane name="records" :tab="`同步记录 (${taskTotal})`">
+        <div class="tab-actions records-actions">
+          <n-select
+            v-model:value="taskStatus"
+            :options="taskStatusOptions"
+            size="small"
+            style="width: 130px"
+            @update:value="onTaskStatusChange"
+          />
+          <n-space>
+            <n-button size="tiny" quaternary :loading="taskLoading" @click="loadTasks">刷新</n-button>
+            <n-popconfirm @positive-click="clearFinishedTasks">
+              <template #trigger>
+                <n-button size="tiny" type="error" ghost>清理已完成/失败</n-button>
+              </template>
+              删除全部已完成与失败的任务记录？进行中的任务不受影响。
+            </n-popconfirm>
+          </n-space>
+        </div>
+
+        <n-spin :show="taskLoading">
+          <div v-if="taskList.length === 0" class="empty">
+            <n-empty description="暂无同步记录" />
+          </div>
+          <div v-else class="rows">
+            <div v-for="t in taskList" :key="t.id" class="row">
+              <div class="row-main">
+                <div class="row-name" :title="t.relative_path">{{ t.file_name || t.relative_path }}</div>
+                <div class="row-meta">
+                  <span :title="t.relative_path">
+                    #{{ t.id }} · {{ taskTypeLabel(t.task_type) }} · {{ t.relative_path }}
+                  </span>
+                  <span>{{ t.created_at?.slice(0, 19).replace('T', ' ') }}</span>
+                </div>
+                <div v-if="t.error" class="row-err">{{ t.error }}</div>
+              </div>
+              <n-tag size="small" :type="taskStatusMeta(t.sync_status).type">
+                {{ taskStatusMeta(t.sync_status).label }}
+              </n-tag>
+            </div>
+          </div>
+        </n-spin>
+
+        <div class="pager">
+          <n-pagination
+            :page="taskPage"
+            :item-count="taskTotal"
+            :page-size="taskPageSize"
+            @update:page="onTaskPageChange"
+          />
+        </div>
+      </n-tab-pane>
     </n-tabs>
   </div>
 </template>
@@ -204,12 +327,24 @@ const goBack = () => router.back()
   margin: 0 auto;
   background: #fff;
   border-radius: 8px;
-  padding: 16px 20px;
+  padding: 0 20px 16px;
   height: 100%;
-  display: flex;
-  flex-direction: column;
+  overflow-y: auto; /* 页面自身滚动，头部/Tab 栏黏着 */
 }
-.page-head { margin-bottom: 12px; }
+/* 黏着定位：滚动时标题与 Tab 栏固定在顶部 */
+.page-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #fff;
+  padding: 16px 0 12px;
+}
+.transfer-page :deep(.n-tabs-nav) {
+  position: sticky;
+  top: 56px;
+  z-index: 9;
+  background: #fff;
+}
 .title { margin: 0; font-size: 18px; }
 .tab-actions { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .empty { padding: 40px 0; }
@@ -241,4 +376,6 @@ const goBack = () => router.back()
 .sync-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .conflict-block { margin-bottom: 16px; }
 .block-title { font-size: 13px; font-weight: 600; color: #606266; margin: 12px 0 8px; }
+.records-actions { display: flex; justify-content: space-between; align-items: center; }
+.pager { display: flex; justify-content: center; margin-top: 12px; }
 </style>

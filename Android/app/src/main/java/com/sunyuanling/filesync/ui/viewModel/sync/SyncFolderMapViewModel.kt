@@ -51,12 +51,12 @@ class SyncFolderMapViewModel : ViewModel() {
     /** 保存映射并通知引擎重建监听 + 触发追赶。 */
     fun setMapping(folderId: Long, localPath: String, enabled: Boolean) {
         SyncMappingStore.put(SyncMapping(folderId = folderId, localPath = localPath, enabled = enabled))
-        SyncEngine.onMappingsChanged()
+        SyncEngine.onMappingsChanged(clearedFolderId = folderId)
     }
 
     fun removeMapping(folderId: Long) {
         SyncMappingStore.remove(folderId)
-        SyncEngine.onMappingsChanged()
+        SyncEngine.onMappingsChanged(clearedFolderId = folderId)
     }
 
     fun defaultPathFor(folder: SyncFolderInfo): String =

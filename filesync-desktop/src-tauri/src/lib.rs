@@ -472,6 +472,58 @@ async fn delete_conflict(
     if resp.is_ok() { Ok(()) } else { Err(resp.message) }
 }
 
+/// 更新同步文件夹（enabled/direction/name，None 字段不动）。
+#[tauri::command]
+async fn update_sync_folder(
+    folder_id: u64,
+    enabled: Option<bool>,
+    direction: Option<String>,
+    name: Option<String>,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let resp = sync_api::update_folder(
+        &client,
+        folder_id,
+        UpdateFolderParams { enabled, direction, name },
+    )
+    .await?;
+    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+}
+
+/// 分页查询同步任务记录（历史列表）。status 空 = 全部状态。
+#[tauri::command]
+async fn list_sync_tasks(
+    status: Option<String>,
+    page: i32,
+    page_size: i32,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<SyncTaskPage, String> {
+    let client = make_client(&config.read())?;
+    let resp =
+        sync_api::list_tasks_paged(&client, status.as_deref().unwrap_or(""), page, page_size)
+            .await?;
+    api_data(resp, "list_sync_tasks")
+}
+
+/// 批量清理终态任务记录（completed/failed），返回删除条数。
+#[tauri::command]
+async fn clear_sync_tasks(
+    status: Option<String>,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<i64, String> {
+    let client = make_client(&config.read())?;
+    let resp = sync_api::clear_tasks(&client, status.as_deref().unwrap_or("")).await?;
+    if resp.is_ok() {
+        Ok(resp
+            .data
+            .and_then(|v| v.get("deleted").and_then(|d| d.as_i64()))
+            .unwrap_or(0))
+    } else {
+        Err(resp.message)
+    }
+}
+
 // ── Tauri 入口 ────────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -525,8 +577,9 @@ pub fn run() {
             get_available_disks, traverse_directory, upload_file, delete_file,
             build_download_url, get_download_history, delete_download_history,
             // 同步域
-            create_sync_folder, list_sync_folders, delete_sync_folder,
+            create_sync_folder, list_sync_folders, delete_sync_folder, update_sync_folder,
             list_pending_tasks, list_conflicts, resolve_conflict, delete_conflict,
+            list_sync_tasks, clear_sync_tasks,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

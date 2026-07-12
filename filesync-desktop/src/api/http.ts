@@ -30,12 +30,16 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
   const json = await res.json() as ApiEnvelope<T>
 
   if (json.code !== 200) throw new Error(json.message || `请求失败 (${path})`)
-  if (json.data === undefined || json.data === null) throw new Error(`${path}: data 为空`)
-  return json.data
+  // data 可为 null（更新/删除类接口成功即无数据），不视为错误
+  return json.data as T
 }
 
 export function httpPost<T>(path: string, body?: unknown): Promise<T> {
   return send<T>('POST', path, body)
+}
+
+export function httpPut<T = void>(path: string, body?: unknown): Promise<T> {
+  return send<T>('PUT', path, body)
 }
 
 export function httpGet<T>(path: string, params?: Record<string, string>): Promise<T> {

@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.sunyuanling.filesync.api.sync.SyncApi
 import com.sunyuanling.filesync.api.sync.SyncConflictInfo
 import com.sunyuanling.filesync.api.sync.SyncTaskInfo
+import com.sunyuanling.filesync.sync.SyncEngine
 import com.sunyuanling.filesync.util.DeviceInfoUtil
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -81,6 +82,33 @@ class SyncListViewModel(app: Application) : AndroidViewModel(app) {
                 }
             markBusy(id, false)
         }
+    }
+
+    /**
+     * 批量解决全部待处理冲突（以服务器为准的两种取舍）：
+     * - accept_server：放弃本地更改，主目录收敛服务端版本（强制对齐）；
+     * - keep_local  ：本地更改已暂存 .syncpending，以服务端当前版本为 base 重新上报。
+     */
+    fun resolveAllConflicts(resolution: String) {
+        val targets = _uiState.value.conflicts.map { it.id }
+        if (targets.isEmpty()) return
+        _uiState.value = _uiState.value.copy(busyConflictIds = targets.toSet())
+        viewModelScope.launch {
+            var failed = 0
+            for (id in targets) {
+                SyncApi.resolveConflict(id, resolution).onFailure { failed++ }
+            }
+            _uiState.value = _uiState.value.copy(
+                busyConflictIds = emptySet(),
+                error = if (failed > 0) "有 $failed 条冲突处理失败" else null,
+            )
+            refresh()
+        }
+    }
+
+    /** 与服务器重新对齐：触发引擎一轮追赶（执行积压任务 + scan 比对补齐）。 */
+    fun realign() {
+        SyncEngine.triggerCatchUp()
     }
 
     /** 删除冲突记录（不做取舍，仅清理残留）。 */

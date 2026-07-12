@@ -3,6 +3,7 @@ package sync
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -142,6 +143,19 @@ func (h *APIHandler) ListTasks(c *gin.Context) {
 	}
 	status := c.Query("status")
 	deviceID := c.Query("device_id")
+
+	// 带 page 参数走分页形状 {list,total,page,page_size}；不带保持旧的裸数组（兼容旧客户端）
+	if page, _ := strconv.Atoi(c.Query("page")); page > 0 {
+		pageSize, _ := strconv.Atoi(c.Query("page_size"))
+		ts, total, err := h.engine.ListTasksPaged(userID, status, deviceID, page, pageSize)
+		if err != nil {
+			jsonErr(c, 500, err.Error())
+			return
+		}
+		jsonOK(c, gin.H{"list": ts, "total": total, "page": page, "page_size": pageSize})
+		return
+	}
+
 	limit, _ := strconv.Atoi(c.Query("limit"))
 	ts, err := h.engine.ListTasks(userID, status, deviceID, limit)
 	if err != nil {
@@ -149,6 +163,42 @@ func (h *APIHandler) ListTasks(c *gin.Context) {
 		return
 	}
 	jsonOK(c, ts)
+}
+
+// ClearTasks 批量清理终态任务记录。query: status=completed,failed（默认两者）。
+func (h *APIHandler) ClearTasks(c *gin.Context) {
+	userID, ok := requireUser(c)
+	if !ok {
+		return
+	}
+	var statuses []string
+	if raw := c.Query("status"); raw != "" {
+		statuses = strings.Split(raw, ",")
+	}
+	n, err := h.engine.ClearTasks(userID, statuses)
+	if err != nil {
+		jsonErr(c, 500, err.Error())
+		return
+	}
+	jsonOK(c, gin.H{"deleted": n})
+}
+
+// DeleteTask 删除单条终态任务记录。
+func (h *APIHandler) DeleteTask(c *gin.Context) {
+	userID, ok := requireUser(c)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		jsonErr(c, 400, "无效的任务ID")
+		return
+	}
+	if err := h.engine.DeleteTask(userID, id); err != nil {
+		jsonErr(c, 400, err.Error())
+		return
+	}
+	jsonOK(c, nil)
 }
 
 func (h *APIHandler) PendingTasks(c *gin.Context) {

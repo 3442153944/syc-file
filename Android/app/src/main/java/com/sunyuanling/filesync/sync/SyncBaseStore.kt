@@ -86,6 +86,13 @@ object SyncBaseStore {
         scheduleSave()
     }
 
+    fun clearFolder(folderId: Long) {
+        val prefix = "$folderId|"
+        val toRemove = map.keys.filter { it.startsWith(prefix) }
+        toRemove.forEach { map.remove(it) }
+        if (toRemove.isNotEmpty()) scheduleSave()
+    }
+
     /** 该 folder 的全部基线（追赶扫描比对用），key 为 relative_path。 */
     fun folderSnapshot(folderId: Long): Map<String, BaseEntry> {
         val prefix = "$folderId|"

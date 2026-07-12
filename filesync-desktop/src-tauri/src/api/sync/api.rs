@@ -62,6 +62,36 @@ pub async fn list_pending_tasks(
     client.get(routes::SYNC_TASKS_PENDING, Some(&params)).await
 }
 
+/// 分页查询任务记录（历史列表用；status 空 = 全部状态）。
+pub async fn list_tasks_paged(
+    client: &ApiClient,
+    status: &str,
+    page: i32,
+    page_size: i32,
+) -> Result<ApiResponse<SyncTaskPage>, String> {
+    use std::collections::HashMap;
+    let mut params = HashMap::new();
+    params.insert("page", page.to_string());
+    params.insert("page_size", page_size.to_string());
+    if !status.is_empty() {
+        params.insert("status", status.to_string());
+    }
+    client.get(routes::SYNC_TASKS, Some(&params)).await
+}
+
+/// 批量清理终态任务记录（status 逗号分隔，空 = completed+failed）。
+pub async fn clear_tasks(
+    client: &ApiClient,
+    status: &str,
+) -> Result<ApiResponse<serde_json::Value>, String> {
+    let path = if status.is_empty() {
+        routes::SYNC_TASKS.to_string()
+    } else {
+        format!("{}?status={}", routes::SYNC_TASKS, status)
+    };
+    client.delete(&path).await
+}
+
 pub async fn complete_task(
     client: &ApiClient,
     task_id: u64,

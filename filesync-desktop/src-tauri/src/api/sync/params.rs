@@ -16,8 +16,12 @@ pub struct CreateFolderParams {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateFolderParams {
+    // None 的字段不序列化：服务端按 map 部分更新，null 会误写空值
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 

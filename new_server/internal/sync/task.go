@@ -137,6 +137,67 @@ func (e *Engine) ListTasks(userID uint, status, deviceID string, limit int) ([]m
 	return ts, nil
 }
 
+// ListTasksPaged 分页查询任务记录，返回 (列表, 总数)。page 从 1 开始。
+func (e *Engine) ListTasksPaged(userID uint, status, deviceID string, page, pageSize int) ([]model.SyncTask, int64, error) {
+	q := e.db.Model(&model.SyncTask{}).Where("user_id = ?", userID)
+	if status != "" {
+		q = q.Where("sync_status = ?", status)
+	}
+	if deviceID != "" {
+		q = q.Where("target_device_id = ? OR source_device_id = ?", deviceID, deviceID)
+	}
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 20
+	}
+	var ts []model.SyncTask
+	if err := q.Order("id desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&ts).Error; err != nil {
+		return nil, 0, err
+	}
+	return ts, total, nil
+}
+
+// clearableStatuses 允许批量清理/删除的终态。pending/syncing/waiting_unlock 是
+// worker 的在管状态，删了会破坏调度，一律拒绝。
+var clearableStatuses = map[string]bool{
+	model.SyncStatusCompleted: true,
+	model.SyncStatusFailed:    true,
+}
+
+// ClearTasks 批量删除该用户的终态任务记录（历史清理），返回删除条数。
+// statuses 为空默认 completed+failed。
+func (e *Engine) ClearTasks(userID uint, statuses []string) (int64, error) {
+	valid := make([]string, 0, len(statuses))
+	for _, s := range statuses {
+		if clearableStatuses[s] {
+			valid = append(valid, s)
+		}
+	}
+	if len(valid) == 0 {
+		valid = []string{model.SyncStatusCompleted, model.SyncStatusFailed}
+	}
+	res := e.db.Where("user_id = ? AND sync_status IN ?", userID, valid).Delete(&model.SyncTask{})
+	return res.RowsAffected, res.Error
+}
+
+// DeleteTask 删除单条终态任务记录。
+func (e *Engine) DeleteTask(userID uint, id uint64) error {
+	var t model.SyncTask
+	if err := e.db.Where("id = ? AND user_id = ?", id, userID).First(&t).Error; err != nil {
+		return fmt.Errorf("任务不存在")
+	}
+	if !clearableStatuses[t.SyncStatus] {
+		return fmt.Errorf("仅可删除已完成/失败的记录")
+	}
+	return e.db.Delete(&t).Error
+}
+
 // PendingTasksForDevice 返回某设备待执行（pending）的任务，供 WS 不可用时 HTTP 拉取。
 func (e *Engine) PendingTasksForDevice(userID uint, deviceID string) ([]model.SyncTask, error) {
 	var ts []model.SyncTask

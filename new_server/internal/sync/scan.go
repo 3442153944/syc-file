@@ -2,10 +2,15 @@ package sync
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"go.uber.org/zap"
 
 	"syc-file/internal/model"
+	"syc-file/pkg/logger"
 )
 
 // HandleScan 处理离线重连后的全量扫描比对：以 trunk 为权威，给该设备补派缺失/过期/多余的任务。
@@ -48,6 +53,18 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 	for rel, f := range relToFile {
 		if f.IsDeleted {
 			continue
+		}
+		// 自愈：trunk 有记录但服务端物理文件已丢（历史清理/半途删除残留）——
+		// 软删 trunk 并跳过，否则会永远派发注定失败的 download，Reaper 重试打转。
+		if !f.IsDirectory {
+			if _, statErr := os.Stat(f.FilePath); os.IsNotExist(statErr) {
+				now := time.Now()
+				e.db.Model(&f).Updates(map[string]interface{}{
+					"is_deleted": true, "deleted_at": now, "version": f.Version + 1,
+				})
+				logger.Logger.Warn("trunk 记录的物理文件缺失，已软删自愈", zap.String("path", f.FilePath))
+				continue
+			}
 		}
 		it, ok := findItem(items, rel)
 		if !ok {

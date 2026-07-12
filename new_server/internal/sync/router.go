@@ -12,6 +12,8 @@ func RegisterSyncRouter(rg *gin.RouterGroup, engine *Engine) {
 	s.POST("/notify", h.Notify)
 	s.POST("/scan", h.Scan)
 	s.GET("/tasks", h.ListTasks)
+	s.DELETE("/tasks", h.ClearTasks)
+	s.DELETE("/tasks/:id", h.DeleteTask)
 	s.GET("/tasks/pending", h.PendingTasks)
 	s.POST("/tasks/:id/complete", h.CompleteTask)
 	s.POST("/tasks/:id/failed", h.FailTask)

@@ -406,7 +406,7 @@ new_server/
 - 文件 `POST /v1/file/{available-disks,traverse-directory,upload,download-history,delete-download-history,delete}`、`GET /v1/file/download`（支持 Range，query：path/name/device_id）
 - 分片上传（重写版，详见 §9.5）：`POST /v1/file/upload/init`、`GET /v1/file/upload/status`、`POST /v1/file/upload/chunk`、`POST /v1/file/upload/complete`。旧 `POST /v1/file/upload`（multipart）仍保留但桌面/安卓已弃用。
 - WebSocket：`GET /v1/ws/connect`、`GET /v1/ws/my-devices`（所有人，自己的连接）、`GET /v1/ws/online`（**仅 admin**，所有在线用户设备）、`GET /v1/ws/stats`、`GET /v1/ws/user/:id/connections`、`POST /v1/ws/{send,broadcast,group,group/send}`、`DELETE /v1/ws/{conn/:conn_id,user/:id,device/:device_id}`、`GET /v1/ws/group/:name/users`
-- **同步**（`internal/sync/router.go`）：`POST/GET /v1/sync/folders`、`PUT/DELETE /v1/sync/folders/:id`、`POST /v1/sync/{notify,scan}`、`GET /v1/sync/tasks[?status=&device_id=&limit=]`、`GET /v1/sync/tasks/pending?device_id=`、`POST /v1/sync/tasks/:id/{complete,failed}`、`GET /v1/sync/conflicts`、`DELETE /v1/sync/conflicts/:id`
+- **同步**（`internal/sync/router.go`）：`POST/GET /v1/sync/folders`、`PUT/DELETE /v1/sync/folders/:id`、`POST /v1/sync/{notify,scan}`、`GET /v1/sync/tasks[?status=&device_id=&limit=]`（带 `page&page_size` 时返回分页形状 `{list,total,page,page_size}`）、`DELETE /v1/sync/tasks[?status=]`（批量清理终态记录，默认 completed+failed）、`DELETE /v1/sync/tasks/:id`（删单条终态记录）、`GET /v1/sync/tasks/pending?device_id=`、`POST /v1/sync/tasks/:id/{complete,failed,blocked}`、`GET /v1/sync/conflicts`、`POST /v1/sync/conflicts/:id/resolve`、`DELETE /v1/sync/conflicts/:id`
 
 > `config.yaml:30-33` 的 whitelist（`/ping`、`/register`）是前缀匹配，与真实路径 `/v1/user/register` 不符；因 AuthToken 非阻塞故无害，whitelist 实为摆设。
 

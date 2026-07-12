@@ -5,19 +5,21 @@ import {ref, onMounted, onUnmounted, computed, h} from 'vue'
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {listen, type UnlistenFn} from '@tauri-apps/api/event'
 import {open} from '@tauri-apps/plugin-dialog'
+import {useRouter} from 'vue-router'
 import {useMessage, useDialog} from 'naive-ui'
 import {
-  NCard, NSpace, NButton, NInput, NSelect, NTag, NDataTable, NEmpty, NText,
+  NCard, NSpace, NButton, NInput, NSelect, NTag, NDataTable, NEmpty, NText, NSwitch,
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {
-  createSyncFolder, listSyncFolders, deleteSyncFolder,
+  createSyncFolder, listSyncFolders, deleteSyncFolder, updateSyncFolder,
   listConflicts, resolveConflict, deleteConflict,
 } from '@/api/sync/syncApi'
 import type {SyncFolder, SyncConflict} from '@/api/sync/syncTypes'
 
 const message = useMessage()
 const dialog = useDialog()
+const router = useRouter()
 const inTauri = isTauri()
 
 const running = ref(false)
@@ -141,13 +143,35 @@ async function handleDeleteConflict(row: SyncConflict) {
   }
 }
 
+async function handleToggleFolder(row: SyncFolder, enabled: boolean) {
+  try {
+    await updateSyncFolder(row.id, {enabled})
+    row.enabled = enabled
+    message.success(enabled ? `已启用「${row.name}」` : `已停用「${row.name}」`)
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+const directionTagType = (d: string): 'info' | 'success' | 'warning' =>
+    d === 'two_way' ? 'info' : d === 'upload_only' ? 'success' : 'warning'
+
 const folderColumns: DataTableColumns<SyncFolder> = [
   {title: '名称', key: 'name', ellipsis: {tooltip: true}},
   {title: '本地目录', key: 'local_path', ellipsis: {tooltip: true}},
   {title: '远端目录', key: 'remote_path', ellipsis: {tooltip: true}},
   {
-    title: '方向', key: 'direction', width: 90,
-    render: (r) => directionOptions.find((o) => o.value === r.direction)?.label ?? r.direction,
+    title: '方向', key: 'direction', width: 88,
+    render: (r) => h(NTag, {size: 'small', type: directionTagType(r.direction), bordered: false},
+        {default: () => directionOptions.find((o) => o.value === r.direction)?.label ?? r.direction}),
+  },
+  {
+    title: '启用', key: 'enabled', width: 70,
+    render: (r) => h(NSwitch, {
+      size: 'small',
+      value: r.enabled,
+      onUpdateValue: (v: boolean) => handleToggleFolder(r, v),
+    }),
   },
   {
     title: '操作', key: 'actions', width: 80,
@@ -214,6 +238,7 @@ onUnmounted(() => {
             <n-button type="primary" :disabled="running" @click="handleStart">启动同步</n-button>
             <n-button :disabled="!running" @click="handleStop">停止同步</n-button>
             <n-button quaternary @click="refreshAll">刷新</n-button>
+            <n-button quaternary @click="router.push('/transfers')">同步记录 →</n-button>
           </n-space>
         </n-space>
         <div class="meta">

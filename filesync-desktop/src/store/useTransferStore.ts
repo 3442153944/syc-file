@@ -61,6 +61,10 @@ export const useTransferStore = defineStore('transfer', () => {
 
   let unlisteners: UnlistenFn[] = []
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  let clockTimer: ReturnType<typeof setInterval> | null = null
+  // 响应式时钟：computed 里裸用 Date.now() 没有响应性，时间流逝不会触发重算，
+  // 曾导致「同步完成后指示器永远转圈」。
+  const now = ref(Date.now())
 
   // ── getters ──────────────────────────────────────────────────────────────
   const activeUploads = computed(() => uploads.value.filter((u) => u.status === 'uploading'))
@@ -75,7 +79,7 @@ export const useTransferStore = defineStore('transfer', () => {
       activeSyncUploads.value.length > 0 ||
       (syncEngineRunning.value &&
         wsConnected.value &&
-        Date.now() - lastSyncActiveAt.value < 8000),
+        now.value - lastSyncActiveAt.value < 8000),
   )
 
   /** 图标状态：优先级 上传 > 下载 > 同步 > 空闲 */
@@ -156,16 +160,27 @@ export const useTransferStore = defineStore('transfer', () => {
         'upload-progress',
         (e) => {
           const p = e.payload
-          // 同步引擎触发的上传（upload_worker），进同步 tab
-          syncEvents.value.unshift({
-            id: uid(),
-            path: p.path,
-            kind: 'upload',
-            status: p.status,
-            error: p.error,
-            time: Date.now(),
-          })
-          if (syncEvents.value.length > MAX_LIST) syncEvents.value.length = MAX_LIST
+          // 同步引擎触发的上传（upload_worker），进同步 tab。
+          // 按 path upsert：done/error 事件更新原 uploading 行，而不是另起一行——
+          // 否则 uploading 行永远停留在"进行中"，activeSyncUploads 恒 >0，指示器转圈不止。
+          const existing = syncEvents.value.find(
+            (s) => s.kind === 'upload' && s.path === p.path && s.status === 'uploading',
+          )
+          if (existing) {
+            existing.status = p.status
+            existing.error = p.error
+            existing.time = Date.now()
+          } else {
+            syncEvents.value.unshift({
+              id: uid(),
+              path: p.path,
+              kind: 'upload',
+              status: p.status,
+              error: p.error,
+              time: Date.now(),
+            })
+            if (syncEvents.value.length > MAX_LIST) syncEvents.value.length = MAX_LIST
+          }
           bumpSyncActive()
         },
       ),
@@ -188,6 +203,9 @@ export const useTransferStore = defineStore('transfer', () => {
     } catch {
       /* 非 Tauri 忽略 */
     }
+    clockTimer = setInterval(() => {
+      now.value = Date.now()
+    }, 2000)
   }
 
   async function refreshSyncData() {
@@ -204,6 +222,8 @@ export const useTransferStore = defineStore('transfer', () => {
     unlisteners = []
     if (pollTimer) clearInterval(pollTimer)
     pollTimer = null
+    if (clockTimer) clearInterval(clockTimer)
+    clockTimer = null
   }
 
   // ── 手动上传（并行）──────────────────────────────────────────────────────

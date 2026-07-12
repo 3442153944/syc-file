@@ -74,6 +74,17 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
         None => return,
     };
 
+    // 回声抑制：当前内容与基线一致 → 多半是本机刚从服务端下载/发布的文件被
+    // watcher 抓到，原样回传只会让服务端再派发一圈（乒乓循环）。直接跳过。
+    if let Some(base) = crate::base_store::get(task.folder_id, &task.relative_path) {
+        if let Ok(cur) = chunked_uploader::file_blake3_hex(&task.local_path) {
+            if cur == base {
+                crate::logger::debug("upload", format!("内容与基线一致，跳过回传: {}", task.relative_path));
+                return;
+            }
+        }
+    }
+
     emit_progress(app, &path_str, "uploading", None);
 
     // 同步场景需要覆盖已存在文件：先删远端旧文件（不存在则忽略 404），再分片上传

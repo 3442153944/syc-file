@@ -34,6 +34,19 @@ pub struct SyncTask {
     pub created_at: String,
 }
 
+/// 分页任务记录（GET /sync/tasks?page=..），对应后端分页响应形状。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncTaskPage {
+    #[serde(default)]
+    pub list: Vec<SyncTask>,
+    #[serde(default)]
+    pub total: i64,
+    #[serde(default)]
+    pub page: i32,
+    #[serde(default)]
+    pub page_size: i32,
+}
+
 /// 冲突待办记录（GET /sync/conflicts），对应后端 sync_conflict 表。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConflict {

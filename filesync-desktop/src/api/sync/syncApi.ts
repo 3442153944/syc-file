@@ -1,7 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
-import { httpPost, httpGet, httpDelete } from '../http'
+import { httpPost, httpGet, httpPut, httpDelete } from '../http'
 import { getDeviceId } from '../platform'
-import type { SyncFolder, SyncTask, SyncConflict, ConflictResolution } from './syncTypes'
+import type { SyncFolder, SyncTask, SyncTaskPage, SyncConflict, ConflictResolution } from './syncTypes'
 
 export async function createSyncFolder(
   name: string,
@@ -27,9 +27,37 @@ export async function deleteSyncFolder(folderId: number): Promise<void> {
   await httpDelete(`/sync/folders/${folderId}`)
 }
 
+/** 更新同步文件夹（仅传需要改的字段）。 */
+export async function updateSyncFolder(
+  folderId: number,
+  updates: { enabled?: boolean; direction?: string; name?: string },
+): Promise<void> {
+  if (isTauri()) return invoke('update_sync_folder', { folderId, ...updates })
+  await httpPut(`/sync/folders/${folderId}`, updates)
+}
+
 export async function listPendingTasks(): Promise<SyncTask[]> {
   if (isTauri()) return invoke<SyncTask[]>('list_pending_tasks')
   return httpGet<SyncTask[]>('/sync/tasks/pending', { device_id: getDeviceId() })
+}
+
+/** 分页查询同步任务记录（历史）。status 空 = 全部状态。 */
+export async function listSyncTasks(
+  page: number,
+  pageSize: number,
+  status = '',
+): Promise<SyncTaskPage> {
+  if (isTauri()) return invoke<SyncTaskPage>('list_sync_tasks', { status, page, pageSize })
+  return httpGet<SyncTaskPage>('/sync/tasks', {
+    page: String(page), page_size: String(pageSize), ...(status ? { status } : {}),
+  })
+}
+
+/** 批量清理终态任务记录（completed/failed），返回删除条数。 */
+export async function clearSyncTasks(status = ''): Promise<number> {
+  if (isTauri()) return invoke<number>('clear_sync_tasks', { status })
+  const r = await httpDelete<{ deleted: number }>(`/sync/tasks${status ? `?status=${status}` : ''}`)
+  return (r as any)?.deleted ?? 0
 }
 
 export async function listConflicts(): Promise<SyncConflict[]> {

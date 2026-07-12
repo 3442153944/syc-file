@@ -25,7 +25,7 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "请先登录", "data": nil})
 			return
 		}
 		userClaims := claims.(*token.Claims)
@@ -35,8 +35,12 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 		name := c.Query("name")
 		deviceIDStr := c.Query("device_id")
 
+		// 注意：本端点是文件流，错误必须用真实 HTTP 状态码。
+		// 若按项目惯例回 200+JSON 错误体，客户端会把这段 JSON 当文件字节落盘，
+		// 表现为"下载成功但 hash 不匹配"（所有失败的 actual hash 相同），
+		// 同步任务永远失败 + Reaper 无限重试。
 		if path == "" || name == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少必要参数 path 或 name", "data": nil})
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "缺少必要参数 path 或 name", "data": nil})
 			return
 		}
 
@@ -56,23 +60,23 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 
 		if !isPathAllowedDownload(fullPath) {
 			logger.Logger.Warn("下载路径访问被拒绝", zap.Uint("user_id", userID), zap.String("path", fullPath))
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
 			return
 		}
 
 		fileInfo, err := os.Stat(fullPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				c.JSON(http.StatusOK, gin.H{"code": 404, "message": "文件不存在", "data": nil})
+				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "文件不存在", "data": nil})
 			} else {
 				logger.Logger.Error("获取文件信息失败", zap.Error(err), zap.String("path", fullPath))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "获取文件信息失败", "data": nil})
+				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取文件信息失败", "data": nil})
 			}
 			return
 		}
 
 		if fileInfo.IsDir() {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "不能下载目录", "data": nil})
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "不能下载目录", "data": nil})
 			return
 		}
 
@@ -92,7 +96,7 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 		file, err := os.Open(fullPath)
 		if err != nil {
 			logger.Logger.Error("打开文件失败", zap.Error(err), zap.String("path", fullPath))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "打开文件失败", "data": nil})
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "打开文件失败", "data": nil})
 			return
 		}
 		defer file.Close()

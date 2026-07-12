@@ -82,6 +82,16 @@ func (e *Engine) handleCreateOrModify(userID uint, source string, folder model.S
 	}
 
 	if err == nil {
+		// 回声抑制（幂等吸收）：上报内容与 trunk 当前版本完全一致 → 无事发生。
+		// 不升版本、不派发。否则"设备下载→watcher 探测→原样回传"会在设备间无限打乒乓
+		//（A 传→派发给 B→B 落盘→B 回传→再派发给 A→……），version 无意义膨胀。
+		if !file.IsDeleted {
+			same := (!r.IsDir && r.FileHash != "" && hashOf(file) == r.FileHash) ||
+				(r.IsDir && file.IsDirectory)
+			if same {
+				return nil
+			}
+		}
 		// trunk 已有该路径：先判冲突（base CAS）
 		if e.isConflict(file, r) {
 			e.handleConflict(userID, source, folder, r, file)

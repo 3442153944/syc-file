@@ -13,7 +13,8 @@ import (
 
 // isConflict 基于 base CAS 判定一次新建/修改上报是否与 trunk 冲突。
 //
-// 不算冲突的情形：目录、trunk 记录已删除、trunk 尚无内容、内容未变（hash 相同）。
+// 不算冲突的情形：目录、trunk 记录已删除、trunk 尚无内容、内容未变（hash 相同）、
+// 客户端未提供 base_hash（不知道旧版本 → 视为首次上传，接受为准）。
 // 算冲突：trunk 有内容且与新内容不同，且客户端 base_hash != trunk 当前 hash
 // （即源端基于一个过期版本做的修改 —— 并发分叉）。
 func (e *Engine) isConflict(file model.File, r FileChangeReport) bool {
@@ -22,6 +23,9 @@ func (e *Engine) isConflict(file model.File, r FileChangeReport) bool {
 	}
 	serverHash := derefStr(file.FileHash)
 	if serverHash == "" || serverHash == r.FileHash {
+		return false
+	}
+	if r.BaseHash == "" {
 		return false
 	}
 	return r.BaseHash != serverHash

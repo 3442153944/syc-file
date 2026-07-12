@@ -50,3 +50,11 @@ export interface SyncConflict {
 
 /** 冲突解决方式 */
 export type ConflictResolution = 'accept_server' | 'keep_local'
+
+/** 分页任务记录（GET /sync/tasks?page=..） */
+export interface SyncTaskPage {
+  list: SyncTask[]
+  total: number
+  page: number
+  page_size: number
+}

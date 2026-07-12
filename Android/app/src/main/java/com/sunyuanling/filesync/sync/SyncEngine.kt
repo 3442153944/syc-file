@@ -171,8 +171,17 @@ object SyncEngine {
         log("同步引擎已停止")
     }
 
-    /** 映射变更（配置页保存后调用）：重建 watcher 并触发一轮追赶。 */
-    fun onMappingsChanged() {
+    /** 映射变更（配置页保存后调用）：清除旧基线、重建 watcher 并触发一轮追赶。 */
+    fun onMappingsChanged(clearedFolderId: Long? = null) {
+        if (clearedFolderId != null) {
+            SyncBaseStore.clearFolder(clearedFolderId)
+            log("已清除 folder=$clearedFolderId 的旧基线")
+        }
+        triggerCatchUp()
+    }
+
+    /** 手动触发一轮追赶（执行积压任务 + 先传本地变更再 scan 比对）。待处理页「重新对齐」用。 */
+    fun triggerCatchUp() {
         val s = scope ?: return
         s.launch {
             runCatching { catchUp() }.onFailure { log("追赶失败: ${it.message}") }
@@ -230,28 +239,31 @@ object SyncEngine {
         }
 
         when (t.taskType) {
+            // 基线/静音键统一用消毒后的 rel（与 watcher 事件推导的 fs 形式一致），
+            // 绝不能用 t.relativePath 原文——形式不一致会导致基线查不到，
+            // 下载下来的文件被 watcher 当新文件回传，设备间打乒乓。
             "download" -> downloadSem.withPermit {
-                log("下载 ${t.relativePath}")
-                downloadAndPublish(localRoot, rel, t.fileName, t.remoteDir, t.fileHash.ifEmpty { null })
+                log("下载 $rel")
+                downloadAndPublish(t.folderId, localRoot, rel, t.fileName, t.remoteDir, t.fileHash.ifEmpty { null })
                     .onSuccess { hash ->
                         val f = File(localRoot, rel)
-                        SyncBaseStore.set(t.folderId, t.relativePath, hash, f.length(), f.lastModified() / 1000)
+                        SyncBaseStore.set(t.folderId, rel, hash, f.length(), f.lastModified() / 1000)
                         SyncApi.completeTask(t.taskId, hash)
-                        log("已下载并发布 ${t.relativePath}")
+                        log("已下载并发布 $rel")
                     }
                     .onFailure { e ->
                         SyncApi.failTask(t.taskId, e.message ?: "下载失败")
-                        log("下载失败 ${t.relativePath}: ${e.message}")
+                        log("下载失败 $rel: ${e.message}")
                     }
             }
 
             "delete" -> {
                 val f = File(localRoot, rel)
-                muteWatch(t.folderId, t.relativePath)
+                muteWatch(t.folderId, rel)
                 f.delete() // 不存在也视为成功
-                SyncBaseStore.remove(t.folderId, t.relativePath)
+                SyncBaseStore.remove(t.folderId, rel)
                 SyncApi.completeTask(t.taskId)
-                log("已删除本地 ${t.relativePath}")
+                log("已删除本地 $rel")
             }
 
             "mkdir" -> {
@@ -263,6 +275,7 @@ object SyncEngine {
 
     /** 下载 → 流式 blake3 校验 → 写 .synctmp → 原子 rename 发布。返回落盘 hash。 */
     private suspend fun downloadAndPublish(
+        folderId: Long,
         localRoot: File,
         rel: String,
         fileName: String,
@@ -274,9 +287,10 @@ object SyncEngine {
         val tmp = File(tmpDir, "$fileName.${UUID.randomUUID()}.tmp")
         try {
             val hasher = Blake3Util.newHasher()
-            Request.client.newCall(OkRequest.Builder().url(url).get().build()).execute().use { resp ->
-                if (!resp.isSuccessful) return Result.failure(Exception("HTTP ${resp.code}"))
-                val body = resp.body ?: return Result.failure(Exception("响应体为空"))
+            val contentLength = Request.client.newCall(OkRequest.Builder().url(url).get().build()).execute().use { resp ->
+                if (!resp.isSuccessful) return Result.failure(Exception("HTTP ${resp.code} url=$url"))
+                val body = resp.body ?: return Result.failure(Exception("响应体为空 url=$url"))
+                var total = 0L
                 tmp.outputStream().use { out ->
                     body.byteStream().use { input ->
                         val buf = ByteArray(256 * 1024)
@@ -285,11 +299,14 @@ object SyncEngine {
                             if (n < 0) break
                             out.write(buf, 0, n)
                             hasher.update(if (n == buf.size) buf else buf.copyOf(n))
+                            total += n
                         }
                     }
                 }
+                total
             }
             val actual = Blake3Util.toHex(hasher.digest())
+            log("下载校验 url=$url actualHash=$actual size=$contentLength expectedHash=$expectedHash")
             if (!expectedHash.isNullOrEmpty() && !expectedHash.equals(actual, ignoreCase = true)) {
                 return Result.failure(Exception("hash 不匹配 expected=$expectedHash actual=$actual"))
             }
@@ -297,7 +314,7 @@ object SyncEngine {
             val final = File(localRoot, rel)
             final.parentFile?.mkdirs()
             // 发布产生的本地事件不能再被当作变更上报回环
-            muteWatch(folderIdOf(localRoot) ?: -1, rel)
+            muteWatch(folderId, rel)
             if (!tmp.renameTo(final)) {
                 tmp.copyTo(final, overwrite = true)
                 tmp.delete()
@@ -552,10 +569,14 @@ object SyncEngine {
                         fileSize = complete.fileSize, fileHash = complete.fileHash,
                         baseHash = baseHash, mtime = file.lastModified() / 1000,
                     )
-                )
-                // 被接受则 trunk 即本内容；若实际冲突，conflict 事件会再纠正基线
-                SyncBaseStore.set(folder.id, rel, complete.fileHash, file.length(), file.lastModified() / 1000)
-                log("已上传并上报 $rel")
+                ).onSuccess {
+                    // 被接受则 trunk 即本内容；若实际冲突，conflict 事件会再纠正基线。
+                    // notify 失败则不落基线，留给下次追赶重报。
+                    SyncBaseStore.set(folder.id, rel, complete.fileHash, file.length(), file.lastModified() / 1000)
+                    log("已上传并上报 $rel")
+                }.onFailure { e ->
+                    log("上报失败 $rel（基线未更新，追赶时重报）: ${e.message}")
+                }
             }.onFailure { e ->
                 log("上传失败 $rel: ${e.message}")
             }
@@ -575,21 +596,21 @@ object SyncEngine {
         val pendDir = File(localRoot, ".syncpending").apply { mkdirs() }
         val quarantine = File(pendDir, "${cf.conflictId}_${cf.fileName}")
         if (main.exists()) {
-            muteWatch(cf.folderId, cf.relativePath)
+            muteWatch(cf.folderId, rel)
             if (!main.renameTo(quarantine)) {
                 runCatching { main.copyTo(quarantine, overwrite = true); main.delete() }
             }
         }
-        log("冲突 #${cf.conflictId} ${cf.relativePath}：本地版已隔离，收敛服务端版本")
+        log("冲突 #${cf.conflictId} $rel：本地版已隔离，收敛服务端版本")
 
         // 2) 主目录收敛服务端版本
         val remoteDir = joinRemote(folder.remotePath, rel.substringBeforeLast('/', ""))
         downloadSem.withPermit {
-            downloadAndPublish(localRoot, rel, cf.fileName, remoteDir, cf.serverHash.ifEmpty { null })
+            downloadAndPublish(cf.folderId, localRoot, rel, cf.fileName, remoteDir, cf.serverHash.ifEmpty { null })
                 .onSuccess { hash ->
-                    SyncBaseStore.set(cf.folderId, cf.relativePath, hash, main.length(), main.lastModified() / 1000)
+                    SyncBaseStore.set(cf.folderId, rel, hash, main.length(), main.lastModified() / 1000)
                 }
-                .onFailure { log("冲突收敛下载失败 ${cf.relativePath}: ${it.message}") }
+                .onFailure { log("冲突收敛下载失败 $rel: ${it.message}") }
         }
     }
 
@@ -626,10 +647,6 @@ object SyncEngine {
     }
 
     // ------------------------------------------------------------------ 工具
-
-    private fun folderIdOf(localRoot: File): Long? =
-        SyncMappingStore.mappings.value.entries
-            .firstOrNull { it.value.localPath == localRoot.absolutePath }?.key
 
     private fun remoteDirFor(folderId: Long, relativePath: String): String? {
         val folder = folders.value[folderId] ?: return null
