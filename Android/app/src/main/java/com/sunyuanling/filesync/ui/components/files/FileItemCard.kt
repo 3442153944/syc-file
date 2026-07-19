@@ -25,6 +25,8 @@ fun FileItemCard(
     item: FileItem,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -34,6 +36,11 @@ fun FileItemCard(
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
+        colors = if (selected) {
+            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+        } else {
+            CardDefaults.cardColors()
+        },
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
     ) {
         Row(
@@ -87,20 +94,26 @@ fun FileItemCard(
                 }
             }
 
-            // 箭头（仅文件夹）或下载图标（文件）
-            if (item.isDir) {
-                Icon(
-                    imageVector = Icons.Default.ChevronRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                Icon(
-                    imageVector = Icons.Default.Download,
-                    contentDescription = "下载",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
+            // 多选模式显示勾选框；否则箭头（文件夹）/下载图标（文件）
+            when {
+                selectionMode -> {
+                    Checkbox(checked = selected, onCheckedChange = null)
+                }
+                item.isDir -> {
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                else -> {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = "下载",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
     }

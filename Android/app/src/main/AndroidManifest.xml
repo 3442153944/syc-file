@@ -48,6 +48,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- 强制保活：申请加入电池优化白名单（同步设置页跳系统弹窗） -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- 应用内更新：安装 APK 需要 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
             android:allowBackup="true"
@@ -79,6 +81,17 @@
                 android:name=".service.SyncKeepAliveService"
                 android:exported="false"
                 android:foregroundServiceType="dataSync" />
+
+        <!-- 应用内更新：向系统安装器暴露下载好的 APK -->
+        <provider
+                android:name="androidx.core.content.FileProvider"
+                android:authorities="${applicationId}.fileprovider"
+                android:exported="false"
+                android:grantUriPermissions="true">
+            <meta-data
+                    android:name="android.support.FILE_PROVIDER_PATHS"
+                    android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

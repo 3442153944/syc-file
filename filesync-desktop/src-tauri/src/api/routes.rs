@@ -68,3 +68,10 @@ pub const SYNC_CONFLICTS: &str = "/sync/conflicts";
 pub const SYNC_CONFLICT_BY_ID: &str = "/sync/conflicts/{}";
 /// 路径参数：conflict_id；解决冲突 accept_server / keep_local
 pub const SYNC_CONFLICT_RESOLVE: &str = "/sync/conflicts/{}/resolve";
+
+// ── 应用更新 ──────────────────────────────────────────────────────────────────
+pub const UPDATE_CHECK: &str = "/update/check";
+pub const UPDATE_RELEASES: &str = "/update/releases";
+pub const UPDATE_PUBLISH: &str = "/update/publish";
+/// 路径参数：release_id
+pub const UPDATE_RELEASE_BY_ID: &str = "/update/releases/{}";

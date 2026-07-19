@@ -57,3 +57,19 @@ import kotlinx.serialization.Serializable
  * 设备监控列表*/
 
 @Serializable data object MonitorListDestination
+/**
+ * 文件在线预览页面。
+ * 携带定位远端文件所需的信息，预览器据 [extension]/[name] 分派到图片/视频/音频/PDF/文本/Office 渲染。
+ * @param path 远端文件绝对路径（如 E:\FileSync\a.mp4），类型安全导航会自动做 URL 编码
+ * @param name 文件名
+ * @param size 文件大小（字节），用于展示与部分渲染决策
+ * @param extension 扩展名（不含点，可空串，为空时回退按 name 推断）
+ * @param deviceId 归属设备 id（可空串）
+ */
+@Serializable data class PreviewDestination(
+    val path: String,
+    val name: String,
+    val size: Long = 0,
+    val extension: String = "",
+    val deviceId: String = ""
+)

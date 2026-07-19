@@ -9,6 +9,7 @@ import (
 	"syc-file/internal/handler/user"
 	"syc-file/internal/middleware"
 	"syc-file/internal/sync"
+	"syc-file/internal/update"
 	"syc-file/internal/ws"
 )
 
@@ -28,4 +29,5 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	v1.POST("/user/change-password", user.HandlerFuncChangePassword(db, redisClient))
 	ws.RegisterWSRouter(v1, db, redisClient)
 	sync.RegisterSyncRouter(v1, engine)
+	update.RegisterUpdateRouter(v1, db)
 }

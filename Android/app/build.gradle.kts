@@ -13,10 +13,10 @@ android {
 
     defaultConfig {
         applicationId = "com.sunyuanling.filesync"
-        minSdk = 24
+        minSdk = 26 // POI 5.x / log4j-api 用 invoke-polymorphic（MethodHandle），Android dex 仅在 API≥26 支持
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,6 +33,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // POI 用到 java.time 等 API，minSdk 24 需核心库脱糖
+        isCoreLibraryDesugaringEnabled = true
     }
     buildFeatures {
         compose = true
@@ -40,6 +42,23 @@ android {
     kotlin {
         compilerOptions {
             jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+        }
+    }
+    // POI / xmlbeans / commons-* 携带重复的 license/notice/version 元数据，打包时需去重。
+    // 注意：不要排除 .xsb（xmlbeans 编译后的 schema，运行期加载）与 META-INF/services（ServiceLoader 工厂），否则 OOXML 解析会崩。
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/license.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/notice.txt",
+                "META-INF/*.kotlin_module",
+                "META-INF/versions/**"
+            )
         }
     }
 }
@@ -101,4 +120,15 @@ dependencies {
     implementation(libs.okio)
     implementation(libs.coil)
     implementation(kotlin("reflect"))
+
+    // 预览：Media3（视频/音频流式播放）
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
+
+    // 预览：Apache POI（Office 文档应用内解析）
+    implementation(libs.poi.ooxml)
+    implementation(libs.poi.scratchpad)
+
+    // 核心库脱糖（POI 的 java.time 等）
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 }

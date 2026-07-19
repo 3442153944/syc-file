@@ -83,6 +83,7 @@ func main() {
 		&model.StorageConfig{},
 		&model.ShareRecord{},
 		&model.SyncFolder{},
+		&model.AppRelease{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}

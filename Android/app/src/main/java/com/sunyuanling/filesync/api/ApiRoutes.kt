@@ -134,4 +134,12 @@ object ApiRoutes {
 
     /** GET /v1/sync/folders —— 同步文件夹列表 */
     const val SYNC_FOLDERS = "/sync/folders"
+
+    // ==================== 应用更新（internal/update/router.go） ====================
+
+    /** GET /v1/update/check —— 检查更新（query：platform + version_code） */
+    const val UPDATE_CHECK = "/update/check"
+
+    /** GET /v1/update/latest —— 最新上架版本（query：platform） */
+    const val UPDATE_LATEST = "/update/latest"
 }

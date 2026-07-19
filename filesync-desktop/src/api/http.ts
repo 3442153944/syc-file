@@ -13,6 +13,21 @@ interface ApiEnvelope<T> {
   data?: T
 }
 
+/**
+ * 携带业务码 + HTTP 状态码的错误。继承 Error 故 `.message`/`String(e)` 仍可用（不破坏既有 catch），
+ * 另外暴露 `.code`（后端信封 code，如 401/403）与 `.status`（HTTP 状态码）供调用方按码分支处理。
+ */
+export class ApiError extends Error {
+  code: number
+  status: number
+  constructor(message: string, code: number, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.code = code
+    this.status = status
+  }
+}
+
 async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
   const url = `${getServerUrl()}/v1${path}`
   const token = getToken()
@@ -26,10 +41,26 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
     init.body = JSON.stringify(body)
   }
 
-  const res = await fetch(url, init)
-  const json = await res.json() as ApiEnvelope<T>
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch (e: any) {
+    // 网络层失败（DNS/连接/CORS 等），无 HTTP 状态
+    throw new ApiError(`网络请求失败: ${e?.message || e}`, -1, 0)
+  }
 
-  if (json.code !== 200) throw new Error(json.message || `请求失败 (${path})`)
+  const text = await res.text()
+  let json: ApiEnvelope<T>
+  try {
+    json = JSON.parse(text) as ApiEnvelope<T>
+  } catch {
+    throw new ApiError(`响应解析失败 (HTTP ${res.status}): ${text.slice(0, 200)}`, -1, res.status)
+  }
+
+  if (json.code !== 200) {
+    // 后端约定即使业务失败也回 HTTP 200 + body code；把 body code 与 HTTP status 一并带出
+    throw new ApiError(json.message || `请求失败 (${path})`, json.code, res.status)
+  }
   // data 可为 null（更新/删除类接口成功即无数据），不视为错误
   return json.data as T
 }

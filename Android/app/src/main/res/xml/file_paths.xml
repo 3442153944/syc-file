@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 应用内更新下载的 APK：外部/内部缓存下的 update/ 目录 -->
+    <external-cache-path name="update_ext" path="update/" />
+    <cache-path name="update_int" path="update/" />
+</paths>

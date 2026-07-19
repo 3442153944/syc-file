@@ -47,8 +47,10 @@ import com.sunyuanling.filesync.router.LoginDestination
 import com.sunyuanling.filesync.router.PermissionDestination
 import com.sunyuanling.filesync.router.TopLevelDestination
 import com.sunyuanling.filesync.ui.components.notice.DownloadNotificationHelper
+import com.sunyuanling.filesync.ui.components.update.UpdateDialog
 import com.sunyuanling.filesync.service.SyncKeepAliveService
 import com.sunyuanling.filesync.sync.SyncEngine
+import com.sunyuanling.filesync.update.UpdateController
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -204,6 +206,9 @@ fun FileSyncApp(startDestination: Any) {
             if (AppConfig.autoSyncEnabled) {
                 SyncEngine.start(context)
             }
+            // 应用更新：监听 WS app_update 推送 + 启动时检查一次
+            UpdateController.startObserving(context)
+            UpdateController.checkForUpdate(context)
         }
     }
 
@@ -251,6 +256,8 @@ fun FileSyncApp(startDestination: Any) {
                 navController = navController,
                 modifier = Modifier.padding(innerPadding),
             )
+            // 全局更新提示（有可用更新时弹出，强制更新不可关闭）
+            UpdateDialog()
         }
     }
 }

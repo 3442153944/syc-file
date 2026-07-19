@@ -11,6 +11,7 @@ import com.sunyuanling.filesync.ui.screen.FileSearchScreen
 import com.sunyuanling.filesync.router.FileDetailDestination
 import com.sunyuanling.filesync.router.FileSearchDestination
 import com.sunyuanling.filesync.router.FileUploadDestination
+import com.sunyuanling.filesync.router.PreviewDestination
 import com.sunyuanling.filesync.router.SyncFolderMapDestination
 import com.sunyuanling.filesync.router.SyncListDestination
 import com.sunyuanling.filesync.router.TransferDestination
@@ -19,6 +20,7 @@ import com.sunyuanling.filesync.ui.screen.files.FileTransferListScreen
 import com.sunyuanling.filesync.ui.screen.files.FileUploadScreen
 import com.sunyuanling.filesync.ui.screen.files.SyncFolderMapScreen
 import com.sunyuanling.filesync.ui.screen.files.SyncListScreen
+import com.sunyuanling.filesync.ui.screen.preview.PreviewScreen
 
 @RequiresApi(Build.VERSION_CODES.O)
 fun NavGraphBuilder.fileGraph(navController: NavHostController) {
@@ -60,5 +62,14 @@ fun NavGraphBuilder.fileGraph(navController: NavHostController) {
     }
     composable<SyncFolderMapDestination> {
         SyncFolderMapScreen(navController = navController)
+    }
+    /**
+     * 文件在线预览*/
+    composable<PreviewDestination> {
+        val dest: PreviewDestination = it.toRoute()
+        PreviewScreen(
+            args = dest,
+            onBackClick = { navController.navigateUp() }
+        )
     }
 }

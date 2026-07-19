@@ -50,6 +50,20 @@ export const useMenuConfig=()=>{
             ]
         },
         {
+            name: "应用更新",
+            path: "/update",
+            icon: "setting",
+            click: () => router.push("/update/manage"),
+            children: [
+                {
+                    name: "版本发布",
+                    path: "/update/manage",
+                    icon: "setting",
+                    click: () => router.push("/update/manage"),
+                }
+            ]
+        },
+        {
             name: "系统监控",
             path: "/monitor",
             icon: "setting",

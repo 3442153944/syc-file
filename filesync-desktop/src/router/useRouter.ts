@@ -51,6 +51,11 @@ export const router = createRouter({
                     component: () => import("../views/sync/SyncManage.vue")
                 },
                 {
+                    path: "update/manage",
+                    name: "AppUpdateManage",
+                    component: () => import("../views/update/AppUpdateManage.vue")
+                },
+                {
                     path: "transfers",
                     name: "Transfers",
                     component: () => import("../views/transfer/TransferList.vue")

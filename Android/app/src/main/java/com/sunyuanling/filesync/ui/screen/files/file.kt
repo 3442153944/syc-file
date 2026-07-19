@@ -3,6 +3,7 @@ package com.sunyuanling.filesync.ui.screen.files
 
 import android.os.Build
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -20,7 +21,6 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.FolderCopy
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
@@ -32,8 +32,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +49,7 @@ import com.example.filesync.data.sync.WebSocketManager
 import com.example.filesync.data.sync.WsState
 import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.router.FileUploadDestination
+import com.sunyuanling.filesync.router.PreviewDestination
 import com.sunyuanling.filesync.router.SyncFolderMapDestination
 import com.sunyuanling.filesync.router.SyncListDestination
 import com.sunyuanling.filesync.router.SyncSettingsDestination
@@ -65,7 +68,6 @@ import com.sunyuanling.filesync.ui.viewModel.transmission.DownloadListViewModel
 import com.sunyuanling.filesync.util.RootHelper
 import com.sunyuanling.filesync.api.file.FileItem
 import com.sunyuanling.filesync.router.TransferDestination
-import com.sunyuanling.filesync.util.formatFileSize
 import java.io.File
 
 @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
@@ -89,10 +91,29 @@ fun FileScreen(
     val fileError by fileListViewModel.error.collectAsState()
     val pathStack by fileListViewModel.pathStack.collectAsState()
 
-    var currentDiskPath by remember { mutableStateOf<String?>(null) }
-    var showDownloadDialog by remember { mutableStateOf(false) }
-    var selectedFileForDownload by remember { mutableStateOf<FileItem?>(null) }
+    // 用 rememberSaveable：导航到预览页会销毁本界面的 composition，返回时需恢复
+    // "正在浏览某磁盘"这一状态，否则会退回磁盘列表（文件主页）
+    var currentDiskPath by rememberSaveable { mutableStateOf<String?>(null) }
     var showDirectoryPicker by remember { mutableStateOf(false) }
+
+    // 多选下载：长按进入多选模式，勾选后批量并发下载
+    var selectionMode by remember { mutableStateOf(false) }
+    val selectedPaths = remember { mutableStateListOf<String>() }
+    // 点"下载"后选择保存目录期间待下载的文件（批量）
+    var pendingDownload by remember { mutableStateOf<List<FileItem>>(emptyList()) }
+
+    val fileItems = fileData?.items ?: emptyList()
+    val sortedItems = remember(fileItems) {
+        fileItems.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
+    }
+
+    fun exitSelection() {
+        selectionMode = false
+        selectedPaths.clear()
+    }
+
+    // 切换目录时退出多选
+    LaunchedEffect(fileData?.currentPath) { exitSelection() }
 
     // 判断是否在磁盘根目录
     val isAtDiskRoot = remember(fileData, currentDiskPath) {
@@ -101,7 +122,11 @@ fun FileScreen(
     }
 
     // 系统返回键处理
-    BackHandler(enabled = currentDiskPath != null && !showDirectoryPicker) {
+    BackHandler(enabled = (currentDiskPath != null || selectionMode) && !showDirectoryPicker) {
+        if (selectionMode) {
+            exitSelection()
+            return@BackHandler
+        }
         try {
             when {
                 pathStack.isNotEmpty() -> {
@@ -129,81 +154,48 @@ fun FileScreen(
         isRooted = RootHelper.isDeviceRooted()
     }
 
-    // 目录选择器页面
-    if (showDirectoryPicker && selectedFileForDownload != null) {
+    // 目录选择器页面（批量下载：为所有已选文件选一个保存目录）
+    if (showDirectoryPicker && pendingDownload.isNotEmpty()) {
         DirectoryPickerScreen(
             isRooted = isRooted,
             onDirectorySelected = { selectedPath ->
-                val item = selectedFileForDownload!!
-                val parentPath = item.path.substringBeforeLast(File.separator)
-
-                downloadViewModel.addDownload(
-                    path = item.path,
-                    name = item.name,
-                    saveDir = File(selectedPath),
-                    deviceId = null
-                )
-
+                val dir = File(selectedPath)
+                val count = pendingDownload.size
+                pendingDownload.forEach { item ->
+                    downloadViewModel.addDownload(
+                        path = item.path,
+                        name = item.name,
+                        saveDir = dir,
+                        deviceId = null
+                    )
+                }
                 showDirectoryPicker = false
-                selectedFileForDownload = null
-                Log.d("FileScreen", "保存目录: $selectedPath")
-                //跳转到传输页
+                pendingDownload = emptyList()
+                exitSelection()
+                Log.d("FileScreen", "批量下载 $count 个到: $selectedPath")
+                Toast.makeText(context, "已加入下载队列（$count 个）", Toast.LENGTH_SHORT).show()
                 navController.navigate(TransferDestination)
             },
             onDismiss = {
                 showDirectoryPicker = false
-                selectedFileForDownload = null
+                pendingDownload = emptyList()
             },
-            fileItem = selectedFileForDownload!!
+            fileItem = pendingDownload.first()
         )
         return // 显示目录选择器时，不显示文件列表
     }
 
-    // 下载确认对话框（简化版，只显示文件信息）
-    if (showDownloadDialog && selectedFileForDownload != null) {
-        AlertDialog(
-            onDismissRequest = {
-                showDownloadDialog = false
-                selectedFileForDownload = null
-            },
-            title = {
-                Text(if (selectedFileForDownload!!.isDir) "下载文件夹" else "下载文件")
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("文件名: ${selectedFileForDownload!!.name}")
-                    if (!selectedFileForDownload!!.isDir) {
-                        Text("大小: ${formatFileSize(selectedFileForDownload!!.size)}")
-                    }
-                    Text("准备选择保存位置...")
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showDownloadDialog = false
-                        showDirectoryPicker = true
-                    }
-                ) {
-                    Text("选择保存位置")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showDownloadDialog = false
-                        selectedFileForDownload = null
-                    }
-                ) {
-                    Text("取消")
-                }
-            }
-        )
-    }
-
     if (currentDiskPath != null) {
+        // 仅当 VM 里还没有该磁盘下的目录数据时才加载：
+        // 首次进入磁盘会加载；从预览页返回时 VM 数据仍在（作用域挂在导航栈条目上），
+        // 跳过重载即可保留之前所在的深层目录，而不是回退到磁盘根。
         LaunchedEffect(currentDiskPath) {
-            fileListViewModel.loadDirectory(currentDiskPath!!)
+            val cp = currentDiskPath ?: return@LaunchedEffect
+            val loadedPath = fileData?.currentPath
+            val belongsToDisk = loadedPath != null && loadedPath.startsWith(cp, ignoreCase = true)
+            if (!belongsToDisk) {
+                fileListViewModel.loadDirectory(cp)
+            }
         }
 
         LazyColumn(
@@ -247,6 +239,33 @@ fun FileScreen(
                 }
             }
 
+            if (selectionMode) {
+                item {
+                    SelectionActionBar(
+                        count = selectedPaths.size,
+                        allSelected = sortedItems.isNotEmpty() && selectedPaths.size >= sortedItems.size,
+                        onToggleAll = {
+                            if (selectedPaths.size >= sortedItems.size) {
+                                selectedPaths.clear()
+                            } else {
+                                selectedPaths.clear()
+                                selectedPaths.addAll(sortedItems.map { it.path })
+                            }
+                        },
+                        onDownload = {
+                            val chosen = sortedItems.filter { selectedPaths.contains(it.path) }
+                            if (chosen.isEmpty()) {
+                                Toast.makeText(context, "请先选择文件", Toast.LENGTH_SHORT).show()
+                            } else {
+                                pendingDownload = chosen
+                                showDirectoryPicker = true
+                            }
+                        },
+                        onCancel = { exitSelection() }
+                    )
+                }
+            }
+
             if (fileLoading) {
                 item { LoadingIndicator() }
             }
@@ -255,26 +274,34 @@ fun FileScreen(
                 item { ErrorCard(message = fileError!!) }
             }
 
-            val fileItems = fileData?.items ?: emptyList()
-            val sortedItems = fileItems.sortedWith(compareBy({ !it.isDir }, { it.name.lowercase() }))
-
             items(sortedItems, key = { it.path }) { item ->
                 FileItemCard(
                     item = item,
+                    selectionMode = selectionMode,
+                    selected = selectedPaths.contains(item.path),
                     onClick = {
-                        if (item.isDir) {
-                            fileListViewModel.navigateTo(item.path)
-                        } else {
-                            selectedFileForDownload = item
-                            showDownloadDialog = true
+                        when {
+                            selectionMode -> {
+                                if (selectedPaths.contains(item.path)) selectedPaths.remove(item.path)
+                                else selectedPaths.add(item.path)
+                            }
+                            item.isDir -> fileListViewModel.navigateTo(item.path)
+                            // 单击文件 → 直接进入在线预览（不支持的类型在预览页给下载入口）
+                            else -> navController.navigate(
+                                PreviewDestination(
+                                    path = item.path,
+                                    name = item.name,
+                                    size = item.size,
+                                    extension = item.extension
+                                )
+                            )
                         }
                     },
-                    onLongClick = if (item.isDir) {
-                        {
-                            selectedFileForDownload = item
-                            showDownloadDialog = true
-                        }
-                    } else null
+                    // 长按 → 进入多选模式并选中该项
+                    onLongClick = {
+                        if (!selectionMode) selectionMode = true
+                        if (!selectedPaths.contains(item.path)) selectedPaths.add(item.path)
+                    }
                 )
             }
         }
@@ -419,6 +446,45 @@ private fun SyncEntryRow(
             contentDescription = null,
             tint = MaterialTheme.colorScheme.outline
         )
+    }
+}
+
+/**
+ * 多选操作栏：显示已选数量，提供全选/下载/取消。
+ * "下载"会进入目录选择器，为所有已选文件选一个保存目录后批量并发下载。
+ */
+@Composable
+private fun SelectionActionBar(
+    count: Int,
+    allSelected: Boolean,
+    onToggleAll: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = "已选 $count 项",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onToggleAll) {
+                Text(if (allSelected) "取消全选" else "全选")
+            }
+            TextButton(onClick = onDownload) {
+                Text("下载")
+            }
+            TextButton(onClick = onCancel) {
+                Text("取消")
+            }
+        }
     }
 }
 

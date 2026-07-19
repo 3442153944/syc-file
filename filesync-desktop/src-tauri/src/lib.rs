@@ -33,11 +33,21 @@ fn make_client(cfg: &SyncConfig) -> Result<ApiClient, String> {
     Ok(ApiClient::new(&cfg.server_url, &cfg.token))
 }
 
+// 业务失败统一格式化为 "[code] message"，把后端信封 code 带给前端（前端 String(e) 即可看到码 + 信息）。
 fn api_data<T>(resp: api::client::ApiResponse<T>, op: &str) -> Result<T, String> {
     if resp.is_ok() {
-        resp.data.ok_or_else(|| format!("{}: 响应 data 为空", op))
+        resp.data.ok_or_else(|| format!("[{}] 响应 data 为空", op))
     } else {
-        Err(format!("{}: {}", op, resp.message))
+        Err(format!("[{}] {}", resp.code, resp.message))
+    }
+}
+
+// 无数据返回的命令（更新/删除类）统一成功/失败判定，失败带上 code。
+fn ensure_ok<T>(resp: api::client::ApiResponse<T>) -> Result<(), String> {
+    if resp.is_ok() {
+        Ok(())
+    } else {
+        Err(format!("[{}] {}", resp.code, resp.message))
     }
 }
 
@@ -273,7 +283,7 @@ async fn reset_password(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = user_api::reset_password(&client, ResetPasswordParams { username, old_password, new_password }).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 /// 修改密码（已登录场景，需旧密码验证）
@@ -285,7 +295,7 @@ async fn change_password(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = user_api::change_password(&client, ChangePasswordParams { old_password, new_password }).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 /// 更新用户资料（multipart，可选头像文件）
@@ -310,7 +320,7 @@ async fn update_profile(
         form = form.part("avatar", part);
     }
     let resp = user_api::update_info(&client, form).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 // ── 文件域 commands ───────────────────────────────────────────────────────────
@@ -385,7 +395,7 @@ async fn delete_file(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = file_api::delete_file(&client, api::file::params::DeleteFileParams { path, name }).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 /// 构建带 token 的完整下载 URL，前端可直接用于下载
@@ -418,7 +428,7 @@ async fn delete_download_history(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = file_api::delete_download_history(&client, DeleteDownloadHistoryParams { ids }).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 // ── 同步域 commands ───────────────────────────────────────────────────────────
@@ -473,7 +483,7 @@ async fn delete_sync_folder(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::delete_folder(&client, folder_id).await?;
-    if !resp.is_ok() { return Err(resp.message); }
+    if !resp.is_ok() { return Err(format!("[{}] {}", resp.code, resp.message)); }
     // 从内存缓存移除（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
     config.write().folder_mappings.retain(|m| m.folder_id != folder_id);
     Ok(())
@@ -505,7 +515,7 @@ async fn resolve_conflict(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::resolve_conflict(&client, conflict_id, &resolution).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 #[tauri::command]
@@ -515,7 +525,7 @@ async fn delete_conflict(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::delete_conflict(&client, conflict_id).await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 /// 更新同步文件夹（enabled/direction/name，None 字段不动）。
@@ -534,7 +544,7 @@ async fn update_sync_folder(
         UpdateFolderParams { enabled, direction, name },
     )
     .await?;
-    if resp.is_ok() { Ok(()) } else { Err(resp.message) }
+    ensure_ok(resp)
 }
 
 /// 分页查询同步任务记录（历史列表）。status 空 = 全部状态。
@@ -566,8 +576,76 @@ async fn clear_sync_tasks(
             .and_then(|v| v.get("deleted").and_then(|d| d.as_i64()))
             .unwrap_or(0))
     } else {
-        Err(resp.message)
+        Err(format!("[{}] {}", resp.code, resp.message))
     }
+}
+
+// ── 应用更新域 commands ───────────────────────────────────────────────────────
+// 走与其它域相同的 invoke → ApiClient 路径（token 来自 SyncConfig，reqwest 直发，
+// 避免 webview fetch 的 CORS / localStorage 陈旧 token 导致 401）。用 serde_json::Value
+// 透传，无需新增 params/response 结构体。
+use api::routes;
+
+#[tauri::command]
+async fn list_app_releases(
+    platform: String,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    let client = make_client(&config.read())?;
+    let mut params = std::collections::HashMap::new();
+    params.insert("platform", platform);
+    let resp: api::client::ApiResponse<serde_json::Value> =
+        client.get(routes::UPDATE_RELEASES, Some(&params)).await?;
+    api_data(resp, "list_app_releases")
+}
+
+#[tauri::command]
+async fn publish_app_release(
+    release: serde_json::Value,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    let client = make_client(&config.read())?;
+    let resp: api::client::ApiResponse<serde_json::Value> =
+        client.post(routes::UPDATE_PUBLISH, &release).await?;
+    api_data(resp, "publish_app_release")
+}
+
+#[tauri::command]
+async fn update_app_release(
+    id: u64,
+    updates: serde_json::Value,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let path = routes::UPDATE_RELEASE_BY_ID.replace("{}", &id.to_string());
+    let resp: api::client::ApiResponse<serde_json::Value> = client.put(&path, &updates).await?;
+    ensure_ok(resp)
+}
+
+#[tauri::command]
+async fn delete_app_release(
+    id: u64,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let path = routes::UPDATE_RELEASE_BY_ID.replace("{}", &id.to_string());
+    let resp: api::client::ApiResponse<serde_json::Value> = client.delete(&path).await?;
+    ensure_ok(resp)
+}
+
+#[tauri::command]
+async fn check_app_update(
+    platform: String,
+    version_code: i64,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    let client = make_client(&config.read())?;
+    let mut params = std::collections::HashMap::new();
+    params.insert("platform", platform);
+    params.insert("version_code", version_code.to_string());
+    let resp: api::client::ApiResponse<serde_json::Value> =
+        client.get(routes::UPDATE_CHECK, Some(&params)).await?;
+    api_data(resp, "check_app_update")
 }
 
 // ── Tauri 入口 ────────────────────────────────────────────────────────────────
@@ -646,6 +724,8 @@ pub fn run() {
             create_sync_folder, list_sync_folders, delete_sync_folder, update_sync_folder,
             list_pending_tasks, list_conflicts, resolve_conflict, delete_conflict,
             list_sync_tasks, clear_sync_tasks,
+            // 应用更新域
+            list_app_releases, publish_app_release, update_app_release, delete_app_release, check_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
