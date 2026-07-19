@@ -7,9 +7,9 @@
 
 ## 0. 一句话定位
 
-这是一个**个人自托管文件传输/同步系统**，三端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
+这是一个**个人自托管文件传输/同步系统**，四端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ HarmonyOS（ArkTS + ArkUI）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
 
-⚠ **同步链路现状（2026-07-12）**：**同步核心已闭环、双向真机实测通过**。Go 后端同步引擎全链路实现（Redis 队列 + worker + base CAS + 冲突保留两者 + scan 追赶比对 + **同内容幂等吸收/回声抑制** + 物理文件缺失自愈，见 §4.11）；**Windows 端**探测→上传→上报→执行闭环（§3B.6）+ **离线追赶机制已落地**（`catch_up.rs`：两阶段 stat 比对 + scan）+ **同步默认启用**（setup 自动启动 + 登录后补位）+ **个人中心/资料编辑/密码修改/头像** + **服务器地址设置**（`ServerSettings.vue`）；**Android 端**同步引擎落地（task 执行 + FileObserver 探测 + 连接追赶 + 冲突隔离 + 保活服务，§3.11），Windows↔Android 双向同步实测可用；**同步列表分页加载**（每页 10 条，滚动到底自动追加，FAB 回到顶部）+ **GC 优化**（`DateUtil`/`TimeUtils`/`parseIsoToMillis` 缓存格式化器，`HomeScreen` `forEach` 改 `items` 懒渲染）。**三端统一分片上传协议（blake3）**：`file_lib` v3（`fc_describe`）经 cgo（服务端）/JNI（安卓 `filecore_jni`，缺 .so 回退纯 Java）/原生（桌面）复用同一实现。**剩余核心尾巴见 §6.3 待办清单**（公网安全为首位）。
+⚠ **同步链路现状（2026-07-19）**：**同步核心已闭环、双向真机实测通过**。Go 后端同步引擎全链路实现（Redis 队列 + worker + base CAS + 冲突保留两者 + scan 追赶比对 + **同内容幂等吸收/回声抑制** + 物理文件缺失自愈，见 §4.11）；**Windows 端**探测→上传→上报→执行闭环（§3B.6）+ **离线追赶机制已落地**（`catch_up.rs`：两阶段 stat 比对 + scan）+ **同步默认启用**（setup 自动启动 + 登录后补位）+ **个人中心/资料编辑/密码修改/头像** + **服务器地址设置**（`ServerSettings.vue`）；**Android 端**同步引擎落地（task 执行 + FileObserver 探测 + 连接追赶 + 冲突隔离 + 保活服务，§3.11），Windows↔Android 双向同步实测可用；**同步列表分页加载**（每页 10 条，滚动到底自动追加，FAB 回到顶部）+ **GC 优化**（`DateUtil`/`TimeUtils`/`parseIsoToMillis` 缓存格式化器，`HomeScreen` `forEach` 改 `items` 懒渲染）。**三端统一分片上传协议（blake3）**：`file_lib` v3（`fc_describe`）经 cgo（服务端）/JNI（安卓 `filecore_jni`，缺 .so 回退纯 Java）/原生（桌面）/NAPI（鸿蒙 `libfilecore.so`，缺 .so 回退纯 ArkTS `Blake3Util`）**四端**复用同一实现。**鸿蒙端 MVP 已落地**（§3C：login + 文件浏览 + 分片上传 + 下载 + 同步执行 download_only + 同步列表 + 设置；无 root、无文件监听，只接 task_created 不上报 file_changed）。**剩余核心尾巴见 §6.3 待办清单**（公网安全为首位）。
 
 ---
 
@@ -229,6 +229,135 @@ WebSocket `network/websocket.kt`（`WebSocketManager`）：
 - **UI**：`SyncFolderMapScreen`（`SyncFolderMapDestination`）——列服务器 folders，本机设置映射路径（可一键默认 `FileSync/sync/<名>`）+ 启用开关；Files 同步卡片加第三行入口，同步列表行副标题显示引擎状态。
 - **接线**：`AppConfig.autoSyncEnabled` 正式有消费者——MainActivity 启动时与 `SyncKeepAliveService.onCreate` 都会（幂等）`SyncEngine.start`。
 - **后端 file_lib v3**：新增 `fc_describe`（客户端描述计算），crate-type 加 rlib 供 JNI 依赖，`fc_abi_version()==3`，Go 测试同步更新、`.a` 已重建。
+
+---
+
+## 3C. HarmonyOS 鸿蒙端架构（`harmony/`）
+
+> **本轮新增（2026-07-19）**。对标 Android 端落地 MVP，定位为 **download_only 同步客户端**（无 root、无文件监听）。
+> 维护原则同 §3/§3B：描述「代码现状」，未实现能力标注 **[未接线]**。
+
+### 3C.1 技术栈
+
+| 维度 | 值 |
+|---|---|
+| 框架 | HarmonyOS NEXT / 5.0（API 22，Stage 模型，`runtimeOS: HarmonyOS`） |
+| 语言 | ArkTS（TypeScript 子集，严格模式：禁止 spread / 对象字面量当类型 / 结构化类型 / Function.apply-call 等） |
+| UI | ArkUI 声明式（@Entry/@Component struct + @State/@StorageLink + @Builder） |
+| 构建 | DevEco Studio 6.0.2 + hvigorw + OHOS NDK + CMake + ninja |
+| 网络 | `@kit.NetworkKit` 的 `http`（HTTP）与 `webSocket`（WS）；fetch fallback 不适用 |
+| 序列化 | `JSON.parse` + 显式 interface 断言（无 kotlinx-serialization） |
+| 哈希 | **Rust 内核 NAPI 复用**（见 §3C.6）；纯 ArkTS blake3 回退（`util/Blake3Util.ets`，移植官方 reference_impl.rs，已用 npm blake3 验证逐字节一致） |
+| 持久化 | `preferences`（DataStore 等价物：token / 用户缓存 / 配置 / 凭据 / 设备 id）；无本地 DB |
+| 认证 | Token 头 / `?token=` 查询回退（WS）；JWT 续期由响应头 `New-Token` 自动捕获（见 §3C.4） |
+| 下载 | `@ohos.net.http` Range 请求 + `@ohos.file.fs` 定位写（无 PRDownloader 等价物，自实现流式 + 断点续传） |
+| Native | Rust 静态库 `libfilecore.a`（来自 `new_server/file_lib`，构建为 OHOS 三 ABI）+ C++ NAPI 包装 → `libfilecore.so`，ArkTS `import fileCoreNative from 'libfilecore.so'` 调用 |
+| 设备 ID | 首次启动生成「时间戳 + 随机数」并 preferences 持久化（无系统级 UDID 权限） |
+
+鸿蒙工程 monorepo 结构（DevEco 模板）：
+
+```
+harmony/
+├ AppScope/app.json5               bundleName=com.example.file
+├ products/sunyuanling/            入口模块
+│  ├ build-profile.json5           含 externalNativeOptions 指向 cpp/CMakeLists.txt
+│  ├ build.ps1                     构建 libfilecore.a for OHOS 三 ABI，落 cpp/prebuilts/
+│  └ src/main/
+│     ├ module.json5               权限 INTERNET；abilities + SunyuanlingBackupAbility
+│     ├ ets/
+│     │  ├ app/                    AppConfig（运行期配置 + 持久化 + 变更广播）/ UserStore
+│     │  ├ api/
+│     │  │  ├ user/                UserApi + UserTypes（对标 Android api/user）
+│     │  │  ├ file/                FileApi + FileTypes + ChunkedUploader（走 FileCore + delete-before-upload）
+│     │  │  └ sync/               SyncApi + SyncTypes（同步 REST + WS 事件 DTO）
+│     │  ├ core/FileCore.ets      Rust 内核门面（NAPI 调用 + 回退纯 ArkTS blake3）
+│     │  ├ net/
+│     │  │  ├ Request.ets         统一 HTTP 单例（对标 Android request.kt：信封校验 / 401 事件 / New-Token 续期）
+│     │  │  ├ Response.ets        ApiResponseData<T> + PageData + 异常
+│     │  │  ├ AuthManager.ets     TokenExpired 回调列表（对标 SharedFlow）
+│     │  │  └ WebSocketManager.ets  指数退避重连 + 消息回调分发
+│     │  ├ download/DownloadController.ets  Range 流式 + AppStorage 'downloads' 数组响应式
+│     │  ├ sync/SyncEngine.ets    download_only 引擎（接 task_created download/delete/mkdir，无 watcher）
+│     │  ├ util/
+│     │  │  ├ Blake3Util.ets      纯 ArkTS BLAKE3（移植 reference_impl.rs，验证一致）
+│     │  │  └ DeviceInfo.ets      设备 id 持久化
+│     │  ├ constants/ApiRoutes.ets 路由常量 + formatRoute（path 参数 %s）
+│     │  ├ router/AppRoutes.ets   页面路由常量
+│     │  ├ token/tokenManager.ets  preferences 持久化 token（内存缓存）
+│     │  ├ sunyuanlingability/    EntryAbility（onCreate 初始化 5 个单例）
+│     │  └ pages/                11 个 @Entry 页面（Index/LoginPage/MainShell + 4 Tab 占位 + FileBrowse/Upload/Transfers/SyncList/Settings/ServerSettings/EditProfile/ChangePassword）
+│     └ cpp/
+│        ├ CMakeLists.txt           链接 libfilecore.a + libace_napi.z.so → libfilecore.so
+│        ├ napi_init.cpp            NAPI 包装（abiVersion/hashChunk/merkleRoot/describeFile）
+│        ├ filecore.h               同 new_server/file_lib/filecore.h
+│        ├ types/libfilecore/Index.d.ts   NAPI 模块的 TS 声明
+│        └ prebuilts/<abi>/libfilecore.a  Rust 静态库（OHOS 三 ABI）
+├ common/ + features/{adaptiveLayout,responsiveLayout}/   DevEco 模板（已无用，待清理）
+└ oh-package.json5                 模板默认依赖（hypium + hamock）
+```
+
+### 3C.2 网络层（`net/Request.ets`）
+
+- **统一 HTTP 单例** `Request`：对标 Android `request.kt`，所有 `get/post/put/delete` 经 `requestJson<T>()`：自动注入 `Token` 头（来自 `TokenManager` 内存缓存），读响应头 `New-Token` 静默续期；HTTP 401 或业务 `code==401` → 清 token + `authManager.notifyTokenExpired()`。
+- **响应信封**：后端 `{code, message, data}`，`code==200 / 0 / undefined`（兼容 register 返回无 code）视为成功；返回**完整信封**（不脱壳，对标 Android，调用方既可读 data 也可读 message）。
+- **downloadBuffer / downloadRange / probeDownload**：HTTP Range 下载专用，token 注入 query string；`probeDownload` 用 `Range: bytes=0-0` 探测 `Content-Range`/`Content-Length`/`Accept-Ranges`，支持断点续传规划。
+- **uploadChunk**：raw `application/octet-stream` body，按业务 `code` 区分 `200` / `422`（ChunkVerifyException）/ `404`（SessionGoneException）。
+- **ArkTS 限制适配**：禁用 spread（手动复制 `Record`），禁用对象字面量当类型（`RequestOptions` / `DownloadProbe` / `MutableNumber` / `MutableString` 等显式 interface），对象字面量初始化 `Record` 时键名带引号避免被识别为接口形状。
+
+### 3C.3 鉴权与登录流
+
+- **登录**：`LoginPage` → `UserApi.login(params)` → 成功 `TokenManager.setToken` + `userStore.setCurrent(user)` → `router.replaceUrl(MAIN_SHELL)`。「记住密码」明文存 preferences（与 Android 一致，可换 EncryptedStorage）。
+- **启动判定**（`Index.ets`）：无 token → LoginPage；有 token → 异步 `UserApi.verify()` 校正本地缓存用户：成功 setCurrent 后进入 MainShell；网络异常但有缓存用户 → 仍进入（离线容错，下次 401 由 AuthManager 处理）。
+- **401 全局**：`AuthManager` 回调列表，`MainShell` 订阅 → 清用户/token + 跳登录页。
+- **WS 鉴权**：`WebSocketManager.connect()` 拼 query `token=<jwt>` + Header `Token` + 设备信息 query；token 失效时 `AuthManager` 触发自动断 WS。
+
+### 3C.4 文件传输（前端侧）
+
+- **下载**（`DownloadController`）：进程级单例，`AppStorage` key `downloads` 持有 `DownloadItem[]`（替换引用触发 `@StorageLink`）；`addDownload` → `Request.probeDownload` 探测支持 Range 后流式 `downloadRange(4MB/chunk)` + `fs.writeSync` 追加；暂停/取消经 `Map<id, boolean>` 信号；与 Android `DownloadController` 行为对齐但**无 PRDownloader**（自实现 Range 续传 + 进度回调）。
+- **分片上传**（`ChunkedUploader`）：与 Android 同协议——算描述（**优先走 Rust 内核 `FileCore.describe`**，无内核或失败回退纯 ArkTS `Blake3Util` 单趟流式）→ `uploadInit` →（秒传直返）→ 并发 `runPool` 上传缺失分片 → `complete`；`SessionGoneException` 重新 init 一次，`ChunkVerifyException` 重试该片。**delete-before-upload**（先 `/file/delete` 删旧再 init，404 视为可忽略）。
+- **文件读取**：ArkTS `@ohos.file.fs` 的 `ReadOptions` 自 API 11 起仅 `offset`（相对当前指针）+ `length`（**无 position**）；描述计算走顺序读（指针自然前进），分片上传 per-chunk `openSync` 拿独立 fd（指针=0，`offset` 即绝对位置）。
+- **picker**：`@ohos.file.picker.DocumentViewPicker` 选本地文件，返回 `file://` URI 直接喂给 `fs.openSync` 与 `ChunkedUploader`。
+
+### 3C.5 Rust 内核 NAPI 接入（**三端统一内核**）
+
+- **构建**：`harmony/products/sunyuanling/build.ps1` 镜像 `Android/filecore_jni/build.ps1`，但目标是 OHOS Rust 三 ABI（`aarch64/armv7/x86_64-unknown-linux-ohos`），用 DevEco NDK 的 `clang/clang++/llvm-ar` 作 `CC/CXX/AR`，cargo 产物 `libfilecore.a` 拷到 `src/main/cpp/prebuilts/<abi>/`。
+- **NAPI 包装** `cpp/napi_init.cpp`：暴露 `abiVersion()` / `hashChunk(data): Uint8Array|null` / `merkleRoot(leaves): Uint8Array|null` / `describeFile(path, chunkSize): Uint8Array|null`（packed `[file_hash(32)‖merkle_root(32)‖leaves(n*32)]`）；失败一律返回 null（对标 Android JNI），ArkTS 侧回退纯 ArkTS blake3（仅性能差，正确性等同）。`__attribute__((constructor))` 自动注册 NAPI 模块。
+- **CMakeLists.txt**：链接 `prebuilts/${OHOS_ARCH}/libfilecore.a` + `ace_napi.z`（OHOS NAPI 运行时），输出 `libfilecore.so`，abiFilters `arm64-v8a` + `x86_64`（NEXT 不支持 `armeabi-v7a`）。
+- **ArkTS 门面** `core/FileCore.ets`：`import fileCoreNative from 'libfilecore.so'`，`nativeAvailable` 启动时校验 `abiVersion()>=3`；`describe()` 优先走原生 `fc_describe`（mmap + rayon 并行），失败/不可用回退 `describeArkTS()`（纯 ArkTS 单趟流式，用 `Blake3Hasher`）。`ChunkedUploader.upload` 直接调 `FileCore.describe` 拿到 `Description`。
+- **声明**：`cpp/types/libfilecore/Index.d.ts` 提供模块的 TS 类型（DevEco 当前 SDK 不强制校验，预留）。
+- **三端一致性**：服务端 `fc_finalize`（cgo）、桌面端 `chunked_uploader::file_blake3_hex`（Rust crate）、Android `filecore_jni`（JNI）、**鸿蒙 `libfilecore.so`（NAPI）** 四端复用同一 `new_server/file_lib` 实现，blake3 叶子/树根/整文件哈希逐字节一致；纯 ArkTS `Blake3Util` 作为兜底也已用 npm `blake3` 包验证一致。
+
+### 3C.6 同步引擎（download_only）
+
+`sync/SyncEngine.ets`，对标 Android `sync/SyncEngine` 但**只执行不探测**：
+
+- **启动**：`MainShell.aboutToAppear` → `syncEngine.start(ctx)`：注册 WS 消息/状态回调 + `wsManager.connect()` + 异步 `refreshFolders()`（拉 `SyncFolder` 列表 + 确保本地映射目录 `${ctx.filesDir}/sync/<folder_name>/` 存在）。
+- **执行派发**（接 WS `type==file_sync` + `content.event==task_created`）：
+  - `download`：流式 `Request.downloadBuffer` → 写 `${localDir}/.synctmp/<name>` → blake3 校验（`FileCore.fileHashHex`） → 原子 `fs.renameSync` 到主目录；被占用回 `task_blocked`；成功回 `completeTask(id, file_hash)`。
+  - `delete`：`fs.unlinkSync` 本地对应 relative_path；不存在的视为已删，回 `completeTask`。
+  - `mkdir`：`fs.mkdirSync(path, true)`，回 `completeTask`。
+- **冲突**（接 `content.event==conflict`）：download_only 客户端无 watcher 能把本地分叉回放重传，**默认 `accept_server`**（自动调 `resolveConflict(id, 'accept_server')`，下次 download 同步会收敛为 trunk 版本）。
+- **离线追赶**（每次 WS Connected）：`SyncApi.pendingTasks(deviceId)` 拉本设备 pending 任务，逐条 `executeTask`（与 task_created 同执行路径，构造 `WsTaskCreatedEvent`-like 结构复用同一 download/delete/mkdir 执行体）。
+- **无 watcher / 无上报**：鸿蒙无 root 无文件监听能力，**不**实现 `RecursiveWatcher`、**不**调 `SyncApi.notify/scan`；本地变更走手动上传（`UploadPage`）触发，服务端不会为鸿蒙端派发 `file_changed` 事件回环。
+- **保活**：ArkTS 无前台服务概念（NEXT 模型不同），保活由系统应用生命周期决定；`SettingsPage` 仍暴露「自动同步 / 强制保活」开关持久化到配置，但鸿蒙端「强制保活」当前不接 service（仅配置存储）。
+
+### 3C.7 主要功能模块
+
+1. **Home**（占位，Phase 5 实现中）：仪表盘。
+2. **Files**：可用磁盘列表 + 入口（上传 / 传输列表 / 同步列表）+ 进入 `FileBrowsePage` 浏览远端目录、点击文件下载。
+3. **Monitor**（占位）：服务器状态 + 在线设备（Phase 5 实现）。
+4. **Personal**：用户卡片 + 编辑资料 / 修改密码 / 服务器地址 / 同步列表 / 传输列表 / 设置 / 登出入口。
+- 外加独立路由页：`TransfersPage`（下载列表 + 进度 + 暂停/恢复/取消/移除）、`SyncListPage`（同步记录 + 待处理 + 冲突待办两 tab + WS 状态徽章）、`UploadPage`（picker 选文件 → 输入远端路径 → ChunkedUploader 进度）、`SettingsPage`、`ServerSettingsPage`、`EditProfilePage`（multipart update-info 待补，目前 stub）、`ChangePasswordPage`（接 `POST /v1/user/change-password`）。
+
+### 3C.8 已知差距与待办（鸿蒙端）
+
+- **本地 multipart 上传**：`update-info` 接口需要 multipart/form-data，`Request` 单例不支持；`EditProfilePage` 暂为 stub（与 Android 早期同样问题，待补 multipart）。
+- **HomePage / MonitorPage** 仍为占位（Phase 5 仪表盘与设备列表未实现）。
+- **下载持久化**：与 Android `DownloadStore` 等价的未完成下载任务落盘恢复机制尚未接（被杀重开无法续传旧任务）。
+- **同步映射 UI**：Android `SyncFolderMapScreen` 等价的 folder→本地路径映射 UI 未实现（默认映射到沙箱 `filesDir/sync/<name>`，无法用户自定义）。
+- **AVPlayer / 文件预览**：未实现，下载完成的文件无 in-app 预览。
+- **`HarmonyOS NEXT` ABI 限制**：仅支持 `arm64-v8a` + `x86_64`，**不支持 `armeabi-v7a`**（已在 build-profile.json5 abiFilters 中体现）。
+- **features 模板残留**：`common/` / `adaptiveLayout/` / `responsiveLayout/` 是 DevEco 初始模板，已无用，待清理（oh-package 依赖也已断开）。
 
 ---
 
@@ -563,9 +692,9 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 ⑤ Office 稳定窗（桌面对齐安卓的 2s 稳定窗+复查）
 ⑥ 冲突 keep_local 子目录回放（安卓按根目录名回放，靠重扫兜底）
 ⑦ 桌面端服务器地址设置 UI；清死代码/空目录；file_version 查看与回滚 UI
-⑧ 鸿蒙端（download_only 客户端，协议现成）；root 看门狗模块；应用内更新（§9.4）
+⑧ 鸿蒙端（**已落地 download_only MVP**，§3C）；root 看门狗模块（仅 Android 适用）；应用内更新（§9.4）
 
-已完成项（历史）：~桌面冲突收件箱/任务列表 UI~（传输列表 + 同步记录分页/清理已落地）、~分片传输协议~（§9.5）、~Android 同步~（§3.11）。
+已完成项（历史）：~桌面冲突收件箱/任务列表 UI~（传输列表 + 同步记录分页/清理已落地）、~分片传输协议~（§9.5）、~Android 同步~（§3.11）、~**鸿蒙端 MVP**~（§3C：login + 文件浏览 + 分片上传 + 下载 + 同步执行 download_only + 同步列表 + 设置，Rust NAPI 内核四端统一）。
 
 ---
 
@@ -679,20 +808,21 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 ---
 
-## 9. 实时同步基底（后端 + Windows 客户端已闭环，Android 待接）
+## 9. 实时同步基底（后端 + Windows / Android 客户端已闭环，鸿蒙 download_only 落地）
 
-> 后端编排层（§4.11）+ Windows（Rust）客户端（§3B.6）均已落地、实测可用，本节记录设计约束与剩余待办（Android + UI）。
+> 后端编排层（§4.11）+ Windows（Rust）客户端（§3B.6）+ Android（Kotlin）客户端（§3.11）均已落地、实测可用；鸿蒙端（§3C）作为 download_only 客户端本轮落地 MVP。本节记录设计约束与剩余待办。
 
 ### 9.1 现状
 - **后端**：同步引擎 `internal/sync/` 全链路实现——Redis 队列(`sync:queue`)+文件锁+进度+计数、worker BRPOP 调度 + Reaper 超时重试/离线补发、冲突检测(hash 双变推 `conflict`+残留可 `DELETE /sync/conflicts/:id` 清理)、Folder CRUD/Task 回调/Scan 全量比对、WS `file_sync` 接入编排、REST `/v1/sync/*`。
 - **Windows（Rust 桌面端）**：**同步已闭环、实测可用**——稳定 `device_id` + `notify` watcher + blake3 + `file_changed` 上报 + ws_client 执行 `task_created`(download/delete/mkdir) + 冲突保留，同步上传/keep_local 已切分片协议（详见 §3B.6）。**短板**：冲突待办/同步任务列表 UI 简陋（但传输列表 `/transfers` + 顶栏指示已落地）。
 - **Android**：✅ **已接**——`SyncEngine` 落地（task 执行 + FileObserver 探测上报 + 连接追赶 + 冲突隔离，§3.11）；同步列表分页 + GC 优化（`HomeScreen` `forEach`→`items`，`DateUtil`/`TimeUtils` 缓存格式化器，`SyncListScreen` 分页 10 条+滚动加载+FAB，后端 `ListTasks` 默认 limit=10）。
+- **HarmonyOS（鸿蒙）**：✅ **MVP 已接**（§3C）——`SyncEngine`（download_only：接 task_created download/delete/mkdir + 连接追赶 + 冲突默认 accept_server），`libfilecore.so` NAPI 复用服务端 Rust 内核；无 watcher、无 file_changed 上报（鸿蒙无 root 无文件监听能力）。
 
 ### 9.2 关键约束（已确认）
-- **探测在客户端**：同步厂家发生在客户端——Android 用 root daemon(`su` fork + FileObserver)主动探测上报；Windows 用 Rust watcher；鸿蒙无监听能力则当 `download_only` 客户端。后端只做"接收上报 → 编排 → 推任务给目标设备"。
-- **双向同步 + 冲突保留两者**：源端 hash 与服务端 hash 都非空且不等 → 推 `conflict` 让源端改名 `.conflict.<ts>` 重报；冲突记录入库可清理。
-- **守护强度**：用户期望 root 模式「被杀也继续」，需 root daemon；非 root 仅「app 在前台/前台服务时同步」。
-- **开关归属**：同步作为 root 模式功能，默认关，仅 `RootHelper.checkRootAccess()` 通过才可见（与 `persistentDownloadEnabled` 同模式）。
+- **探测在客户端**：Android 用 root daemon(`su` fork + FileObserver)主动探测上报；Windows 用 Rust watcher；鸿蒙无监听能力则当 `download_only` 客户端，**只接 task_created，不上报 file_changed**。后端只做"接收上报 → 编排 → 推任务给目标设备"。
+- **双向同步 + 冲突保留两者**：源端 hash 与服务端 hash 都非空且不等 → 推 `conflict` 让源端改名 `.conflict.<ts>` 重报；冲突记录入库可清理。**鸿蒙端默认 accept_server**（无 watcher 无法 keep_local 回放重传）。
+- **守护强度**：用户期望 root 模式「被杀也继续」，需 root daemon；非 root 仅「app 在前台/前台服务时同步」。**鸿蒙端无前台服务概念（NEXT 模型），保活仅靠应用生命周期**，被系统冻结期间 WS 断连，下次前台时重连 + 拉 pending 任务追赶。
+- **开关归属**：同步作为基础功能（鸿蒙端无 root 概念，AppConfig.autoSyncEnabled 默认开），不像 Android 区分 root 可见性。
 
 ### 9.3 复用与待补
 - **后端已补**：SyncTask/SyncFolder 模型 + File 元数据启用 + sync_store + engine/worker/operations/handler/router + WS sync_events + config sync 段。
@@ -701,6 +831,8 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 - **Rust 待补**：① 冲突待办/同步任务列表 UI（功能已通、界面简陋，传输列表已有但冲突收件箱语义仍弱）。
 - **Android 已补**：同步 API 层（`api/sync/`）、强制保活前台服务（`SyncKeepAliveService`）、同步列表页、Files 同步入口（§3.10）；✅ **`SyncEngine` 已落地**（task_created 执行 + FileObserver 探测上报 + 连接追赶 + 冲突隔离，§3.11）、文件夹映射配置 UI、Rust 内核 JNI 接入（file_lib v3 `fc_describe`）。
 - **Android 待补**：`filecore_jni` 的 NDK 构建产物（本机无 NDK，装好后跑 `Android/filecore_jni/build.ps1`；缺 .so 时自动回退纯 Java blake3）、root daemon 进程模型（LSPosed 看门狗在 app 外部）、真机端到端联调（Android↔Windows 双向）、conflict keep_local 子目录场景回放（当前按根目录名回放，靠重扫兜底）。
+- **HarmonyOS 已补**（本轮新增，§3C）：完整 MVP 客户端骨架（11 个 @Entry 页面 + AppConfig + UserStore + TokenManager + 统一 Request + AuthManager + WebSocketManager + DownloadController + ChunkedUploader + SyncEngine + SyncApi + FileApi + UserApi + FileCore NAPI 门面）；**Rust 内核 NAPI 接入完成**（`libfilecore.so` 三 ABI 装包，与 cgo/JNI/Rust 三端逐字节一致）；同步 download_only 引擎落地（接 task_created download/delete/mkdir + 连接追赶 + 冲突 accept_server）；服务器地址/同步列表/传输列表/上传/修改密码/设置全部可路由。
+- **HarmonyOS 待补**：① multipart upload-info 接入（`EditProfilePage` 暂为 stub）；② HomePage/MonitorPage 仪表盘与设备监控列表；③ 下载任务持久化恢复（对标 Android `DownloadStore`）；④ 同步 folder 映射 UI（当前默认沙箱 `filesDir/sync/<name>`，不可用户自定义）；⑤ 强制保活服务化（NEXT 模型无前台服务，需探索 LiveView/后台任务）；⑥ DevEco 模板残留 `common/` + `features/{adaptiveLayout,responsiveLayout}/` 待清理；⑦ HarmonyOS NEXT 不支持 armeabi-v7a，仅 arm64-v8a + x86_64。
 
 ### 9.4 应用内更新机制（搁置备忘）
 - 决策：APK 上传由 **PC 端发起**（当前 PC 端未具备 → 整体搁置）；安装**全部弹系统安装框**（非 root 静默不做）；范围**仅 Android**。
@@ -729,4 +861,4 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 
 *本文档基于代码现状生成，随实现演进需同步更新；尤其注意 §6.2/§7 中的 [未接线] 项在被实现后应及时从清单移除。*
 
-*进度快照（2026-07-12）：**同步核心已闭环**——后端引擎（§4.11，含幂等吸收/自愈）+ Windows（§3B.6，含离线追赶/自动启动/个人中心/服务器设置）+ Android（§3.11，SyncEngine 完整闭环+GC 优化+分页）双向真机实测通过；三端统一 blake3 分片协议（§9.5）；`/user/change-password` 接口已补。**剩余核心尾巴见 §6.3 待办清单**：① sync 引擎集成测试 ② 公网安全 ③ Android 列表 GC 真机验证；其后进入完善级迭代。*
+*进度快照（2026-07-19）：**同步核心已闭环 + 鸿蒙端 MVP 落地**——后端引擎（§4.11，含幂等吸收/自愈）+ Windows（§3B.6，含离线追赶/自动启动/个人中心/服务器设置）+ Android（§3.11，SyncEngine 完整闭环+GC 优化+分页）双向真机实测通过；**鸿蒙端（§3C）** download_only MVP 落地：login + 文件浏览 + 分片上传 + 下载 + 同步执行接 task_created download/delete/mkdir + 同步列表 + 设置 + 修改密码；Rust NAPI 内核 `libfilecore.so` 装包（与 cgo/JNI/桌面 Rust 三端逐字节一致）；四端统一 blake3 分片协议（§9.5）；`/user/change-password` 接口已补。**剩余核心尾巴见 §6.3 待办清单**：① sync 引擎集成测试 ② 公网安全 ③ Android 列表 GC 真机验证；其后进入完善级迭代；鸿蒙端剩余：multipart update-info / HomePage 仪表盘 / MonitorPage 设备列表 / 下载持久化恢复 / folder 映射 UI / NEXT 保活方案。*
