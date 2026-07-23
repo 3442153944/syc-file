@@ -20,4 +20,5 @@ export class AppRoutes {
   static readonly FILE_BROWSE: string = 'pages/FileBrowsePage';
   static readonly UPLOAD: string = 'pages/UploadPage';
   static readonly DEVICE_LIST: string = 'pages/DeviceListPage';
+  static readonly SYNC_FOLDER_MAP: string = 'pages/SyncFolderMapPage';
 }

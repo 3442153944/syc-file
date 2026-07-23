@@ -34,6 +34,16 @@
     ],
     "requestPermissions": [
       {
+        "name": "ohos.permission.READ_WRITE_DOWNLOAD_DIRECTORY",
+        "reason": "$string:reason_download",
+        "usedScene": {
+          "abilities": [
+            "SunyuanlingAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
         "name": "ohos.permission.INTERNET",
         "usedScene": {
           "abilities": [
@@ -41,7 +51,36 @@
           ],
           "when": "always"
         }
-      }
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        "usedScene": {
+          "abilities": [
+            "SunyuanlingAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.APPROXIMATELY_LOCATION",
+        "reason": "$string:location_reason",
+        "usedScene": {
+          "abilities": [
+            "SunyuanlingAbility"
+          ],
+          "when": "always"
+        }
+      },
+      {
+        "name": "ohos.permission.LOCATION",
+        "reason": "$string:location_reason",
+        "usedScene": {
+          "abilities": [
+            "SunyuanlingAbility"
+          ],
+          "when": "always"
+        }
+      },
     ],
     "extensionAbilities": [
       {

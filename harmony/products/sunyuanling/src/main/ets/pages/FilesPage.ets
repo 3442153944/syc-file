@@ -58,6 +58,10 @@ export struct FilesPage {
           Text('同步列表').fontSize(14);
         }.alignItems(HorizontalAlign.Center).layoutWeight(1)
           .onClick(() => { router.pushUrl({ url: AppRoutes.SYNC_LIST }); });
+        Column() {
+          Text('同步文件夹').fontSize(14);
+        }.alignItems(HorizontalAlign.Center).layoutWeight(1)
+          .onClick(() => { router.pushUrl({ url: AppRoutes.SYNC_FOLDER_MAP }); });
       }
       .width('92%')
       .height(64)

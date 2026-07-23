@@ -40,7 +40,8 @@ export class AppConfig {
   uploadChunkSize: number = 4 * 1024 * 1024;
   maxConcurrentUploads: number = 3;
   maxConcurrentDownloads: number = 3;
-  downloadDir: string = 'FileSync/downloads';
+  // 已弃用：下载位置改由用户授权的云梯目录决定（见 storage/CloudLadderStorage），此字段保留仅为兼容旧持久化。
+  downloadDir: string = '';
   autoSyncEnabled: boolean = true;
   syncOnWifiOnly: boolean = true;
   forceKeepAliveEnabled: boolean = false;

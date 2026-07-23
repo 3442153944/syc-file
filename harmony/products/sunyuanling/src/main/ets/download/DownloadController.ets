@@ -5,42 +5,17 @@ import { ResponseException } from '../net/Response';
 import type { DownloadParams } from '../api/file/FileTypes';
 import fs from '@ohos.file.fs';
 import { common } from '@kit.AbilityKit';
+import { downloadStore } from './DownloadStore';
+import { DownloadStatus, DownloadItem } from './DownloadTypes';
+import { NotificationHelper } from '../util/NotificationHelper';
+import { cloudLadderStorage } from '../storage/CloudLadderStorage';
 
-/**
- * 下载项状态
- */
-export enum DownloadStatus {
-  PENDING = 'pending',
-  RUNNING = 'running',
-  PAUSED = 'paused',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
-  CANCELLED = 'cancelled',
-}
+export { DownloadStatus, DownloadItem };
 
-/**
- * 下载项（观察对象）
- */
-export interface DownloadItem {
-  /** 客户端唯一 id（自增） */
+interface WaitQueueItem {
   id: number;
-  fileName: string;
-  /** 远端 path */
-  remotePath: string;
-  /** 本地保存路径（沙箱内绝对路径） */
+  params: DownloadParams;
   localPath: string;
-  /** 远端文件名 */
-  name: string;
-  /** 设备 id */
-  deviceId: string;
-  totalBytes: number;
-  receivedBytes: number;
-  status: DownloadStatus;
-  error: string;
-  /** 进度 0..100 */
-  progress: number;
-  /** 创建时间戳 */
-  createdAt: number;
 }
 
 const STORAGE_KEY = 'downloads';
@@ -62,6 +37,8 @@ export class DownloadController {
   private cancelFlags: Map<number, boolean> = new Map<number, boolean>();
   private pausedFlags: Map<number, boolean> = new Map<number, boolean>();
   private ctx: common.Context | null = null;
+  private activeCount: number = 0;
+  private waitQueue: WaitQueueItem[] = [];
 
   private constructor() {}
 
@@ -77,44 +54,58 @@ export class DownloadController {
     AppStorage.setOrCreate<DownloadItem[]>(STORAGE_KEY, []);
   }
 
+  async restorePendingDownloads(): Promise<void> {
+    const pending = await downloadStore.load();
+    if (pending.length === 0) return;
+    for (let i = 0; i < pending.length; i++) {
+      const item = pending[i];
+      item.status = DownloadStatus.PENDING;
+      item.receivedBytes = 0;
+      this.items.push(item);
+      if (item.id >= this.nextId) {
+        this.nextId = item.id + 1;
+      }
+      const params: DownloadParams = {
+        path: item.remotePath,
+        name: item.name,
+        device_id: item.deviceId,
+      };
+      this.enqueueOrRun(item.id, params, item.localPath);
+    }
+    this.emit();
+    await downloadStore.clear();
+  }
+
+  private persist(): void {
+    downloadStore.save(this.items).catch(() => {});
+  }
+
   getItems(): DownloadItem[] {
     return this.items;
   }
 
   private emit(): void {
-    // 替换数组引用以触发 @StorageLink 响应式更新
     const snapshot: DownloadItem[] = this.items.slice();
     AppStorage.set<DownloadItem[]>(STORAGE_KEY, snapshot);
-  }
-
-  /** 构造下载 URL（token 放 query） */
-  private buildUrl(params: DownloadParams): string {
-    const base = `${appConfig.getBaseUrl()}/v1/file/download`;
-    const q: string[] = [];
-    q.push(`path=${encodeURIComponent(params.path)}`);
-    q.push(`name=${encodeURIComponent(params.name)}`);
-    if (params.device_id && params.device_id.length > 0) {
-      q.push(`device_id=${encodeURIComponent(params.device_id)}`);
-    }
-    const token = TokenManager.getInstance().getToken();
-    if (token.length > 0) {
-      q.push(`token=${encodeURIComponent(token)}`);
-    }
-    return `${base}?${q.join('&')}`;
+    this.persist();
   }
 
   /**
-   * 添加并启动一个下载。
+   * 添加并启动一个下载（受 maxConcurrentDownloads 并发限制）。
+   * targetUri: 用户通过 picker 选择的保存路径（file:// URI）；为空则存沙箱默认目录。
    */
-  async addDownload(params: DownloadParams, localFileName: string = ''): Promise<number> {
+  async addDownload(params: DownloadParams, localFileName: string = '', targetUri: string = ''): Promise<number> {
     const id: number = this.nextId++;
     const fileName: string = localFileName.length > 0 ? localFileName : params.name;
-    const dir: string = this.ctx !== null
-      ? `${this.ctx.filesDir}/${appConfig.downloadDir}`
-      : appConfig.downloadDir;
-    // 创建目录
-    try { fs.mkdirSync(dir, true); } catch (e) { /* ignore if exists */ }
-    const localPath: string = `${dir}/${fileName}`;
+    let localPath: string;
+    if (targetUri.length > 0) {
+      localPath = targetUri;
+    } else {
+      // 默认下载位置：应用专属公共目录 Download/云梯/下载（文件管理器可见）
+      const dir: string = cloudLadderStorage.downloadDir();
+      cloudLadderStorage.mkdirs(dir);
+      localPath = `${dir}/${fileName}`;
+    }
 
     const item: DownloadItem = {
       id,
@@ -133,11 +124,37 @@ export class DownloadController {
     this.items.push(item);
     this.emit();
 
-    // 异步启动下载
-    this.runDownload(id, params, localPath).catch((e: Error) => {
-      console.error(`[DownloadController] run failed: ${e.message}`);
-    });
+    this.enqueueOrRun(id, params, localPath);
     return id;
+  }
+
+  private enqueueOrRun(id: number, params: DownloadParams, localPath: string): void {
+    if (this.activeCount < appConfig.maxConcurrentDownloads) {
+      this.activeCount++;
+      this.runDownload(id, params, localPath).catch((e: Error) => {
+        console.error(`[DownloadController] run failed: ${e.message}`);
+      }).finally(() => {
+        this.activeCount--;
+        this.processQueue();
+      });
+    } else {
+      const waitItem: WaitQueueItem = { id, params, localPath };
+      this.waitQueue.push(waitItem);
+    }
+  }
+
+  private processQueue(): void {
+    while (this.waitQueue.length > 0 && this.activeCount < appConfig.maxConcurrentDownloads) {
+      const next = this.waitQueue.shift();
+      if (next === undefined) break;
+      this.activeCount++;
+      this.runDownload(next.id, next.params, next.localPath).catch((e: Error) => {
+        console.error(`[DownloadController] queued run failed: ${e.message}`);
+      }).finally(() => {
+        this.activeCount--;
+        this.processQueue();
+      });
+    }
   }
 
   /** 实际执行下载（流式 Range） */
@@ -147,8 +164,6 @@ export class DownloadController {
     this.items[itemIdx].status = DownloadStatus.RUNNING;
     this.emit();
 
-    const url: string = this.buildUrl(params);
-    const token: string = TokenManager.getInstance().getToken();
     let received: number = 0;
     let total: number = 0;
 
@@ -222,6 +237,7 @@ export class DownloadController {
         this.items[idx].receivedBytes = received;
         this.items[idx].progress = progress;
         this.emit();
+        NotificationHelper.notifyProgress(id, params.name, progress, received, total);
       }
 
       if (received >= total) {
@@ -230,10 +246,12 @@ export class DownloadController {
           this.items[idx].status = DownloadStatus.COMPLETED;
           this.items[idx].progress = 100;
           this.emit();
+          NotificationHelper.notifyComplete(id, params.name);
         }
       }
     } catch (e) {
       this.failItem(id, (e as Error).message);
+      NotificationHelper.notifyFailed(id, params.name, (e as Error).message);
     } finally {
       if (writerFd >= 0) {
         try { fs.closeSync(writerFd); } catch (e) { /* ignore */ }

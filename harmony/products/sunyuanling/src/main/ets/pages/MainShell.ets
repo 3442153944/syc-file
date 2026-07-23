@@ -1,10 +1,12 @@
 import router from '@ohos.router';
+import { common } from '@kit.AbilityKit';
 import { userStore, USER_STORAGE_KEY } from '../app/UserStore';
 import type { UserInfo } from '../api/user/UserTypes';
 import { AppRoutes } from '../router/AppRoutes';
 import { authManager, AuthEvent } from '../net/AuthManager';
 import { TokenManager } from '../token/tokenManager';
 import { syncEngine } from '../sync/SyncEngine';
+import { initCloudStorage } from '../storage/CloudLadderStorage';
 import HomePage from './HomePage';
 import FilesPage from './FilesPage';
 import MonitorPage from './MonitorPage';
@@ -28,6 +30,19 @@ struct MainShell {
         this.handleTokenExpired();
       }
     });
+    // 先初始化云梯公共目录（前台拿授权 + 建 同步/、下载/），就绪后再启动同步引擎
+    this.bootstrap();
+  }
+
+  private async bootstrap(): Promise<void> {
+    // 云梯公共目录初始化（picker DOWNLOAD 拿 Download/包名 授权 → 建 同步/、下载/）
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const ready: boolean = await initCloudStorage(ctx);
+      console.info(`[MainShell] cloud storage ready=${ready}`);
+    } catch (e) {
+      console.warn(`[MainShell] initCloudStorage failed: ${(e as Error)?.message ?? JSON.stringify(e)}`);
+    }
     // 启动同步引擎（download_only：连 WS + 拉取 folder + 接 task_created）
     try {
       syncEngine.start(this.getUIContext().getHostContext() as Context);

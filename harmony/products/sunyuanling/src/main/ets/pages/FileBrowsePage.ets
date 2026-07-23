@@ -1,12 +1,12 @@
 import router from '@ohos.router';
+import { promptAction } from '@kit.ArkUI';
 import { FileApi } from '../api/file/FileApi';
 import type { FileItem, TraverseDirectoryData } from '../api/file/FileTypes';
-import { downloadController } from '../download/DownloadController';
 
 /**
  * FileBrowsePage
- * 远端目录浏览页：面包屑 + 文件列表（点目录深入、点文件下载）。
- * 对标 Android ui/screen/files/FileListScreen.kt 简化版。
+ * 远端目录浏览页：点目录深入、点文件直接下载到应用专属公共目录 Download/云梯/下载。
+ * 文件管理器可见，无需每次选位置。
  */
 @Entry
 @Component
@@ -51,14 +51,13 @@ struct FileBrowsePage {
       this.pathStack.push(item.path);
       await this.loadDir(item.path);
     } else {
-      // 启动下载
-      const itemPath: string = item.path.endsWith('/' + item.name) ? item.path : item.path;
-      await downloadController.addDownload({
-        path: itemPath,
-        name: item.name,
-        device_id: '',
-      });
+      await this.startDownload(item);
     }
+  }
+
+  /** 下载暂时停用：先用主页「目录写入测试」确认哪种路径能写公共 Download。 */
+  async startDownload(item: FileItem): Promise<void> {
+    promptAction.showToast({ message: '下载调试中，请先用主页「目录写入测试」按钮' });
   }
 
   goBack(): void {
@@ -73,7 +72,6 @@ struct FileBrowsePage {
 
   build() {
     Column() {
-      // 顶栏：返回 + 当前路径
       Row() {
         Text('‹').fontSize(24).padding({ left: 12, right: 8 })
           .onClick(() => { this.goBack(); });

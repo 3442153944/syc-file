@@ -10,7 +10,7 @@
     },
     {
       "name": "ability_label",
-      "value": "label"
+      "value": "云梯"
     },
     {
       "name": "grid_title_label",
@@ -35,6 +35,18 @@
     {
       "name": "location_cap_valid",
       "value": "This device has the system capability of location service"
+    },
+    {
+      "name": "location_reason",
+      "value": "用于保持后台同步服务活跃"
+    },
+    {
+      "name": "download_reason",
+      "value": "用于将文件保存到公共下载目录"
+    },
+    {
+      "name": "reason_download",
+      "value": "需要访问公共下载目录用于同步云梯文件"
     }
   ]
 }

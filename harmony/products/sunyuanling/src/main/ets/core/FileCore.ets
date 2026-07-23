@@ -192,3 +192,14 @@ async function describeArkTS(filePath: string, chunkSize: number): Promise<Descr
 export async function fileHashHex(filePath: string, chunkSize: number = appConfig.uploadChunkSize): Promise<string> {
   return (await describe(filePath, chunkSize)).fileHashHex;
 }
+
+/**
+ * 对内存字节直接算整文件 blake3 hex（纯 ArkTS，无需落盘 / 无需真实路径）。
+ * 用于同步下载校验：授权目录是 docs:// URI，native 内核 mmap 不认 URI，
+ * 而下载内容本就整块在内存，直接对 buffer 算最快，且与服务端 fc 整文件哈希逐字节一致。
+ */
+export function hashBufferHex(data: Uint8Array): string {
+  const hasher: Blake3Hasher = Blake3Hasher.new();
+  hasher.update(data);
+  return bytesToHex(hasher.finalize(HASH_SIZE));
+}

@@ -340,6 +340,100 @@ export class Request {
   }
 
   /**
+   * multipart/form-data POST（用于 update-info 等需要表单+文件的接口）。
+   * fields: 文本字段 key-value；fileField/fileData/mimeType/fileName: 可选文件部分。
+   */
+  static async postMultipart<T>(
+    endpoint: string,
+    fields: Record<string, string>,
+    fileField?: string,
+    fileData?: ArrayBuffer,
+    mimeType?: string,
+    fileName?: string
+  ): Promise<T> {
+    const boundary = `----FormBoundary${Date.now().toString(36)}${Math.random().toString(36).substring(2)}`;
+    const parts: string[] = [];
+    const fieldKeys = Object.keys(fields);
+    for (let i = 0; i < fieldKeys.length; i++) {
+      const k = fieldKeys[i];
+      parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${fields[k]}\r\n`);
+    }
+    let fileHeader = '';
+    if (fileField !== undefined && fileData !== undefined) {
+      const fn = fileName !== undefined ? fileName : 'file';
+      const mt = mimeType !== undefined ? mimeType : 'application/octet-stream';
+      fileHeader = `--${boundary}\r\nContent-Disposition: form-data; name="${fileField}"; filename="${fn}"\r\nContent-Type: ${mt}\r\n\r\n`;
+    }
+    const closing = `\r\n--${boundary}--\r\n`;
+
+    let bodyBuffer: ArrayBuffer;
+    if (fileHeader.length > 0 && fileData !== undefined) {
+      const headStr = parts.join('') + fileHeader;
+      const headBuf = new Uint8Array(headStr.split('').map((c: string) => c.charCodeAt(0)));
+      const tailBuf = new Uint8Array(closing.split('').map((c: string) => c.charCodeAt(0)));
+      const fileBytes = new Uint8Array(fileData);
+      bodyBuffer = new ArrayBuffer(headBuf.length + fileBytes.length + tailBuf.length);
+      const merged = new Uint8Array(bodyBuffer);
+      merged.set(headBuf, 0);
+      merged.set(fileBytes, headBuf.length);
+      merged.set(tailBuf, headBuf.length + fileBytes.length);
+    } else {
+      const fullStr = parts.join('') + `--${boundary}--\r\n`;
+      const strCodes = fullStr.split('').map((c: string) => c.charCodeAt(0));
+      bodyBuffer = new ArrayBuffer(strCodes.length);
+      const arr = new Uint8Array(bodyBuffer);
+      for (let i = 0; i < strCodes.length; i++) {
+        arr[i] = strCodes[i];
+      }
+    }
+
+    const url = Request.getInstance().buildUrl(endpoint);
+    const header = Request.getInstance().buildHeaders({
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    });
+    const httpRequest = http.createHttp();
+    try {
+      const reqOpts: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header,
+        extraData: bodyBuffer,
+        expectDataType: http.HttpDataType.STRING,
+        connectTimeout: appConfig.connectTimeoutMs,
+        readTimeout: appConfig.readTimeoutMs,
+      };
+      if (appConfig.caPath.length > 0) {
+        reqOpts.caPath = appConfig.caPath;
+      }
+      const response = await httpRequest.request(url, reqOpts);
+      await Request.getInstance().tryRefreshTokenFromHeader(response);
+      if (response.responseCode === 401) {
+        await TokenManager.getInstance().clear();
+        authManager.notifyTokenExpired();
+        throw new ResponseException(401, '认证失败');
+      }
+      if (response.responseCode !== 200) {
+        throw new ResponseException(response.responseCode, `HTTP ${response.responseCode}`);
+      }
+      const text = response.result as string;
+      const obj = JSON.parse(text) as ApiResponseData<T>;
+      if (obj.code === 200 || obj.code === 0 || obj.code === undefined) {
+        return obj as T;
+      }
+      if (obj.code === 401) {
+        await TokenManager.getInstance().clear();
+        authManager.notifyTokenExpired();
+        throw new ResponseException(401, obj.message);
+      }
+      throw new ResponseException(obj.code, obj.message);
+    } catch (err) {
+      if (err instanceof ResponseException) throw err;
+      throw new ResponseException(-1, (err as Error)?.message ?? JSON.stringify(err));
+    } finally {
+      Request.getInstance().safeDestroy(httpRequest);
+    }
+  }
+
+  /**
    * 探测下载响应头（Content-Length / Accept-Ranges）以支持断点续传规划。
    */
   static async probeDownload(
@@ -376,6 +470,9 @@ export class Request {
         reqOpts.caPath = appConfig.caPath;
       }
       const response = await httpRequest.request(url, reqOpts);
+      if (response.responseCode !== 200 && response.responseCode !== 206) {
+        throw new ResponseException(response.responseCode, `HTTP ${response.responseCode}`);
+      }
       const headers = response.header as Record<string, string>;
       let total = 0;
       let acceptRanges = false;

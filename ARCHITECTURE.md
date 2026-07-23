@@ -248,9 +248,10 @@ WebSocket `network/websocket.kt`（`WebSocketManager`）：
 | 网络 | `@kit.NetworkKit` 的 `http`（HTTP）与 `webSocket`（WS）；fetch fallback 不适用 |
 | 序列化 | `JSON.parse` + 显式 interface 断言（无 kotlinx-serialization） |
 | 哈希 | **Rust 内核 NAPI 复用**（见 §3C.6）；纯 ArkTS blake3 回退（`util/Blake3Util.ets`，移植官方 reference_impl.rs，已用 npm blake3 验证逐字节一致） |
-| 持久化 | `preferences`（DataStore 等价物：token / 用户缓存 / 配置 / 凭据 / 设备 id）；无本地 DB |
+| 持久化 | `preferences`（DataStore 等价物：token / 用户缓存 / 配置 / 凭据 / 设备 id / 下载任务 / 同步映射）；无本地 DB |
 | 认证 | Token 头 / `?token=` 查询回退（WS）；JWT 续期由响应头 `New-Token` 自动捕获（见 §3C.4） |
-| 下载 | `@ohos.net.http` Range 请求 + `@ohos.file.fs` 定位写（无 PRDownloader 等价物，自实现流式 + 断点续传） |
+| 下载 | `@ohos.net.http` Range 请求 + `@ohos.file.fs` 定位写（无 PRDownloader 等价物，自实现流式 + 断点续传）；`DocumentSaveDialog` 选保存位置；通知栏进度/完成/失败 |
+| 保活 | `@kit.BackgroundTasksKit` 长时任务（`DATA_TRANSFER`）+ 通知栏常驻；权限 `KEEP_BACKGROUND_RUNNING` + `LOCATION` |
 | Native | Rust 静态库 `libfilecore.a`（来自 `new_server/file_lib`，构建为 OHOS 三 ABI）+ C++ NAPI 包装 → `libfilecore.so`，ArkTS `import fileCoreNative from 'libfilecore.so'` 调用 |
 | 设备 ID | 首次启动生成「时间戳 + 随机数」并 preferences 持久化（无系统级 UDID 权限） |
 
@@ -263,29 +264,38 @@ harmony/
 │  ├ build-profile.json5           含 externalNativeOptions 指向 cpp/CMakeLists.txt
 │  ├ build.ps1                     构建 libfilecore.a for OHOS 三 ABI，落 cpp/prebuilts/
 │  └ src/main/
-│     ├ module.json5               权限 INTERNET；abilities + SunyuanlingBackupAbility
+│     ├ module.json5               权限 INTERNET/KEEP_BACKGROUND_RUNNING/LOCATION（公共目录用应用专属目录，无需文件权限）
 │     ├ ets/
 │     │  ├ app/                    AppConfig（运行期配置 + 持久化 + 变更广播）/ UserStore
 │     │  ├ api/
 │     │  │  ├ user/                UserApi + UserTypes（对标 Android api/user）
 │     │  │  ├ file/                FileApi + FileTypes + ChunkedUploader（走 FileCore + delete-before-upload）
-│     │  │  └ sync/               SyncApi + SyncTypes（同步 REST + WS 事件 DTO）
+│     │  │  ├ sync/               SyncApi + SyncTypes（同步 REST + WS 事件 DTO）
+│     │  │  └ ws/                 WsApi + WsTypes（设备监控 REST：getMyDevices/getOnlineUsers/getStats）
 │     │  ├ core/FileCore.ets      Rust 内核门面（NAPI 调用 + 回退纯 ArkTS blake3）
 │     │  ├ net/
-│     │  │  ├ Request.ets         统一 HTTP 单例（对标 Android request.kt：信封校验 / 401 事件 / New-Token 续期）
+│     │  │  ├ Request.ets         统一 HTTP 单例（信封校验 / 401 事件 / New-Token 续期 / postMultipart）
 │     │  │  ├ Response.ets        ApiResponseData<T> + PageData + 异常
 │     │  │  ├ AuthManager.ets     TokenExpired 回调列表（对标 SharedFlow）
 │     │  │  └ WebSocketManager.ets  指数退避重连 + 消息回调分发
-│     │  ├ download/DownloadController.ets  Range 流式 + AppStorage 'downloads' 数组响应式
-│     │  ├ sync/SyncEngine.ets    download_only 引擎（接 task_created download/delete/mkdir，无 watcher）
+│     │  ├ download/
+│     │  │  ├ DownloadController.ets  Range 流式 + 并发限制 + 通知 + AppStorage 响应式
+│     │  │  ├ DownloadStore.ets   下载任务持久化（preferences JSON，重启恢复）
+│     │  │  └ DownloadTypes.ets   DownloadItem + DownloadStatus（避免循环依赖）
+│     │  ├ sync/
+│     │  │  ├ SyncEngine.ets      download_only 引擎（接 task_created，公共下载目录落盘）
+│     │  │  └ SyncMappingStore.ets  设备私有 folder→本地目录映射 + 启用状态持久化
+│     │  ├ service/
+│     │  │  └ BackgroundTaskHelper.ets  长时任务保活（DATA_TRANSFER + 通知栏常驻）
 │     │  ├ util/
 │     │  │  ├ Blake3Util.ets      纯 ArkTS BLAKE3（移植 reference_impl.rs，验证一致）
-│     │  │  └ DeviceInfo.ets      设备 id 持久化
+│     │  │  ├ DeviceInfo.ets      设备 id 持久化
+│     │  │  └ NotificationHelper.ets  下载通知（进度/完成/失败）
 │     │  ├ constants/ApiRoutes.ets 路由常量 + formatRoute（path 参数 %s）
 │     │  ├ router/AppRoutes.ets   页面路由常量
 │     │  ├ token/tokenManager.ets  preferences 持久化 token（内存缓存）
-│     │  ├ sunyuanlingability/    EntryAbility（onCreate 初始化 5 个单例）
-│     │  └ pages/                11 个 @Entry 页面（Index/LoginPage/MainShell + 4 Tab 占位 + FileBrowse/Upload/Transfers/SyncList/Settings/ServerSettings/EditProfile/ChangePassword）
+│     │  ├ sunyuanlingability/    EntryAbility（onCreate 初始化 7 个单例 + 恢复下载 + 保活）
+│     │  └ pages/                15 个页面（Index/LoginPage/MainShell + 4 Tab + FileBrowse/Upload/Transfers/SyncList/Settings/ServerSettings/EditProfile/ChangePassword/DeviceListPage/SyncFolderMapPage）
 │     └ cpp/
 │        ├ CMakeLists.txt           链接 libfilecore.a + libace_napi.z.so → libfilecore.so
 │        ├ napi_init.cpp            NAPI 包装（abiVersion/hashChunk/merkleRoot/describeFile）
@@ -300,9 +310,10 @@ harmony/
 
 - **统一 HTTP 单例** `Request`：对标 Android `request.kt`，所有 `get/post/put/delete` 经 `requestJson<T>()`：自动注入 `Token` 头（来自 `TokenManager` 内存缓存），读响应头 `New-Token` 静默续期；HTTP 401 或业务 `code==401` → 清 token + `authManager.notifyTokenExpired()`。
 - **响应信封**：后端 `{code, message, data}`，`code==200 / 0 / undefined`（兼容 register 返回无 code）视为成功；返回**完整信封**（不脱壳，对标 Android，调用方既可读 data 也可读 message）。
-- **downloadBuffer / downloadRange / probeDownload**：HTTP Range 下载专用，token 注入 query string；`probeDownload` 用 `Range: bytes=0-0` 探测 `Content-Range`/`Content-Length`/`Accept-Ranges`，支持断点续传规划。
+- **downloadBuffer / downloadRange / probeDownload**：HTTP Range 下载专用，token 注入 query string；`probeDownload` 用 `Range: bytes=0-0` 探测 `Content-Range`/`Content-Length`/`Accept-Ranges`，**校验 HTTP 状态码**（403/404/500 抛异常），支持断点续传规划。
 - **uploadChunk**：raw `application/octet-stream` body，按业务 `code` 区分 `200` / `422`（ChunkVerifyException）/ `404`（SessionGoneException）。
-- **ArkTS 限制适配**：禁用 spread（手动复制 `Record`），禁用对象字面量当类型（`RequestOptions` / `DownloadProbe` / `MutableNumber` / `MutableString` 等显式 interface），对象字面量初始化 `Record` 时键名带引号避免被识别为接口形状。
+- **postMultipart**：手写 `multipart/form-data` boundary 拼装（文本字段 + 可选文件 part），用于 `update-info` 等需要表单+文件的接口。
+- **ArkTS 限制适配**：禁用 spread（手动复制 `Record`），禁用对象字面量当类型（`RequestOptions` / `DownloadProbe` / `WaitQueueItem` 等显式 interface），对象字面量初始化 `Record` 时键名带引号避免被识别为接口形状。
 
 ### 3C.3 鉴权与登录流
 
@@ -313,7 +324,8 @@ harmony/
 
 ### 3C.4 文件传输（前端侧）
 
-- **下载**（`DownloadController`）：进程级单例，`AppStorage` key `downloads` 持有 `DownloadItem[]`（替换引用触发 `@StorageLink`）；`addDownload` → `Request.probeDownload` 探测支持 Range 后流式 `downloadRange(4MB/chunk)` + `fs.writeSync` 追加；暂停/取消经 `Map<id, boolean>` 信号；与 Android `DownloadController` 行为对齐但**无 PRDownloader**（自实现 Range 续传 + 进度回调）。
+- **下载**（`DownloadController`）：进程级单例，`AppStorage` key `downloads` 持有 `DownloadItem[]`（替换引用触发 `@StorageLink`）；`addDownload` 支持 `targetUri` 参数（用户通过 `DocumentSaveDialog` 选择的保存位置）；**并发限制**（`maxConcurrentDownloads` 信号量 + 等待队列）；`Request.probeDownload` 探测支持 Range 后流式 `downloadRange(4MB/chunk)` + `fs.writeSync` 追加；暂停/取消经 `Map<id, boolean>` 信号；**通知栏**（`NotificationHelper`：进度/完成/失败）；**持久化**（`DownloadStore`：未完成任务落 preferences，重启 `restorePendingDownloads()` 恢复）。
+- **下载保存位置**：`FileBrowsePage` 点文件 → `DocumentViewPicker.save()` 让用户选保存位置（`targetUri`）下载；取消/无 context 时 `DownloadController` 默认落**应用专属公共下载目录** `Download/云梯/下载`（`CloudLadderStorage.downloadDir()`，文件管理器可见）。
 - **分片上传**（`ChunkedUploader`）：与 Android 同协议——算描述（**优先走 Rust 内核 `FileCore.describe`**，无内核或失败回退纯 ArkTS `Blake3Util` 单趟流式）→ `uploadInit` →（秒传直返）→ 并发 `runPool` 上传缺失分片 → `complete`；`SessionGoneException` 重新 init 一次，`ChunkVerifyException` 重试该片。**delete-before-upload**（先 `/file/delete` 删旧再 init，404 视为可忽略）。
 - **文件读取**：ArkTS `@ohos.file.fs` 的 `ReadOptions` 自 API 11 起仅 `offset`（相对当前指针）+ `length`（**无 position**）；描述计算走顺序读（指针自然前进），分片上传 per-chunk `openSync` 拿独立 fd（指针=0，`offset` 即绝对位置）。
 - **picker**：`@ohos.file.picker.DocumentViewPicker` 选本地文件，返回 `file://` URI 直接喂给 `fs.openSync` 与 `ChunkedUploader`。
@@ -331,33 +343,43 @@ harmony/
 
 `sync/SyncEngine.ets`，对标 Android `sync/SyncEngine` 但**只执行不探测**：
 
-- **启动**：`MainShell.aboutToAppear` → `syncEngine.start(ctx)`：注册 WS 消息/状态回调 + `wsManager.connect()` + 异步 `refreshFolders()`（拉 `SyncFolder` 列表 + 确保本地映射目录 `${ctx.filesDir}/sync/<folder_name>/` 存在）。
+- **启动**：`MainShell.aboutToAppear` → `syncEngine.start(ctx)`：注册 WS 消息/状态回调 + `wsManager.connect()` + 异步 `refreshFolders()`（拉 `SyncFolder` 列表 + 确保本地映射目录存在）。
+- **本地同步目录（应用专属公共目录方案，`storage/CloudLadderStorage.ets`）**：⚠ 鸿蒙**手机**三条路全堵：`Environment.getUserDownloadDir()` 抛 `Capability not supported`（Full Mount 仅 2in1/平板）、`DocumentSelectMode.FOLDER` 选文件夹返回 `errorcode -1`（FolderSelection 仅 PC/2in1）、`request.agent` saveas 不能指向公共目录。**✅ 正解 = 应用专属公共目录**（QQ/微信同款）：`root = ${context.filesDir}/../Download/${context.applicationInfo.name}`（bundleName）→ 物理映射 `/storage/Users/currentUser/Download/<bundleName>/`，文件管理器转换层显示为「Download/应用名」+图标，**无需任何权限**，是**真实绝对路径**（native mmap/blake3 可用）。目录结构 `<root>/同步/<folder>/` + `<root>/下载/`；`SunyuanlingAbility.onCreate` 调 `cloudLadderStorage.init(context)` 即 `mkdirSync` 建好，全自动、无 picker、无权限弹窗。
 - **执行派发**（接 WS `type==file_sync` + `content.event==task_created`）：
-  - `download`：流式 `Request.downloadBuffer` → 写 `${localDir}/.synctmp/<name>` → blake3 校验（`FileCore.fileHashHex`） → 原子 `fs.renameSync` 到主目录；被占用回 `task_blocked`；成功回 `completeTask(id, file_hash)`。
-  - `delete`：`fs.unlinkSync` 本地对应 relative_path；不存在的视为已删，回 `completeTask`。
-  - `mkdir`：`fs.mkdirSync(path, true)`，回 `completeTask`。
+  - `download`：`Request.downloadBuffer` 整块下载到内存 → **对内存 buffer 直接算 blake3 校验**（`FileCore.hashBufferHex`，省一次读回）→ `fs.openSync(finalPath, CREATE|TRUNC)` 写公共目录（一次性 write，失败下轮 scan 重下）；成功回 `completeTask(id, file_hash)`。
+  - `delete`：`fs.unlinkSync` 对应 relative_path；不存在视为已删，回 `completeTask`。
+  - `mkdir`：`CloudLadderStorage.mkdirpUnder` 逐层建子目录，回 `completeTask`。
 - **冲突**（接 `content.event==conflict`）：download_only 客户端无 watcher 能把本地分叉回放重传，**默认 `accept_server`**（自动调 `resolveConflict(id, 'accept_server')`，下次 download 同步会收敛为 trunk 版本）。
-- **离线追赶**（每次 WS Connected）：`SyncApi.pendingTasks(deviceId)` 拉本设备 pending 任务，逐条 `executeTask`（与 task_created 同执行路径，构造 `WsTaskCreatedEvent`-like 结构复用同一 download/delete/mkdir 执行体）。
-- **无 watcher / 无上报**：鸿蒙无 root 无文件监听能力，**不**实现 `RecursiveWatcher`、**不**调 `SyncApi.notify/scan`；本地变更走手动上传（`UploadPage`）触发，服务端不会为鸿蒙端派发 `file_changed` 事件回环。
-- **保活**：ArkTS 无前台服务概念（NEXT 模型不同），保活由系统应用生命周期决定；`SettingsPage` 仍暴露「自动同步 / 强制保活」开关持久化到配置，但鸿蒙端「强制保活」当前不接 service（仅配置存储）。
+- **离线追赶**（每次 WS Connected，`catchUpRunning` 串行化防重连风暴并发）：① `SyncApi.pendingTasks(deviceId)` 拉本设备积压 pending 任务逐条 `executeTask`（复用 download/delete/mkdir 执行体）；② **扫描追赶**（对标 Android `catchUpFolder` 的 Phase2）——逐启用 folder `walk` 本地目录构建全量清单（目录项 + 文件项带 blake3，进程内 `hashCache` 按 path\|size\|mtime 缓存避免重连重算），`POST /sync/scan` 交服务端比对 trunk：**trunk 有本地无 → 补派 download**，补齐离线期间遗漏的下载。`triggerCatchUp()` 供 UI「重新对齐」手动触发。忽略 `.synctmp`/`.syncpending` 工作目录。
+- **无 watcher / 无变更上报**：鸿蒙无 root 无文件监听能力，**不**实现 `RecursiveWatcher`、**不**调 `SyncApi.notify`（不主动上报本地变更）；download_only 无 Phase1 本地变更上传，本地变更走手动上传（`UploadPage`）触发，服务端不会为鸿蒙端派发 `file_changed` 事件回环。（scan 仅用于追赶时把本地清单交服务端比对补派下载，不含上传语义。）
+- **保活**：`service/BackgroundTaskHelper.ets` 通过 `backgroundTaskManager.startBackgroundRunning(DATA_TRANSFER)` 申请长时任务 + 通知栏常驻「云梯同步服务运行中」；`SettingsPage` 保活开关直接调 `start()/stop()`；`SunyuanlingAbility.onCreate` 若 `forceKeepAliveEnabled` 已开则自动拉起。权限：`KEEP_BACKGROUND_RUNNING` + `LOCATION` + `APPROXIMATELY_LOCATION`。
 
 ### 3C.7 主要功能模块
 
-1. **Home**（占位，Phase 5 实现中）：仪表盘。
-2. **Files**：可用磁盘列表 + 入口（上传 / 传输列表 / 同步列表）+ 进入 `FileBrowsePage` 浏览远端目录、点击文件下载。
-3. **Monitor**（占位）：服务器状态 + 在线设备（Phase 5 实现）。
-4. **Personal**：用户卡片 + 编辑资料 / 修改密码 / 服务器地址 / 同步列表 / 传输列表 / 设置 / 登出入口。
-- 外加独立路由页：`TransfersPage`（下载列表 + 进度 + 暂停/恢复/取消/移除）、`SyncListPage`（同步记录 + 待处理 + 冲突待办两 tab + WS 状态徽章）、`UploadPage`（picker 选文件 → 输入远端路径 → ChunkedUploader 进度）、`SettingsPage`、`ServerSettingsPage`、`EditProfilePage`（multipart update-info 待补，目前 stub）、`ChangePasswordPage`（接 `POST /v1/user/change-password`）。
+1. **Home**：仪表盘——存储用量（聚合所有允许磁盘）、在线设备数（`WsApi.getMyDevices`）、WS 同步状态徽章、快捷操作（上传/文件/同步/传输）、最近下载列表（`FileApi.getDownloadHistory`）。
+2. **Files**：可用磁盘列表 + 入口（上传 / 传输列表 / 同步列表 / **同步文件夹**）+ 进入 `FileBrowsePage` 浏览远端目录、点击文件弹 `DocumentSaveDialog` 选保存位置后下载。
+3. **Monitor**：服务器在线状态（ping）、WS 连接状态、服务器地址、在线设备数（可点击进入 `DeviceListPage`）、存储用量进度条、刷新。
+4. **Personal**：头像（`Image` 加载服务器 `${baseUrl}/static/${avatar}`）+ 用户名 + 角色徽章 + 账户信息（ID/状态/上次登录/注册时间）+ 菜单（编辑资料/修改密码/服务器地址/同步文件夹/同步列表/传输列表/设置）+ 登出。
+- 外加独立路由页：
+  - `DeviceListPage`：「我的在线设备」（所有人）+「所有在线设备」（仅 admin），设备卡片含平台图标/设备名/平台标签/IP/版本/在线时长；WS 重连自动刷新。
+  - `SyncFolderMapPage`：只读展示保存位置（应用专属公共目录 `Download/云梯`）+ 列服务器 folders + 本机映射路径（`<root>/同步/<name>`）+ 启用开关（`SyncMappingStore` 持久化）。
+  - `TransfersPage`（下载列表 + 进度 + 暂停/恢复/取消/移除）、`SyncListPage`（同步记录 + 待处理 + 冲突待办两 tab + WS 状态徽章）、`UploadPage`（picker 选文件 → 输入远端路径 → ChunkedUploader 进度）、`SettingsPage`（同步开关/保活/WiFi/分片大小/WS 状态）、`ServerSettingsPage`、`EditProfilePage`（**multipart 已接通**：用户名/邮箱/手机 + 头像选择上传）、`ChangePasswordPage`（接 `POST /v1/user/change-password`）。
 
 ### 3C.8 已知差距与待办（鸿蒙端）
 
-- **本地 multipart 上传**：`update-info` 接口需要 multipart/form-data，`Request` 单例不支持；`EditProfilePage` 暂为 stub（与 Android 早期同样问题，待补 multipart）。
-- **HomePage / MonitorPage** 仍为占位（Phase 5 仪表盘与设备列表未实现）。
-- **下载持久化**：与 Android `DownloadStore` 等价的未完成下载任务落盘恢复机制尚未接（被杀重开无法续传旧任务）。
-- **同步映射 UI**：Android `SyncFolderMapScreen` 等价的 folder→本地路径映射 UI 未实现（默认映射到沙箱 `filesDir/sync/<name>`，无法用户自定义）。
+- ✅ ~本地 multipart 上传~ → `Request.postMultipart` 已实现，`EditProfilePage` 已接通（含头像选择上传）。
+- ✅ ~HomePage / MonitorPage 占位~ → 已实现完整仪表盘 + 监控面板 + DeviceListPage。
+- ✅ ~下载持久化~ → `DownloadStore`（preferences JSON）+ `restorePendingDownloads()` 已接。
+- ✅ ~同步映射 UI~ → `SyncFolderMapPage` + `SyncMappingStore`（公共下载目录，启用/禁用开关）。
+- ✅ ~保活~ → `BackgroundTaskHelper`（长时任务 DATA_TRANSFER + 通知栏常驻）。
+- ✅ ~下载通知~ → `NotificationHelper`（进度/完成/失败）。
+- ✅ ~下载保存位置~ → `DocumentSaveDialog` 弹框选择。
 - **AVPlayer / 文件预览**：未实现，下载完成的文件无 in-app 预览。
+- **文件搜索**：未实现（Android 有 `FileSearchDestination`）。
+- **多文件批量上传**：当前仅单文件上传（Android 支持多文件选择 + 队列）。
 - **`HarmonyOS NEXT` ABI 限制**：仅支持 `arm64-v8a` + `x86_64`，**不支持 `armeabi-v7a`**（已在 build-profile.json5 abiFilters 中体现）。
 - **features 模板残留**：`common/` / `adaptiveLayout/` / `responsiveLayout/` 是 DevEco 初始模板，已无用，待清理（oh-package 依赖也已断开）。
+- **`router.back()` 已废弃**：DevEco 警告，待迁移到新导航 API（`Navigation` 组件）。
 
 ---
 
