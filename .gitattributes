@@ -1,0 +1,3 @@
+# 让 GitHub Linguist 把鸿蒙 ArkTS(.ets) 计入 TypeScript 语言统计
+*.ets linguist-language=TypeScript
+*.ets linguist-detectable=true
