@@ -48,7 +48,7 @@ class SyncMappingStoreClass {
   getLocalPath(folderId: number, folderName: string, filesDir: string): string {
     const m = this.mappings.get(folderId);
     if (m !== undefined && m.localPath.length > 0) return m.localPath;
-    return cloudLadderStorage.syncFolderDir(folderName);
+    return cloudLadderStorage.syncFolderPath(folderName);
   }
 
   async setMapping(folderId: number, localPath: string, enabled: boolean): Promise<void> {

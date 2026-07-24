@@ -100,10 +100,15 @@ export class DownloadController {
     let localPath: string;
     if (targetUri.length > 0) {
       localPath = targetUri;
-    } else {
-      // 默认下载位置：应用专属公共目录 Download/云梯/下载（文件管理器可见）
+    } else if (cloudLadderStorage.isReady()) {
+      // 默认下载位置：公共目录 Download/<包名>/下载（文件管理器可见）
       const dir: string = cloudLadderStorage.downloadDir();
-      cloudLadderStorage.mkdirs(dir);
+      await cloudLadderStorage.ensureDir(dir);
+      localPath = `${dir}/${fileName}`;
+    } else {
+      // 未就绪兜底：落沙箱（不可见），前台 init 后新下载会落公共目录
+      const dir: string = this.ctx !== null ? `${this.ctx.filesDir}/downloads` : 'downloads';
+      await cloudLadderStorage.ensureDir(dir);
       localPath = `${dir}/${fileName}`;
     }
 
@@ -185,12 +190,12 @@ export class DownloadController {
     // 2. 若已有部分文件且支持断点续传，从 received 继续
     let writerFd: number = -1;
     try {
-      if (acceptRanges && fs.accessSync(localPath)) {
-        const stat: fs.Stat = fs.statSync(localPath);
+      if (acceptRanges && await fs.access(localPath)) {
+        const stat: fs.Stat = await fs.stat(localPath);
         received = stat.size;
       }
-      // 以追加写打开（不存在则创建）
-      const file: fs.File = fs.openSync(localPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.APPEND);
+      // 以追加写打开（不存在则创建，异步）
+      const file: fs.File = await fs.open(localPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.APPEND);
       writerFd = file.fd;
     } catch (e) {
       this.failItem(id, `open local failed: ${(e as Error).message}`);
@@ -230,7 +235,7 @@ export class DownloadController {
           this.failItem(id, `range fetch failed: ${(e as Error).message}`);
           return;
         }
-        fs.writeSync(writerFd, buf);
+        await fs.write(writerFd, buf);
         received += buf.byteLength;
         const progress: number = total > 0 ? Math.floor((received / total) * 100) : 0;
         const idx: number = this.findIndex(id);
@@ -254,7 +259,7 @@ export class DownloadController {
       NotificationHelper.notifyFailed(id, params.name, (e as Error).message);
     } finally {
       if (writerFd >= 0) {
-        try { fs.closeSync(writerFd); } catch (e) { /* ignore */ }
+        try { await fs.close(writerFd); } catch (e) { /* ignore */ }
       }
       this.cancelFlags.delete(id);
       this.pausedFlags.delete(id);

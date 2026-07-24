@@ -5,7 +5,7 @@ import { wsManager, WsState, WsMessage } from '../net/WebSocketManager';
 import { SyncApi } from '../api/sync/SyncApi';
 import type { SyncFolderInfo, WsTaskCreatedEvent, WsConflictEvent, WsMessageEnvelope, SyncTaskInfo, ScanItemDto, SyncScanParams } from '../api/sync/SyncTypes';
 import { Request } from '../net/Request';
-import { fileHashHex, hashBufferHex } from '../core/FileCore';
+import { fileHashHex } from '../core/FileCore';
 import { syncMappingStore } from './SyncMappingStore';
 import { cloudLadderStorage } from '../storage/CloudLadderStorage';
 
@@ -19,10 +19,10 @@ import { cloudLadderStorage } from '../storage/CloudLadderStorage';
  *  - **离线追赶**：WS Connected 时拉本设备 pending 任务 + scan 全量清单比对补派（对标 Android Phase2）。
  *  - **落盘校验**：download 整块下载到内存 → 对 buffer 直接算 blake3 校验 → 写授权目录（无原子 rename）。
  *
- * 本地同步根目录：用户授权的「云梯根」/同步/<folder_name>/（docs:// URI，用户可在文件管理器查看/操控）。
- * 鸿蒙手机不支持公共固定目录，须用户先在设置里选一个文件夹授权，见 storage/CloudLadderStorage。
- * native 内核 mmap 不认 docs URI，故授权目录内文件的 hash 走纯 ArkTS（fileHashHex 自动回退）/
- * 下载校验直接对内存 buffer 算（hashBufferHex）。
+ * 本地同步根目录：应用专属公共目录 Download/<包名>/同步/<folder>/（真实 path，用户在文件管理器可见）。
+ * 见 storage/CloudLadderStorage（picker DOWNLOAD 授权 + FileUri 转 path + 全异步 fs）。
+ * ⚠ 下载校验必须**先写文件再 fileHashHex(path)**（native 子线程 mmap，回退纯 ArkTS 异步分片），
+ *   绝不能对整块 buffer 在主线程同步算 blake3——大文件会 THREAD_BLOCK 卡死闪退。
  */
 
 class SyncEngineClass {
@@ -78,26 +78,25 @@ class SyncEngineClass {
     try {
       const resp = await SyncApi.listFolders();
       this.folders = resp.data !== null ? resp.data : [];
-      if (!cloudLadderStorage.hasRoot()) {
+      if (!cloudLadderStorage.isReady()) {
         console.warn('[SyncEngine] cloud root not set, skip creating sync dirs');
         return;
       }
-      await cloudLadderStorage.ensureActivated();
       // 为每个启用的 folder 创建本地映射目录（授权根/同步/<name>）
       for (let i = 0; i < this.folders.length; i++) {
         const f: SyncFolderInfo = this.folders[i];
         if (!f.enabled) continue;
-        cloudLadderStorage.ensureSyncFolderDir(f.name);
+        await cloudLadderStorage.ensureSyncFolder(f.name);
       }
     } catch (e) {
       console.warn(`[SyncEngine] listFolders failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
     }
   }
 
-  /** folder → 本地映射目录 URI（授权根/同步/<name>；未授权根目录时返回空串）。 */
+  /** folder → 本地映射目录 path（授权根/同步/<name>；未授权时返回空串）。 */
   private localDirFor(f: SyncFolderInfo): string {
-    if (!cloudLadderStorage.hasRoot()) return '';
-    return cloudLadderStorage.syncFolderDir(f.name);
+    if (!cloudLadderStorage.isReady()) return '';
+    return cloudLadderStorage.syncFolderPath(f.name);
   }
 
   /** folder by id */
@@ -119,12 +118,11 @@ class SyncEngineClass {
       // 重连后刷新 folder 列表（服务端可能新增）
       await this.refreshFolders();
 
-      // 未授权云梯根目录：无处落盘，整轮追赶跳过（用户在设置里选目录后重连会重新追赶）
-      if (!cloudLadderStorage.hasRoot()) {
-        console.warn('[云梯Boot] catchUp skipped: cloud root not set');
+      // 未就绪（授权失效/未初始化）：无处落盘，整轮追赶跳过（下次前台 init 后重连会重新追赶）
+      if (!cloudLadderStorage.isReady()) {
+        console.warn('[云梯Boot] catchUp skipped: cloud not ready');
         return;
       }
-      await cloudLadderStorage.ensureActivated();
 
       // 1) 拉本设备积压 pending 任务并执行（离线期间已派发未完成的）
       try {
@@ -167,7 +165,7 @@ class SyncEngineClass {
 
   /** 扫描本地同步目录，构建全量清单 POST /sync/scan，服务端比对 trunk 补派下载。 */
   private async catchUpFolder(deviceId: string, folder: SyncFolderInfo): Promise<void> {
-    const localRoot: string = cloudLadderStorage.ensureSyncFolderDir(folder.name);
+    const localRoot: string = await cloudLadderStorage.ensureSyncFolder(folder.name);
     const items: ScanItemDto[] = [];
     await this.walk(localRoot, '', items);
     console.info(`[云梯Boot] scan catchUp folder=${folder.name} localRoot=${localRoot} items=${items.length}`);
@@ -179,7 +177,7 @@ class SyncEngineClass {
   private async walk(dir: string, relPrefix: string, items: ScanItemDto[]): Promise<void> {
     let names: string[];
     try {
-      names = fs.listFileSync(dir);
+      names = await fs.listFile(dir);
     } catch (e) {
       return;
     }
@@ -190,7 +188,7 @@ class SyncEngineClass {
       const rel: string = relPrefix.length === 0 ? name : `${relPrefix}/${name}`;
       let stat: fs.Stat;
       try {
-        stat = fs.statSync(full);
+        stat = await fs.stat(full);
       } catch (e) {
         continue;
       }
@@ -290,17 +288,17 @@ class SyncEngineClass {
   // ====== 任务执行 ======
 
   private async executeDownload(taskId: number, folder: SyncFolderInfo, ev: WsTaskCreatedEvent): Promise<void> {
-    if (!cloudLadderStorage.hasRoot()) {
+    if (!cloudLadderStorage.isReady()) {
       await SyncApi.failTask(taskId, 'cloud root not set');
       return;
     }
-    await cloudLadderStorage.ensureActivated();
-    // 目标目录 = 授权根/同步/<folder>/<relative_path>，逐层建出
-    const folderDir: string = cloudLadderStorage.ensureSyncFolderDir(folder.name);
-    const dirUri: string = ev.relative_path.length > 0
-      ? cloudLadderStorage.mkdirpUnder(folderDir, ev.relative_path)
-      : folderDir;
-    const finalPath: string = `${dirUri}/${ev.file_name}`;
+    // 目标目录 = 授权根/同步/<folder>/<relative_path>，逐层建出（异步）
+    const folderDir: string = await cloudLadderStorage.ensureSyncFolder(folder.name);
+    const dirPath: string = ev.relative_path.length > 0 ? `${folderDir}/${ev.relative_path}` : folderDir;
+    if (ev.relative_path.length > 0) {
+      await cloudLadderStorage.ensureDir(dirPath);
+    }
+    const finalPath: string = `${dirPath}/${ev.file_name}`;
     try {
       // 整块下载到内存
       const buf: ArrayBuffer = await Request.downloadBuffer('/file/download', {
@@ -309,20 +307,22 @@ class SyncEngineClass {
         'device_id': '',
       });
 
-      // 校验 blake3：对内存 buffer 直接算（授权目录是 docs URI，native mmap 不认；且省一次读回）
-      const hasHash: boolean = ev.file_hash !== null && ev.file_hash !== undefined && ev.file_hash.length > 0;
-      const localHash: string = hashBufferHex(new Uint8Array(buf));
-      if (hasHash && localHash.toLowerCase() !== (ev.file_hash as string).toLowerCase()) {
-        await SyncApi.failTask(taskId, `hash mismatch: got ${localHash}, want ${ev.file_hash}`);
-        return;
+      // 先写入授权目录（异步 fs，不阻塞主线程）
+      const file: fs.File = await fs.open(finalPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        await fs.write(file.fd, buf);
+      } finally {
+        await fs.close(file.fd);
       }
 
-      // 写入授权目录（直接写目标：内容一次性 write，非流式，半写风险低；失败下轮 scan 会重下）
-      const file: fs.File = fs.openSync(finalPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(file.fd, buf);
-      } finally {
-        fs.closeSync(file);
+      // 校验 blake3：fileHashHex 走 native（子线程 mmap+rayon）优先，回退纯 ArkTS 异步分片，
+      // 均不占主线程——绝不能对整块 buffer 在主线程同步算（大文件会 THREAD_BLOCK 卡死闪退）。
+      const hasHash: boolean = ev.file_hash !== null && ev.file_hash !== undefined && ev.file_hash.length > 0;
+      const localHash: string = await fileHashHex(finalPath);
+      if (hasHash && localHash.toLowerCase() !== (ev.file_hash as string).toLowerCase()) {
+        try { await fs.unlink(finalPath); } catch (e) { /* ignore */ }
+        await SyncApi.failTask(taskId, `hash mismatch: got ${localHash}, want ${ev.file_hash}`);
+        return;
       }
 
       await SyncApi.completeTask(taskId, hasHash ? (ev.file_hash as string) : localHash);
@@ -333,18 +333,17 @@ class SyncEngineClass {
   }
 
   private async executeDelete(taskId: number, folder: SyncFolderInfo, ev: WsTaskCreatedEvent): Promise<void> {
-    if (!cloudLadderStorage.hasRoot()) {
+    if (!cloudLadderStorage.isReady()) {
       await SyncApi.failTask(taskId, 'cloud root not set');
       return;
     }
-    await cloudLadderStorage.ensureActivated();
-    const folderDir: string = cloudLadderStorage.syncFolderDir(folder.name);
+    const folderDir: string = cloudLadderStorage.syncFolderPath(folder.name);
     const path: string = ev.relative_path.length > 0
       ? `${folderDir}/${ev.relative_path}/${ev.file_name}`
       : `${folderDir}/${ev.file_name}`;
     try {
       try {
-        fs.unlinkSync(path);
+        await fs.unlink(path);
       } catch (e) {
         // 不存在视为已删
       }
@@ -355,15 +354,14 @@ class SyncEngineClass {
   }
 
   private async executeMkdir(taskId: number, folder: SyncFolderInfo, ev: WsTaskCreatedEvent): Promise<void> {
-    if (!cloudLadderStorage.hasRoot()) {
+    if (!cloudLadderStorage.isReady()) {
       await SyncApi.failTask(taskId, 'cloud root not set');
       return;
     }
-    await cloudLadderStorage.ensureActivated();
-    const folderDir: string = cloudLadderStorage.ensureSyncFolderDir(folder.name);
+    const folderDir: string = await cloudLadderStorage.ensureSyncFolder(folder.name);
     const rel: string = ev.relative_path.length > 0 ? `${ev.relative_path}/${ev.file_name}` : ev.file_name;
     try {
-      cloudLadderStorage.mkdirpUnder(folderDir, rel);
+      await cloudLadderStorage.ensureDir(`${folderDir}/${rel}`);
       await SyncApi.completeTask(taskId, '');
     } catch (e) {
       await SyncApi.failTask(taskId, `mkdir failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);

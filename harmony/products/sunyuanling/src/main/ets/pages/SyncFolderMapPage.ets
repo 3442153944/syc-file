@@ -53,7 +53,7 @@ struct SyncFolderMapPage {
   }
 
   async toggleEnabled(folder: SyncFolderInfo, enabled: boolean): Promise<void> {
-    const localPath: string = cloudLadderStorage.syncFolderDir(folder.name);
+    const localPath: string = cloudLadderStorage.syncFolderPath(folder.name);
     await syncMappingStore.setMapping(folder.id, localPath, enabled);
     this.folders = this.folders.slice();
   }

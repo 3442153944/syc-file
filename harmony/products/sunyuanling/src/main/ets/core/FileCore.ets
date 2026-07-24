@@ -131,9 +131,9 @@ async function describeNative(filePath: string, chunkSize: number): Promise<Desc
 
 /** 纯 ArkTS 回退：一趟顺序读，算每片 blake3 叶子 + 整文件流式 blake3 + Merkle 树根。 */
 async function describeArkTS(filePath: string, chunkSize: number): Promise<Description> {
-  const file: fs.File = fs.openSync(filePath, fs.OpenMode.READ_ONLY);
+  const file: fs.File = await fs.open(filePath, fs.OpenMode.READ_ONLY);
   try {
-    const fileStat: fs.Stat = fs.statSync(file.fd);
+    const fileStat: fs.Stat = await fs.stat(file.fd);
     const total: number = fileStat.size;
     const count: number = total === 0 ? 1 : Math.ceil(total / chunkSize);
     const lastChunkSize: number = total === 0 ? 0 : (total % chunkSize === 0 ? chunkSize : total % chunkSize);
@@ -152,7 +152,7 @@ async function describeArkTS(filePath: string, chunkSize: number): Promise<Descr
         // ArkTS fs.ReadOptions: offset 是「相对当前文件指针的偏移」（API 11 起，无 position）。
         // openSync 后指针=0；每次 readSync 读完按 length 自动前进。
         const readOpts: ReadOptions = { offset: 0, length: want };
-        const readLen: number = fs.readSync(file.fd, buf, readOpts);
+        const readLen: number = await fs.read(file.fd, buf, readOpts);
         if (readLen <= 0) break;
         const slice: Uint8Array = new Uint8Array(buf, 0, readLen);
         chunkHasher.update(slice);
@@ -184,7 +184,7 @@ async function describeArkTS(filePath: string, chunkSize: number): Promise<Descr
       fileHashHex: bytesToHex(fileHash),
     };
   } finally {
-    try { fs.closeSync(file); } catch (e) { /* ignore */ }
+    try { await fs.close(file); } catch (e) { /* ignore */ }
   }
 }
 
