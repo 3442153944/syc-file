@@ -20,6 +20,11 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        // 长时任务的**必需**声明：不写这一项，backgroundTaskManager.startBackgroundRunning
+        // 一定失败（跟通知授权、前后台时机都无关）。运行时申请的模式必须是这里的子集。
+        "backgroundModes": [
+          "dataTransfer"
+        ],
         "skills": [
           {
             "entities": [

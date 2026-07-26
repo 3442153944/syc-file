@@ -1,16 +1,14 @@
 import router from '@ohos.router';
-import fs from '@ohos.file.fs';
-import { Environment } from '@kit.CoreFileKit';
-import { common } from '@kit.AbilityKit';
-import { BusinessError, request } from '@kit.BasicServicesKit';
-import { DownloadFileButton, DownloadIconStyle, DownloadDescription } from '@kit.ArkUI';
-import { picker, fileUri } from '@kit.CoreFileKit';
 import { FileApi } from '../api/file/FileApi';
 import { WsApi } from '../api/ws/WsApi';
-import type { DiskInfo, AvailableDisksData, DownloadHistoryItem, DownloadHistoryData } from '../api/file/FileTypes';
+import type { DiskInfo, DownloadHistoryItem } from '../api/file/FileTypes';
 import { AppRoutes } from '../router/AppRoutes';
 import { wsManager, WsState } from '../net/WebSocketManager';
-import { userStore, USER_STORAGE_KEY } from '../app/UserStore';
+import { USER_STORAGE_KEY } from '../app/UserStore';
+import { STAGED_PENDING_KEY } from '../storage/SyncStagingStore';
+import { syncEngine } from '../sync/SyncEngine';
+import { FLUSH_LOG_KEY, FLUSH_ACTIVE_KEY, FlushEventKind, formatClock } from '../storage/FlushLog';
+import type { FlushEvent } from '../storage/FlushLog';
 import type { UserInfo } from '../api/user/UserTypes';
 
 /**
@@ -21,179 +19,20 @@ import type { UserInfo } from '../api/user/UserTypes';
 @Component
 export struct HomePage {
   @StorageLink(USER_STORAGE_KEY) currentUser: UserInfo | null = null;
+  /** 后台同步落在沙盒、等回前台归位到共享目录的条目数（见 storage/SyncStagingStore）。 */
+  @StorageLink(STAGED_PENDING_KEY) stagedPending: number = 0;
+  /** 搬运流水（新的在前），由 storage/FlushLog 推到 AppStorage。 */
+  @StorageLink(FLUSH_LOG_KEY) @Watch('onFeedChanged') flushLogItems: FlushEvent[] = [];
+  /** 正在搬运时按「消息流」展示。 */
+  @StorageLink(FLUSH_ACTIVE_KEY) flushActive: boolean = false;
+  private feedScroller: Scroller = new Scroller();
   @State totalBytes: number = 0;
   @State usedBytes: number = 0;
   @State deviceCount: number = 0;
   @State wsConnected: boolean = false;
   @State recentDownloads: DownloadHistoryItem[] = [];
   @State loading: boolean = true;
-  @State testResult: string = '点下面按钮测试往 Download/<包名>/1.txt 写 "123"';
   private unregWs: (() => void) | null = null;
-
-  // ====== 目录写入测试（验证哪种路径能写到公共 Download，文件管理器可见）======
-
-  private bundleName(): string {
-    const ctx = getContext(this) as common.UIAbilityContext;
-    return ctx.applicationInfo.name;
-  }
-
-  /** 异步写 <dir>/1.txt = "123"（异步 fs，不阻塞主线程，避免 appfreeze）。 */
-  private async probeWrite(tag: string, dir: string): Promise<void> {
-    const filePath: string = `${dir}/1.txt`;
-    try {
-      await fs.mkdir(dir, true);
-      const f: fs.File = await fs.open(filePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-      await fs.write(f.fd, '123');
-      await fs.close(f.fd);
-      this.testResult = `✅[${tag}] 成功\n${filePath}`;
-    } catch (e) {
-      const err = e as BusinessError;
-      this.testResult = `❌[${tag}] 失败 code=${err.code} msg=${err.message}\n${filePath}`;
-    }
-  }
-
-  /** 方式1：Environment.getUserDownloadDir()/<包名>/1.txt */
-  // private async testDownloadDir(): Promise<void> {
-  //   let d: string = '';
-  //   try {
-  //     d = Environment.getUserDownloadDir();
-  //   } catch (e) {
-  //     const err = e as BusinessError;
-  //     this.testResult = `❌[getUserDownloadDir] 取路径异常 code=${err.code} msg=${err.message}`;
-  //     return;
-  //   }
-  //   await this.probeWrite('getUserDownloadDir', `${d}/${this.bundleName()}`);
-  // }
-
-  /** 方式2：<filesDir>/../Download/<包名>/1.txt */
-  private async testFilesDirParent(): Promise<void> {
-    const ctx = getContext(this) as common.UIAbilityContext;
-    await this.probeWrite('filesDir/..', `${ctx.filesDir}/../Download/${this.bundleName()}`);
-  }
-
-  /** 方式3：/storage/Users/currentUser/Download/<包名>/1.txt */
-  private async testAbsolute(): Promise<void> {
-    await this.probeWrite('绝对路径', `/storage/Users/currentUser/Download/${this.bundleName()}`);
-  }
-
-  /**
-   * 方式4：系统下载服务 request.agent（QQ/浏览器同款）。
-   * 下载一个公网小文件（百度 favicon），完成后扫描候选路径，把实际落盘位置显示到文本框。
-   */
-  private async testRequestAgent(): Promise<void> {
-    const ctx = getContext(this) as common.UIAbilityContext;
-    const bundle: string = ctx.applicationInfo.name;
-    const fileName: string = 'ra_probe.ico';
-    this.testResult = 'request.agent 启动中...';
-    try {
-      const config: request.agent.Config = {
-        action: request.agent.Action.DOWNLOAD,
-        url: 'https://www.baidu.com/favicon.ico',
-        method: 'GET',
-        saveas: `./${fileName}`,
-        mode: request.agent.Mode.BACKGROUND,
-        overwrite: true,
-        gauge: false,
-        network: request.agent.Network.ANY,
-        title: '云梯下载探针',
-      };
-      const task: request.agent.Task = await request.agent.create(ctx, config);
-      task.on('completed', (progress: request.agent.Progress) => {
-        const candidates: string[] = [
-          `${ctx.filesDir}/../Download/${bundle}/${fileName}`,
-          `/storage/Users/currentUser/Download/${bundle}/${fileName}`,
-          `${ctx.cacheDir}/${fileName}`,
-          `${ctx.filesDir}/${fileName}`,
-        ];
-        let found: string = '(4 个候选都没找到)';
-        for (let i = 0; i < candidates.length; i++) {
-          let ok: boolean = false;
-          try { ok = fs.accessSync(candidates[i]); } catch (e) { ok = false; }
-          if (ok) { found = candidates[i]; break; }
-        }
-        this.testResult = `✅request.agent 完成\n落盘: ${found}`;
-      });
-      task.on('failed', (progress: request.agent.Progress) => {
-        this.testResult = `❌request.agent 失败 state=${progress.state}`;
-      });
-      await task.start();
-      this.testResult = 'request.agent 任务已启动，等待完成...';
-    } catch (e) {
-      const err = e as BusinessError;
-      this.testResult = `❌request.agent 异常 code=${err.code} msg=${err.message}`;
-    }
-  }
-
-  /**
-   * 方式5：DownloadFileButton 安全组件（QQ 无弹框机制）。
-   * 点击该系统按钮即授权，此时尝试拿 Download 路径并写 1.txt，看点击授权后哪种路径能成。
-   */
-  // private async testDownloadButton(): Promise<void> {
-  //   const ctx = getContext(this) as common.UIAbilityContext;
-  //   const bundle: string = ctx.applicationInfo.name;
-  //   let head: string = 'DLBtn点击后:\n';
-  //   let d: string = '';
-  //   try {
-  //     d = Environment.getUserDownloadDir();
-  //     head += `getUserDownloadDir=${d}\n`;
-  //   } catch (e) {
-  //     const err = e as BusinessError;
-  //     head += `getUserDownloadDir失败 code=${err.code}\n`;
-  //   }
-  //   // 授权后优先用 getUserDownloadDir 返回值，否则退到绝对路径
-  //   const base: string = d.length > 0 ? d : `/storage/Users/currentUser/Download`;
-  //   const dir: string = `${base}/${bundle}`;
-  //   const filePath: string = `${dir}/1.txt`;
-  //   try {
-  //     await fs.mkdir(dir, true);
-  //     const f: fs.File = await fs.open(filePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-  //     await fs.write(f.fd, '123');
-  //     await fs.close(f.fd);
-  //     this.testResult = `${head}✅成功: ${filePath}`;
-  //   } catch (e) {
-  //     const err = e as BusinessError;
-  //     this.testResult = `${head}❌失败 code=${err.code} msg=${err.message}\n${filePath}`;
-  //   }
-  // }
-
-  /**
-   * 方式6：DocumentViewPicker.save() + pickerMode=DOWNLOAD（QQ/DownloadFileButton 内部机制）。
-   * 直接存到 Download/应用名、不弹选位置框、不依赖 getUserDownloadDir（绕开 801）。
-   */
-  private async testPickerDownloadMode(): Promise<void> {
-    const ctx = getContext(this) as common.UIAbilityContext;
-    this.testResult = 'picker DOWNLOAD 拿授权目录...';
-    let dirUri: string = '';
-    // 1) picker DOWNLOAD 模式拿 Download/应用名 目录 uri（无弹框）
-    try {
-      const options: picker.DocumentSaveOptions = new picker.DocumentSaveOptions();
-      options.newFileNames = ['ra_dl.ico'];
-      options.pickerMode = picker.DocumentPickerMode.DOWNLOAD;
-      const viewPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(ctx);
-      const result: string[] = await viewPicker.save(options);
-      if (result.length === 0) {
-        this.testResult = '❌picker DOWNLOAD 返回空数组';
-        return;
-      }
-      dirUri = result[0];
-    } catch (e) {
-      const err = e as BusinessError;
-      this.testResult = `❌picker DOWNLOAD 失败 code=${err.code} msg=${err.message}`;
-      return;
-    }
-    // 2) FileUri 把授权目录 uri 转成真实 path，再用 fs 直接写文件
-    try {
-      const dirPath: string = new fileUri.FileUri(dirUri).path;
-      const filePath: string = `${dirPath}/1.txt`;
-      const f: fs.File = fs.openSync(filePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
-      fs.writeSync(f.fd, '123');
-      fs.closeSync(f);
-      this.testResult = `✅✅写入公共目录成功!\n目录uri=${dirUri}\npath=${dirPath}\n文件=${filePath}`;
-    } catch (e) {
-      const err = e as BusinessError;
-      this.testResult = `目录uri=${dirUri}\nFileUri转换/写失败 code=${err.code} ${err.message}`;
-    }
-  }
 
   aboutToAppear(): void {
     this.wsConnected = wsManager.isConnected();
@@ -204,6 +43,8 @@ export struct HomePage {
       }
     });
     this.loadAll();
+    // 前台可见时沙盒里不该有东西，进首页就催一次归位
+    syncEngine.kickFlush();
   }
 
   aboutToDisappear(): void {
@@ -254,6 +95,97 @@ export struct HomePage {
     } catch (e) { /* ignore */ }
   }
 
+  /**
+   * 搬运中来新消息时自动滚回最新一条（新的在列表最前），做出「消息流」的感觉。
+   * 空闲时不抢滚动位置，让用户能安静地翻历史。
+   */
+  onFeedChanged(): void {
+    if (!this.flushActive) return;
+    try {
+      this.feedScroller.scrollToIndex(0);
+    } catch (e) { /* 列表还没布局好时忽略 */ }
+  }
+
+  /**
+   * 文件归位消息流。
+   *
+   * 搬运中 → 实时消息流（新的自动滚到最上面）；空闲 → 可翻的搬运历史。
+   * 沙盒是中转不是存储，这里既是进度反馈，也是出问题时唯一能看清「卡在哪一步」的地方。
+   */
+  @Builder
+  flushFeed() {
+    Column() {
+      Row() {
+        Text('文件归位').fontSize(14).fontWeight(FontWeight.Medium);
+        if (this.flushActive) {
+          Text('搬运中')
+            .fontSize(10).fontColor('#FFFFFF')
+            .backgroundColor('#FF9500').borderRadius(8)
+            .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+            .margin({ left: 8 });
+        }
+        Blank();
+        if (this.stagedPending > 0) {
+          Text(`待归位 ${this.stagedPending} · 点击立即搬运`)
+            .fontSize(11).fontColor('#FF9500');
+        } else {
+          Text('沙盒已清空').fontSize(11).fontColor('#34C759');
+        }
+      }
+      .width('100%')
+      .onClick(() => { syncEngine.kickFlush(); });
+
+      if (this.flushLogItems.length === 0) {
+        Text('暂无搬运记录').fontSize(13).fontColor('#9E9E9E').margin({ top: 12 });
+      } else {
+        List({ space: 6, scroller: this.feedScroller }) {
+          ForEach(this.flushLogItems, (item: FlushEvent) => {
+            ListItem() {
+              Row() {
+                Text(this.kindIcon(item.kind)).fontSize(12).width(18);
+                Text(item.fileName)
+                  .fontSize(12).layoutWeight(1)
+                  .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis });
+                Text(this.kindLabel(item.kind))
+                  .fontSize(11).fontColor(this.kindColor(item.kind)).margin({ left: 6 });
+                Text(formatClock(item.at))
+                  .fontSize(10).fontColor('#BDBDBD').margin({ left: 6 });
+              }.width('100%').alignItems(VerticalAlign.Center);
+            }
+          }, (item: FlushEvent) => item.id.toString());
+        }
+        .width('100%')
+        .height(132)
+        .margin({ top: 8 })
+        .scrollBar(BarState.Auto)
+        .edgeEffect(EdgeEffect.Spring);
+      }
+    }
+    .width('92%').padding(16).backgroundColor('#FFFFFF').borderRadius(12).margin({ top: 12 })
+    .alignItems(HorizontalAlign.Start);
+  }
+
+  private kindIcon(kind: string): string {
+    if (kind === FlushEventKind.MOVED as string) return '✅';
+    if (kind === FlushEventKind.FAILED as string) return '⚠️';
+    if (kind === FlushEventKind.SCAN as string) return '📋';
+    return '📦';
+  }
+
+  private kindLabel(kind: string): string {
+    if (kind === FlushEventKind.MOVED as string) return '已归位';
+    if (kind === FlushEventKind.FAILED as string) return '失败·将重试';
+    if (kind === FlushEventKind.SCAN as string) return '清单';
+    return '暂存中';
+  }
+
+  private kindColor(kind: string): string {
+    if (kind === FlushEventKind.MOVED as string) return '#34C759';
+    if (kind === FlushEventKind.FAILED as string) return '#FF3B30';
+    if (kind === FlushEventKind.SCAN as string) return '#007AFF';
+    return '#FF9500';
+  }
+
   private formatBytes(bytes: number): string {
     if (bytes >= 1099511627776) return `${(bytes / 1099511627776).toFixed(1)} TB`;
     if (bytes >= 1073741824) return `${(bytes / 1073741824).toFixed(1)} GB`;
@@ -276,46 +208,6 @@ export struct HomePage {
             .borderRadius(10)
             .backgroundColor(this.wsConnected ? '#E8F8EE' : '#FFEBEE');
         }.width('100%').padding({ left: 16, right: 16, top: 16, bottom: 8 });
-
-        // ====== 目录写入测试台（临时，验证哪种路径能写公共 Download）======
-        Column() {
-          Text('目录写入测试').fontSize(14).fontWeight(FontWeight.Medium).width('100%');
-          Text(this.testResult)
-            .fontSize(12).fontColor('#333333').width('100%').margin({ top: 6 });
-          Row() {
-            // Button('方式1 DownloadDir').fontSize(11).height(34).layoutWeight(1)
-            //   .onClick(() => { this.testDownloadDir(); });
-            Button('方式2 filesDir/..').fontSize(11).height(34).layoutWeight(1).margin({ left: 6 })
-              .onClick(() => { this.testFilesDirParent(); });
-          }.width('100%').margin({ top: 8 });
-          Row() {
-            Button('方式3 绝对路径').fontSize(11).height(34).layoutWeight(1)
-              .onClick(() => { this.testAbsolute(); });
-            Button('方式4 request.agent').fontSize(11).height(34).layoutWeight(1).margin({ left: 6 })
-              .backgroundColor('#FF9500')
-              .onClick(() => { this.testRequestAgent(); });
-          }.width('100%').margin({ top: 6 });
-          // 方式5：DownloadFileButton 安全组件（点击即授权，QQ 无弹框机制）
-          // Row() {
-          //   DownloadFileButton({
-          //     contentOptions: {
-          //       icon: DownloadIconStyle.FULL_FILLED,
-          //       text: DownloadDescription.DOWNLOAD
-          //     }
-          //   })
-          //     .backgroundColor('#34C759')
-          //     .borderRadius(8)
-          //     .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-          //     .onClick(() => { this.testDownloadButton(); });
-          //   Text('← 方式5 点这个安全组件').fontSize(11).fontColor('#9E9E9E').margin({ left: 8 });
-          // }.width('100%').margin({ top: 8 }).alignItems(VerticalAlign.Center);
-          Row() {
-            Button('方式6 picker DOWNLOAD 模式（重点）').fontSize(11).height(34).layoutWeight(1)
-              .backgroundColor('#AF52DE')
-              .onClick(() => { this.testPickerDownloadMode(); });
-          }.width('100%').margin({ top: 6 });
-        }
-        .width('92%').padding(14).backgroundColor('#FFF8E1').borderRadius(12).margin({ top: 8 });
 
         // 用户问候
         Text(`你好，${this.currentUser?.username ?? '用户'}`)
@@ -387,6 +279,9 @@ export struct HomePage {
           .onClick(() => { router.pushUrl({ url: AppRoutes.TRANSFERS }); });
         }
         .width('92%').padding(16).backgroundColor('#FFFFFF').borderRadius(12).margin({ top: 12 });
+
+        // 文件归位（沙盒 → 共享目录）滚动消息流 / 历史
+        this.flushFeed();
 
         // 最近下载
         Column() {

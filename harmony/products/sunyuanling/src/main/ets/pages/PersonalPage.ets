@@ -100,6 +100,8 @@ export struct PersonalPage {
           this.menuItem('同步列表', () => { router.pushUrl({ url: AppRoutes.SYNC_LIST }); });
           this.menuItem('传输列表', () => { router.pushUrl({ url: AppRoutes.TRANSFERS }); });
           this.menuItem('设置', () => { router.pushUrl({ url: AppRoutes.SETTINGS }); });
+          // 同步台账、后台暂存文件都在沙盒里，给用户一个看得见管得着的入口
+          this.menuItem('沙盒空间', () => { router.pushUrl({ url: AppRoutes.SANDBOX }); });
         }
         .width('90%')
         .backgroundColor('#FFFFFF')

@@ -6,7 +6,7 @@ import { AppRoutes } from '../router/AppRoutes';
 import { authManager, AuthEvent } from '../net/AuthManager';
 import { TokenManager } from '../token/tokenManager';
 import { syncEngine } from '../sync/SyncEngine';
-import { initCloudStorage } from '../storage/CloudLadderStorage';
+import { cloudLadderStorage, initCloudStorage } from '../storage/CloudLadderStorage';
 import HomePage from './HomePage';
 import FilesPage from './FilesPage';
 import MonitorPage from './MonitorPage';
@@ -38,8 +38,14 @@ struct MainShell {
     // 云梯公共目录初始化（picker DOWNLOAD 拿 Download/包名 授权 → 建 同步/、下载/）
     try {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      cloudLadderStorage.onForegroundHint();
       const ready: boolean = await initCloudStorage(ctx);
       console.info(`[MainShell] cloud storage ready=${ready}`);
+      // 上次会话在后台落到沙盒、还没归位的文件，此刻拿到授权就搬进共享目录
+      if (ready) {
+        const moved: number = await syncEngine.flushStaging();
+        if (moved > 0) console.info(`[MainShell] staging flushed moved=${moved}`);
+      }
     } catch (e) {
       console.warn(`[MainShell] initCloudStorage failed: ${(e as Error)?.message ?? JSON.stringify(e)}`);
     }

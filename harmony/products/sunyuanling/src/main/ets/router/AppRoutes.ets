@@ -21,4 +21,5 @@ export class AppRoutes {
   static readonly UPLOAD: string = 'pages/UploadPage';
   static readonly DEVICE_LIST: string = 'pages/DeviceListPage';
   static readonly SYNC_FOLDER_MAP: string = 'pages/SyncFolderMapPage';
+  static readonly SANDBOX: string = 'pages/SandboxPage'; // 应用沙盒浏览（台账/暂存可见可管）
 }

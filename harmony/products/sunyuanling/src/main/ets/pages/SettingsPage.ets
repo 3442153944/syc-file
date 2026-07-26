@@ -17,9 +17,11 @@ struct SettingsPage {
   @State chunkSize: number = appConfig.uploadChunkSize;
   @State wsState: WsState = wsManager.getState();
   @State keepAliveRunning: boolean = backgroundTaskHelper.isRunning();
+  @State keepAliveError: string = backgroundTaskHelper.getLastError();
 
   aboutToAppear(): void {
     this.keepAliveRunning = backgroundTaskHelper.isRunning();
+    this.keepAliveError = backgroundTaskHelper.getLastError();
   }
 
   async toggleAutoSync(v: boolean): Promise<void> {
@@ -31,11 +33,12 @@ struct SettingsPage {
     this.forceKeep = v;
     await appConfig.update(undefined, undefined, undefined, undefined, undefined, undefined, v);
     if (v) {
-      await backgroundTaskHelper.start();
+      await backgroundTaskHelper.ensureStarted();
     } else {
       await backgroundTaskHelper.stop();
     }
     this.keepAliveRunning = backgroundTaskHelper.isRunning();
+    this.keepAliveError = backgroundTaskHelper.getLastError();
   }
 
   async toggleWifi(v: boolean): Promise<void> {
@@ -64,8 +67,12 @@ struct SettingsPage {
       // 保活设置
       Text('后台保活').fontSize(13).fontColor('#9E9E9E').width('92%').margin({ top: 16, bottom: 4 });
       Column() {
-        this.toggleRow('强制保活（长时任务 + 通知栏常驻）', this.forceKeep, (v: boolean) => { this.toggleKeep(v); });
-        this.infoRow('保活状态', this.keepAliveRunning ? '运行中' : '未启动');
+        this.toggleRow('后台同步保活（长时任务）', this.forceKeep, (v: boolean) => { this.toggleKeep(v); });
+        // 长时任务没跑起来 = 退到后台几秒进程被冻结、传输被掐，必须把失败原因显出来，
+        // 别再像以前那样只在 console 里悄悄吞掉。
+        this.infoRow('保活状态', this.keepAliveRunning
+          ? '运行中 · dataTransfer'
+          : `未启动${this.keepAliveError.length > 0 ? ' · ' + this.keepAliveError : ''}`);
       }
       .width('92%')
       .backgroundColor('#FFFFFF')

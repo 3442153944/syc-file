@@ -12,6 +12,7 @@
     "pages/EditProfilePage",
     "pages/ChangePasswordPage",
     "pages/DeviceListPage",
-    "pages/SyncFolderMapPage"
+    "pages/SyncFolderMapPage",
+    "pages/SandboxPage"
   ]
 }
