@@ -8,7 +8,7 @@ import { Request } from '../net/Request';
 import { ResponseException } from '../net/Response';
 import { fileHashHex } from '../core/FileCore';
 import { syncMappingStore } from './SyncMappingStore';
-import { syncBaseStore } from './SyncBaseStore';
+import { syncBaseStore, BASE_MIRROR_NAME } from './SyncBaseStore';
 import type { BaseEntry } from './SyncBaseStore';
 import { flushLog, FlushEventKind } from '../storage/FlushLog';
 import { cloudLadderStorage } from '../storage/CloudLadderStorage';
@@ -48,6 +48,12 @@ const DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_ATTEMPTS = 3;
 /** 沙盒里还有货时的归位重试间隔。沙盒是中转不是存储，越快搬空越好。 */
 const FLUSH_RETRY_INTERVAL_MS = 5000;
+/**
+ * 每个同步 folder 根下的哨兵文件，两个用途：
+ *  ① 枚举自检：它一定在，`fs.listFile` 列不出它 = 这个目录上的枚举不可信（见 canTrustEmptyListing）；
+ *  ② 「本设备同步过这个 folder」的标记。
+ */
+const SENTINEL_NAME = '.ytsync';
 
 /** 本次下载的落盘去向。 */
 interface WriteTarget {
@@ -129,6 +135,10 @@ class SyncEngineClass {
   /** 停止：断 WS、解注册 */
   stop(): void {
     if (!this.started) return;
+    // 台账里可能还压着防抖窗口内的账，进程随时会被回收，先落盘
+    syncBaseStore.flushNow().catch((e: Error) => {
+      console.warn(`[SyncEngine] baseline flush on stop failed: ${e.message}`);
+    });
     if (this.unregMsg !== null) { this.unregMsg(); this.unregMsg = null; }
     if (this.unregState !== null) { this.unregState(); this.unregState = null; }
     wsManager.unregisterAuthListener();
@@ -205,7 +215,7 @@ class SyncEngineClass {
 
   // ====== WS 连接后追赶 ======
 
-  private async onConnected(): Promise<void> {
+  private async onConnected(force: boolean = false): Promise<void> {
     // 串行化：WS 重连风暴时避免并发追赶
     if (this.catchUpRunning) return;
     this.catchUpRunning = true;
@@ -217,6 +227,10 @@ class SyncEngineClass {
       // 前台的话，先把上一轮后台攒下的暂存搬进公共目录，再上报清单，
       // 否则 scan 会把「已下好但还在沙盒」的文件算成本地缺失。
       await this.flushStaging();
+
+      // 台账镜像：沙盒被清（重装/清数据/换调试包）后从公共目录那份重建，
+      // 否则清单为空 → 服务端全量重派。必须在任何 scan 之前完成。
+      await this.ensureBaselineMirror();
 
       // 1) 拉本设备积压 pending 任务并入队（离线期间已派发未完成的）
       try {
@@ -238,7 +252,7 @@ class SyncEngineClass {
         if (!f.enabled) continue;
         if (!syncMappingStore.isEnabled(f.id)) continue;
         try {
-          await this.catchUpFolder(deviceId, f);
+          await this.catchUpFolder(deviceId, f, force);
         } catch (e) {
           // 单个 folder 失败不影响其余 folder 的追赶。
           // ⚠ 走到这里意味着本轮**没有上报 scan**——清单残缺比不报更糟（服务端会重派整个 trunk），
@@ -256,11 +270,30 @@ class SyncEngineClass {
     return this.started;
   }
 
-  /** 手动触发一轮追赶（同步列表页「重新对齐」可用）。 */
-  triggerCatchUp(): void {
-    this.onConnected().catch((e: Error) => {
+  /**
+   * 手动触发一轮追赶（同步列表页「重新对齐」可用）。
+   *
+   * @param force 允许上报空清单 = 「我本地啥也没有，请把整个 folder 重发一遍」。
+   *   自动追赶**永远不会**这么干（见 catchUpFolder 的空清单闸门），只有用户显式点重新对齐才行。
+   */
+  triggerCatchUp(force: boolean = false): void {
+    this.onConnected(force).catch((e: Error) => {
       console.warn(`[SyncEngine] triggerCatchUp failed: ${e.message}`);
     });
+  }
+
+  /**
+   * 把台账镜像挂到公共同步目录：`<Download/包名>/同步/.yt_baseline.json`。
+   * 沙盒台账在 → 顺手补写镜像；沙盒空而镜像在 → 用镜像重建内存台账。
+   */
+  private async ensureBaselineMirror(): Promise<void> {
+    if (!cloudLadderStorage.isReady()) return;
+    try {
+      await cloudLadderStorage.ensureDir(cloudLadderStorage.syncDir());
+      await syncBaseStore.attachMirror(`${cloudLadderStorage.syncDir()}/${BASE_MIRROR_NAME}`);
+    } catch (e) {
+      console.warn(`[SyncEngine] attach baseline mirror failed: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+    }
   }
 
   /**
@@ -339,13 +372,18 @@ class SyncEngineClass {
    * 枚举失败就会报出空清单，服务端把整个 trunk 重派一遍
    * （现象：每次切前台全量重下，靠 hash 相同才被跳过，白空转一轮）。
    * 磁盘遍历降级成补充手段：成功就并进来（捡外部塞进来的文件），失败只记一笔，不影响上报。
+   *
+   * **空清单永远不自动上报**（除非 force）：见文末的闸门。空清单 = 告诉服务端「我啥也没有」
+   * = 换来整个 trunk 的重派，这正是「鸿蒙一上线就全量拉一次」的唯一入口。
    */
-  private async catchUpFolder(deviceId: string, folder: SyncFolderInfo): Promise<void> {
+  private async catchUpFolder(deviceId: string, folder: SyncFolderInfo, force: boolean = false): Promise<void> {
     if (!cloudLadderStorage.isReady()) {
       console.warn(`[SyncEngine] scan skipped for ${folder.name}: cloud dir not authorized`);
       return;
     }
     const localRoot: string = await cloudLadderStorage.ensureSyncFolder(folder.name);
+    // 哨兵：既是「这个 folder 同步过」的标记，也是下面枚举自检的靶子
+    const sentinelOk: boolean = await this.ensureSentinel(localRoot);
     const items: ScanItemDto[] = [];
     const seen: Set<string> = new Set<string>();
 
@@ -423,6 +461,13 @@ class SyncEngineClass {
       walkErr = e instanceof Error ? e.message : JSON.stringify(e);
       console.warn(`[云梯Boot] 磁盘遍历失败（改用基线台账上报）: ${walkErr}`);
     }
+    // 诊断：台账里明明有货，遍历却一项都没列出来——十有八九又是 listFile 在授权目录上静默返回空。
+    // 自检一次把结论留在日志里：哪天真机数据证明 listFile 其实可靠，清单就能像安卓那样直接以磁盘为准，
+    // 台账退回纯加速角色，这一整类问题（台账丢 = 清单丢）就不存在了。
+    if (walkErr.length === 0 && walked.length === 0 && base.length > 0) {
+      const trust: boolean = await this.canTrustEmptyListing(localRoot);
+      console.warn(`[云梯Boot] 遍历 0 项而台账 ${base.length} 条，枚举自检=${trust ? '通过' : '不通过(listFile 不可信)'}`);
+    }
 
     // 3) 沙盒暂存：已下好、只是还没搬进公共目录的，也算"本地有"
     this.mergeStaged(folder.name, items);
@@ -459,6 +504,7 @@ class SyncEngineClass {
       if (!items[i].is_dir) fileCount++;
     }
     const summary: string = `文件=${fileCount} 目录=${items.length - fileCount} 台账=${base.length}`
+      + ` 遍历=${walked.length} 镜像=${syncBaseStore.hasMirror() ? '在' : '无'}`
       + `${vanished > 0 ? ` 已失效=${vanished}` : ''}`
       + `${walkErr.length > 0 ? ' 遍历失败(用台账)' : ''}`;
     // 这一行是排查「服务端为什么一直重派」的唯一入口，过滤关键字：SCAN汇总
@@ -468,14 +514,72 @@ class SyncEngineClass {
     }
     flushLog.add(FlushEventKind.SCAN, folder.name, `清单上报 ${summary}`, walkErr);
 
-    // 空清单极可能是台账丢了 + 遍历也不通，这种情况上报等于告诉服务端「我啥也没有」，
-    // 会换来整个 trunk 的重派。宁可这轮不报。
-    if (items.length === 0 && (base.length > 0 || walkErr.length > 0)) {
-      console.error('[云梯Boot] 清单为空且台账/遍历异常，跳过本轮 scan，避免服务端全量重派');
-      return;
+    // ⭐ 空清单闸门 —— 「上线后无条件全量拉一次」的唯一入口就在这里。
+    //
+    // 空清单的语义是「我本地一个文件都没有」，服务端据此把整个 trunk 重派一遍。
+    // 但空清单有两种可能的来源，代价天差地别：
+    //   (a) 本地**真的**是空的（第一次同步 / 用户清空了目录）→ 全量补派是对的；
+    //   (b) 台账丢了（沙盒被清）+ 枚举又不可信（listFile 在 picker 授权目录上会静默返回空）
+    //       → 文件明明在磁盘上，却告诉服务端「我啥也没有」→ 白拉一整轮。
+    // 光看 items.length 分不出这两种。所以用哨兵做**枚举自检**：哨兵一定在磁盘上，
+    // listFile 连它都列不出来 → 这个目录上的「空」不可信 → 判定为 (b)，本轮不报。
+    if (items.length === 0 && !force) {
+      const trusted: boolean = sentinelOk && await this.canTrustEmptyListing(localRoot);
+      if (!trusted) {
+        console.error(`[云梯Boot] SCAN汇总 清单为空且无法自证本地确实为空`
+          + `（哨兵=${sentinelOk ? '在' : '写不进'} 台账=${base.length} 遍历错误=${walkErr}），`
+          + '跳过本轮 scan，避免服务端全量重派');
+        flushLog.add(FlushEventKind.SCAN, folder.name, '清单为空且不可信，本轮不上报', walkErr);
+        return;
+      }
+      console.warn(`[云梯Boot] ${folder.name} 本地确认为空（枚举自检通过），上报空清单，服务端将全量补派`);
     }
+    // 上报前把台账刷到磁盘：这份清单就是按它建的，进程随时可能被冻死，别让两边对不上
+    await syncBaseStore.flushNow();
     const params: SyncScanParams = { device_id: deviceId, folder_id: folder.id, items };
     await SyncApi.scan(params);
+  }
+
+  /**
+   * 确保 folder 根下有哨兵文件，返回它是否确实躺在磁盘上。
+   * 内容无意义（只写个时间戳），存在性才是全部价值。
+   */
+  private async ensureSentinel(localRoot: string): Promise<boolean> {
+    const path: string = `${localRoot}/${SENTINEL_NAME}`;
+    try {
+      if (await fs.access(path)) return true;
+    } catch (e) { /* 当作不存在，往下建 */ }
+    try {
+      const f: fs.File = await fs.open(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        await fs.write(f.fd, `${Date.now()}`);
+      } finally {
+        await fs.close(f.fd);
+      }
+      return true;
+    } catch (e) {
+      console.warn(`[SyncEngine] 哨兵写入失败 ${path}: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+      return false;
+    }
+  }
+
+  /**
+   * 枚举自检：`fs.listFile` 能列出哨兵，才认这个目录上的「列出来是空的」这个结论。
+   * （picker 临时授权的公共目录上，listFile 会失败或静默返回空——这是本类多处绕着它走的原因。）
+   */
+  private async canTrustEmptyListing(localRoot: string): Promise<boolean> {
+    try {
+      const names: string[] = await fs.listFile(localRoot);
+      for (let i = 0; i < names.length; i++) {
+        if (names[i] === SENTINEL_NAME) return true;
+      }
+      console.error(`[云梯Boot] 枚举自检失败：listFile 列不出哨兵（返回 ${names.length} 项），`
+        + '该目录上的枚举结果一律不可信');
+      return false;
+    } catch (e) {
+      console.error(`[云梯Boot] 枚举自检失败：listFile 抛错 ${e instanceof Error ? e.message : JSON.stringify(e)}`);
+      return false;
+    }
   }
 
   /** 把该 folder 的沙盒暂存条目并进 scan 清单（公共目录已有同路径则跳过）。 */
@@ -554,9 +658,13 @@ class SyncEngineClass {
     }
   }
 
-  /** 忽略引擎自身的临时工作目录（.synctmp 原子发布 / .syncpending 冲突隔离）。 */
+  /**
+   * 忽略引擎自身的工作文件：临时目录（.synctmp 原子发布 / .syncpending 冲突隔离）
+   * 与自用记账文件（哨兵 .ytsync、台账镜像 .yt_baseline.json）。
+   * 这些进了清单会被服务端当成「本地多出来的文件」而派 delete。
+   */
   private shouldIgnore(name: string): boolean {
-    return name === '.synctmp' || name === '.syncpending';
+    return name === '.synctmp' || name === '.syncpending' || name.startsWith('.yt');
   }
 
   /** 带进程内缓存的文件 blake3（size/mtime 未变则复用）。 */

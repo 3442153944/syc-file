@@ -424,6 +424,47 @@ func (h *Hub) IsDeviceOnline(deviceID string) bool {
 	return exists
 }
 
+// OnlineDeviceIDs 当前在线的全部设备 ID。
+// 供同步 Reaper 把「目标设备在线」这个条件下沉到 SQL，避免全表捞任务回来再逐行判断。
+func (h *Hub) OnlineDeviceIDs() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]string, 0, len(h.connByDevice))
+	for deviceID := range h.connByDevice {
+		if deviceID != "" {
+			ids = append(ids, deviceID)
+		}
+	}
+	return ids
+}
+
+// DisconnectUser 断开某用户的全部连接，返回断开的连接数。
+// 用户被禁用/删除/重置密码后必须调用：token 在过期前仍然有效，光改库拦不住已建立的 WS。
+func (h *Hub) DisconnectUser(userID uint) int {
+	conns := h.GetUserConnections(userID)
+	for _, conn := range conns {
+		conn.Close()
+	}
+	return len(conns)
+}
+
+// DisconnectDevice 断开某设备的连接，返回是否确实断开了一条。
+func (h *Hub) DisconnectDevice(deviceID string) bool {
+	conn, exists := h.GetConnectionByDevice(deviceID)
+	if !exists {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// ConnectionCount 当前活跃连接数（一台设备可能有多条）。供监控页展示。
+func (h *Hub) ConnectionCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.connByID)
+}
+
 func (h *Hub) GetOnlineUsers() []uint {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

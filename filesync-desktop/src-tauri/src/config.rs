@@ -90,12 +90,24 @@ impl Default for LogConfig {
     }
 }
 
-fn default_level() -> String { "info".into() }
-fn default_true() -> bool { true }
-fn default_format() -> String { "console".into() }
-fn default_max_size() -> u64 { 100 }
-fn default_max_backup() -> u32 { 3 }
-fn default_max_age() -> u32 { 7 }
+fn default_level() -> String {
+    "info".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_format() -> String {
+    "console".into()
+}
+fn default_max_size() -> u64 {
+    100
+}
+fn default_max_backup() -> u32 {
+    3
+}
+fn default_max_age() -> u32 {
+    7
+}
 
 impl Default for SyncConfig {
     fn default() -> Self {

@@ -24,7 +24,6 @@ object ConfigManager {
         props["connectTimeoutMs"] = AppConfig.connectTimeoutMs.toString()
         props["readTimeoutMs"] = AppConfig.readTimeoutMs.toString()
         props["wsReconnectIntervalMs"] = AppConfig.wsReconnectIntervalMs.toString()
-        props["wsMaxReconnectAttempts"] = AppConfig.wsMaxReconnectAttempts.toString()
         props["uploadChunkSize"] = AppConfig.uploadChunkSize.toString()
         props["maxConcurrentUploads"] = AppConfig.maxConcurrentUploads.toString()
         props["maxConcurrentDownloads"] = AppConfig.maxConcurrentDownloads.toString()
@@ -57,7 +56,6 @@ object ConfigManager {
         AppConfig.connectTimeoutMs = props["connectTimeoutMs"]?.toString()?.toIntOrNull() ?: AppConfig.connectTimeoutMs
         AppConfig.readTimeoutMs = props["readTimeoutMs"]?.toString()?.toIntOrNull() ?: AppConfig.readTimeoutMs
         AppConfig.wsReconnectIntervalMs = props["wsReconnectIntervalMs"]?.toString()?.toLongOrNull() ?: AppConfig.wsReconnectIntervalMs
-        AppConfig.wsMaxReconnectAttempts = props["wsMaxReconnectAttempts"]?.toString()?.toIntOrNull() ?: AppConfig.wsMaxReconnectAttempts
         AppConfig.uploadChunkSize = props["uploadChunkSize"]?.toString()?.toIntOrNull() ?: AppConfig.uploadChunkSize
         AppConfig.maxConcurrentUploads = props["maxConcurrentUploads"]?.toString()?.toIntOrNull() ?: AppConfig.maxConcurrentUploads
         AppConfig.maxConcurrentDownloads = props["maxConcurrentDownloads"]?.toString()?.toIntOrNull() ?: AppConfig.maxConcurrentDownloads

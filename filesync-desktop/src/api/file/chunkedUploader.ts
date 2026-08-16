@@ -46,6 +46,11 @@ export interface UploadOptions {
   concurrency: number
   /** 本机设备 id（Web 模式从 localStorage 取）。空则不传。 */
   deviceId: string
+  /**
+   * 目标同名时的策略：'reject'（默认，服务端报错）/ 'timestamp'（服务端自动加时间戳区分）。
+   * 同步链路必须用默认值——同步目录里凭空多出个改名文件会被派发到所有设备。
+   */
+  onConflict?: 'reject' | 'timestamp'
 }
 
 interface Description {
@@ -148,16 +153,19 @@ async function runOnce(
   desc: Description,
   onProgress: (sent: number, total: number) => void,
 ): Promise<UploadCompleteData> {
-  const init = await callInit(file.name, remoteDir, desc, options.deviceId)
+  const init = await callInit(file.name, remoteDir, desc, options.deviceId, options.onConflict)
 
   // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
   // 不能调 complete（会 404 会话不存在），结果就地合成。
   if (init.instant) {
     onProgress(desc.totalSize, desc.totalSize)
+    // 名字/路径以服务端返回的为准：同名冲突加过时间戳时本地拼出来的是错的
+    // （storage_path 以前直接返回 remoteDir，那是目录不是文件路径）
+    const name = init.file_name || file.name
     return {
       file_id: 0,
-      file_name: file.name,
-      storage_path: remoteDir,
+      file_name: name,
+      storage_path: init.storage_path || `${remoteDir.replace(/[\/]+$/, '')}/${name}`,
       file_size: desc.totalSize,
       file_hash: desc.fileHashHex,
       synced: true,
@@ -234,6 +242,7 @@ async function callInit(
   remoteDir: string,
   desc: Description,
   deviceId: string,
+  onConflict?: 'reject' | 'timestamp',
 ): Promise<UploadInitData> {
   const data = await httpPost<UploadInitData>('/file/upload/init', {
     path: remoteDir,
@@ -246,6 +255,7 @@ async function callInit(
     leaf_hashes: desc.leafHashesHex,
     // 秒传在 init 阶段直接完成，服务端同步派发需排除源设备
     device_id: deviceId,
+    on_conflict: onConflict ?? '',
   })
   return data
 }

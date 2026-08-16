@@ -2,7 +2,10 @@
 // 职责：文件相关 API 调用封装。
 // 每个函数只做：组装参数 + 调用 ApiClient，不包含业务逻辑。
 use super::{params::*, response::*};
-use crate::api::{client::{ApiClient, ApiResponse}, routes};
+use crate::api::{
+    client::{ApiClient, ApiResponse},
+    routes,
+};
 use std::collections::HashMap;
 
 pub async fn get_available_disks(
@@ -49,7 +52,9 @@ pub async fn delete_download_history(
     client: &ApiClient,
     params: DeleteDownloadHistoryParams,
 ) -> Result<ApiResponse<serde_json::Value>, String> {
-    client.post(routes::FILE_DELETE_DOWNLOAD_HISTORY, &params).await
+    client
+        .post(routes::FILE_DELETE_DOWNLOAD_HISTORY, &params)
+        .await
 }
 
 // ==================== 分片上传 ====================
@@ -76,7 +81,9 @@ pub async fn upload_chunk(
 ) -> Result<ApiResponse<UploadChunkData>, String> {
     let index_str = index.to_string();
     let params: [(&str, &str); 2] = [("upload_id", upload_id), ("index", index_str.as_str())];
-    client.post_raw_bytes(routes::FILE_UPLOAD_CHUNK, &params, data).await
+    client
+        .post_raw_bytes(routes::FILE_UPLOAD_CHUNK, &params, data)
+        .await
 }
 
 /// 完成分片上传：收齐后触发服务端校验落盘。
@@ -86,4 +93,3 @@ pub async fn upload_complete(
 ) -> Result<ApiResponse<UploadCompleteData>, String> {
     client.post(routes::FILE_UPLOAD_COMPLETE, &params).await
 }
-

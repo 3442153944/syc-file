@@ -132,13 +132,22 @@ func (w *Worker) reap(ctx context.Context, timeout time.Duration) {
 	}
 
 	// 2) pending / waiting_unlock：目标在线则重新入队（补离线积压、重试等待解锁）。
-	var revivable []model.SyncTask
+	//
+	// 过滤条件下沉到 SQL，不再「全表捞 500 行完整记录回来再逐行问在线」：
+	// 离线设备的积压任务（换机、卸载、长期不开的设备）会永久留在表里，每 30s 白捞一轮；
+	// 而且 SELECT * 把 relative_path(1000)/error_message(text) 也拉回来，纯属浪费。
+	// 现在只在有设备在线时查，且只取 id 一列。
+	online := w.engine.hub.OnlineDeviceIDs()
+	if len(online) == 0 {
+		return
+	}
 	statuses := []string{model.SyncStatusPending, model.SyncStatusWaitingUnlock}
-	if err := w.engine.db.Where("sync_status IN ?", statuses).Limit(500).Find(&revivable).Error; err == nil {
-		for _, task := range revivable {
-			if w.engine.hub.IsDeviceOnline(task.TargetDeviceID) {
-				w.engine.store.EnqueueTask(ctx, task.ID)
-			}
+	var ids []uint64
+	if err := w.engine.db.Model(&model.SyncTask{}).
+		Where("sync_status IN ? AND target_device_id IN ?", statuses, online).
+		Limit(500).Pluck("id", &ids).Error; err == nil {
+		for _, id := range ids {
+			w.engine.store.EnqueueTask(ctx, id)
 		}
 	}
 }

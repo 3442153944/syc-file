@@ -15,6 +15,16 @@ func lockKeyFor(t model.SyncTask) string {
 	return fmt.Sprintf("%d:%d:%s", t.UserID, t.FolderID, t.RelativePath)
 }
 
+// isTerminalStatus 终态：已经结算过的任务不能再被完成/失败/阻塞（防重复扣 pending 计数）。
+func isTerminalStatus(s string) bool {
+	return s == model.SyncStatusCompleted || s == model.SyncStatusFailed || s == model.SyncStatusSkipped
+}
+
+// activeStatuses 未结算状态：可被复用/可被客户端结算。
+func activeStatuses() []string {
+	return []string{model.SyncStatusPending, model.SyncStatusSyncing, model.SyncStatusWaitingUnlock}
+}
+
 // releaseTaskLock 凭任务持有的令牌安全释放文件锁（令牌不匹配则不删）。
 func (e *Engine) releaseTaskLock(ctx context.Context, t model.SyncTask) {
 	token := derefStr(t.LockToken)
@@ -25,12 +35,18 @@ func (e *Engine) releaseTaskLock(ctx context.Context, t model.SyncTask) {
 }
 
 // CompleteTask 任务完成：置 completed、扣减待办计数、释放文件锁、清进度。
+//
+// ⚠ 这里**不能只认 syncing**。客户端上线时会走 `GET /sync/tasks/pending` 把积压任务拉走自己执行
+// （三端的离线追赶都这么干），那些任务还是 pending —— 曾经在这里直接 return，于是：
+// 客户端干完活上报 complete → 服务端静默丢弃 → 任务永远 pending → Reaper 每 30s 捞出来重新派发
+// → 客户端再干一遍再上报 → 永动机。表现就是 sync_task 表越积越多、日志里 `SELECT * FROM sync_task
+// WHERE id = ?` 刷屏、设备越多越严重。凡是没结算过的状态都允许结算。
 func (e *Engine) CompleteTask(taskID uint64, hash string) {
 	var task model.SyncTask
 	if err := e.db.First(&task, taskID).Error; err != nil {
 		return
 	}
-	if task.SyncStatus != model.SyncStatusSyncing {
+	if isTerminalStatus(task.SyncStatus) {
 		return
 	}
 	updates := map[string]interface{}{
@@ -55,7 +71,8 @@ func (e *Engine) FailTask(taskID uint64, errMsg string) {
 	if err := e.db.First(&task, taskID).Error; err != nil {
 		return
 	}
-	if task.SyncStatus != model.SyncStatusSyncing {
+	// 同 CompleteTask：REST 拉走的 pending 任务失败也要能结算，否则重试次数永远涨不上去、永不收敛
+	if isTerminalStatus(task.SyncStatus) {
 		return
 	}
 	ctx := context.Background()
@@ -90,7 +107,7 @@ func (e *Engine) BlockTask(taskID uint64, reason string) {
 	if err := e.db.First(&task, taskID).Error; err != nil {
 		return
 	}
-	if task.SyncStatus != model.SyncStatusSyncing {
+	if isTerminalStatus(task.SyncStatus) || task.SyncStatus == model.SyncStatusWaitingUnlock {
 		return
 	}
 	ctx := context.Background()

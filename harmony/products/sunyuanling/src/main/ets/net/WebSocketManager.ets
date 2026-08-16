@@ -11,11 +11,19 @@ import type { WsMessageEnvelope } from '../api/sync/SyncTypes';
  *
  * - 连接 wss://host:port/file/v1/ws/connect，token 放 query（后端 Token 头 + ?token= 都支持）
  * - 设备 id/name/version 经 query 上报（device_id 必填，用于任务定向派发）
- * - 指数退避重连（1.5s × 2^n，上限 30s，最大次数取自 AppConfig.wsMaxReconnectAttempts，负数=无限）
+ * - 固定 3s 间隔重连，不退避、不限次数，唯一停机条件是 token 为空/失效
+ *   （见 RECONNECT_INTERVAL_MS / scheduleReconnect / registerAuthListener）
  * - 消息通过回调列表分发（同步引擎订阅）；状态变化亦广播
  *
  * 注：ArkTS 没有 SharedFlow，用回调列表 + 一次性快照实现。
  */
+
+/**
+ * 重连间隔：固定 3 秒。
+ * 刻意**不读 AppConfig.wsReconnectIntervalMs**——那个值在老安装里持久化着旧默认（5s），
+ * 而鸿蒙端又没有改它的界面，读了只会让一部分设备永远停在 5s。WS 是刚需，统一 3 秒。
+ */
+const RECONNECT_INTERVAL_MS = 3000;
 
 export enum WsState {
   CONNECTING = 'connecting',
@@ -168,16 +176,15 @@ class WebSocketManagerClass {
     }
   }
 
-  /** 安排重连：指数退避，上限 30s，maxAttempts<0 时无限 */
+  /**
+   * 安排重连：**固定间隔，不退避、不封顶次数**。
+   *
+   * WS 是同步链路的刚需（task_created 全靠它推），而且全 App 只有这一条连接，
+   * 退避到 30s 只会让断网恢复后白等半分钟，没有任何收益。
+   * 唯一的停机条件是「没有 token」——那时重连也没意义，等重新登录。
+   */
   private scheduleReconnect(token: string): void {
-    const max: number = appConfig.wsMaxReconnectAttempts;
-    if (max >= 0 && this.reconnectAttempts >= max) {
-      this.shouldReconnect = false;
-      this.setState(WsState.ERROR, '已达到最大重连次数');
-      return;
-    }
-    const backoff: number = Math.min(this.reconnectAttempts, 14);
-    const delayMs: number = Math.min(1500 * (1 << backoff), 30000);
+    const delayMs: number = RECONNECT_INTERVAL_MS;
     this.reconnectAttempts += 1;
     if (this.reconnectTimerId !== -1) {
       clearTimeout(this.reconnectTimerId);

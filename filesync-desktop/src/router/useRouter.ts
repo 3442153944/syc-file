@@ -31,6 +31,11 @@ export const router = createRouter({
                     component: () => import("../views/catalog/ViewCatalog.vue")
                 },
                 {
+                    path: "clipboard",
+                    name: "ClipboardSync",
+                    component: () => import("../views/clipboard/ClipboardSync.vue")
+                },
+                {
                     path: "monitor/system",
                     name: "MonitorSystem",
                     component: () => import("../views/monitor/System.vue")

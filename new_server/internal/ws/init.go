@@ -18,9 +18,12 @@ type WSHandler struct {
 
 func InitWS(db *gorm.DB) *WSHandler {
 	hub := GetHub()
+	// 设备登记：连上来落 device 表，断开置离线（此前该表无人写，见 device_registry.go）
+	initDeviceRegistry(db)
 
 	hub.SetConnectionHandler(
 		func(conn *Connection) {
+			touchDeviceOnline(conn)
 			msg := NewMessage(MessageTypeSystem, map[string]interface{}{
 				"event":       "user_online",
 				"user_id":     conn.UserID,
@@ -31,6 +34,7 @@ func InitWS(db *gorm.DB) *WSHandler {
 			hub.Broadcast(msg)
 		},
 		func(conn *Connection) {
+			markDeviceOffline(conn)
 			remaining := len(hub.GetUserConnections(conn.UserID))
 			msg := NewMessage(MessageTypeSystem, map[string]interface{}{
 				"event":                 "user_offline",

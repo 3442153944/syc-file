@@ -3,6 +3,7 @@ import { SyncApi } from '../api/sync/SyncApi';
 import { deviceInfoSvc } from '../util/DeviceInfo';
 import type { SyncTaskInfo, SyncConflictInfo } from '../api/sync/SyncTypes';
 import { wsManager, WsState } from '../net/WebSocketManager';
+import { syncEngine } from '../sync/SyncEngine';
 
 /**
  * SyncListPage
@@ -68,6 +69,8 @@ struct SyncListPage {
           .onClick(() => { router.back(); });
         Text('同步列表').fontSize(18).fontWeight(FontWeight.Bold);
         Blank();
+        Text('重新对齐').fontSize(14).fontColor('#007AFF').padding({ right: 12 })
+          .onClick(() => { this.showRealignDialog(); });
         Text('↻').fontSize(22).padding({ right: 12 })
           .onClick(() => { this.refresh(); });
       }.width('100%').height(48).alignItems(VerticalAlign.Center);
@@ -121,6 +124,38 @@ struct SyncListPage {
     .width('100%')
     .height('100%')
     .backgroundColor('#F5F5F5');
+  }
+
+  /**
+   * 重新对齐：把本地清单交服务端比对补齐。
+   *
+   * 两档区别在于「本地清单为空时怎么办」：
+   *  - 按台账对齐：清单为空且无法自证本地确实为空时**不上报**（引擎的空清单闸门），
+   *    避免服务端把整个 folder 重派一遍；
+   *  - 强制全量重取：允许上报空清单，等于告诉服务端「我什么都没有，全发给我」。
+   *    仅在本地文件确实丢了、自动对齐补不回来时用。
+   */
+  private showRealignDialog(): void {
+    AlertDialog.show({
+      title: '重新对齐',
+      message: '「按台账对齐」只补服务端有而本地缺的部分；\n'
+        + '「强制全量重取」会把整个同步文件夹重新拉一遍（本地已有同内容的文件会被跳过，但要逐个重算哈希）。',
+      primaryButton: {
+        value: '按台账对齐',
+        action: () => {
+          syncEngine.triggerCatchUp();
+          this.errorMsg = '已触发对齐，稍后下拉刷新查看任务';
+        },
+      },
+      secondaryButton: {
+        value: '强制全量重取',
+        fontColor: '#FF3B30',
+        action: () => {
+          syncEngine.triggerCatchUp(true);
+          this.errorMsg = '已触发全量重取';
+        },
+      },
+    });
   }
 
   private wsStateLabel(): string {

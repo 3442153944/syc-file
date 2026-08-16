@@ -129,6 +129,10 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 					"avatar":   u.Avatar,
 					"role":     u.Role,
 					"status":   u.Status,
+					// 客户端个人中心要展示「最后登录 / 注册时间」，此前这两个字段没返回，
+					// 三端一律显示「未知」。字段与 model.User 的 json tag 保持一致。
+					"last_login": u.LastLogin,
+					"created_at": u.CreatedAt,
 				},
 			},
 		})

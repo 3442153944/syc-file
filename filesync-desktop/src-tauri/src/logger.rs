@@ -137,11 +137,7 @@ fn log(level: Level, source: &str, message: &str) {
                 rotate_locked();
                 // 重新打开主文件
                 if let Some(p) = LOG_PATH.get() {
-                    *guard = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(p)
-                        .ok();
+                    *guard = OpenOptions::new().create(true).append(true).open(p).ok();
                 }
             }
             if let Some(f) = guard.as_mut() {

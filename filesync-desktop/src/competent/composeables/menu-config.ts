@@ -64,6 +64,12 @@ export const useMenuConfig=()=>{
             ]
         },
         {
+            name: "剪贴板同步",
+            path: "/clipboard",
+            icon: "sync",
+            click: () => router.push("/clipboard"),
+        },
+        {
             name: "系统监控",
             path: "/monitor",
             icon: "setting",

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Component, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -76,8 +76,15 @@ pub fn start_ws_client(
     tokio::spawn(run_ws_loop(config, upload_tx, app));
 }
 
-async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTask>, app: AppHandle) {
-    let mut backoff = 1u64;
+/// 重连间隔：固定 3 秒，**不做指数退避、不限次数**。
+/// WS 是同步链路的刚需（task_created 全靠它推），退避到 30s 只会让断网恢复后白等半分钟。
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+
+async fn run_ws_loop(
+    config: SharedSyncConfig,
+    upload_tx: mpsc::Sender<UploadTask>,
+    app: AppHandle,
+) {
     loop {
         let (ws_url, token, device_id, device_name) = {
             let cfg = config.read();
@@ -89,8 +96,9 @@ async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTas
             )
         };
 
+        // 还没配服务器 / 还没登录：没什么可连的，等下一轮
         if ws_url.is_empty() || token.is_empty() {
-            sleep(Duration::from_secs(5)).await;
+            sleep(RECONNECT_INTERVAL).await;
             continue;
         }
 
@@ -102,7 +110,6 @@ async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTas
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
-                backoff = 1;
                 logger::info("ws", "已连接到服务器");
                 emit_ws_status(&app, true, "已连接到服务器");
                 handle_session(ws_stream, &config, &upload_tx, &app).await;
@@ -115,8 +122,7 @@ async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTas
             }
         }
 
-        sleep(Duration::from_secs(backoff.min(30))).await;
-        backoff = (backoff * 2).min(30);
+        sleep(RECONNECT_INTERVAL).await;
     }
 }
 
@@ -147,6 +153,13 @@ async fn on_text(text: &str, config: &SharedSyncConfig, app: &AppHandle) {
         Ok(v) => v,
         Err(_) => return,
     };
+    // 剪贴板：服务端单向投递（上报走 REST），内容就是一条 ClipItem
+    if env.kind == "clipboard" {
+        if let Some(c) = env.content {
+            on_clipboard(c, app);
+        }
+        return;
+    }
     if env.kind != "file_sync" {
         return;
     }
@@ -154,7 +167,11 @@ async fn on_text(text: &str, config: &SharedSyncConfig, app: &AppHandle) {
         Some(c) => c,
         None => return,
     };
-    let event = content.get("event").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let event = content
+        .get("event")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     match event.as_str() {
         "task_created" => {
@@ -205,7 +222,9 @@ async fn on_task_created(tc: TaskCreatedContent, config: &SharedSyncConfig, app:
             let path = match resolve_local_file(config, tc.folder_id, &tc.relative_path) {
                 Some(p) => p,
                 None => {
-                    sync_api::fail_task(&client, tc.task_id, "未找到本地文件").await.ok();
+                    sync_api::fail_task(&client, tc.task_id, "未找到本地文件")
+                        .await
+                        .ok();
                     return;
                 }
             };
@@ -213,15 +232,21 @@ async fn on_task_created(tc: TaskCreatedContent, config: &SharedSyncConfig, app:
             base_store::remove(tc.folder_id, &tc.relative_path);
             sync_api::complete_task(&client, tc.task_id, "").await.ok();
             logger::info("task", format!("已删除本地文件: {}", tc.relative_path));
-            app.emit("sync-event", serde_json::json!({
-                "path": path.to_string_lossy(), "kind": "deleted_by_server"
-            })).ok();
+            app.emit(
+                "sync-event",
+                serde_json::json!({
+                    "path": path.to_string_lossy(), "kind": "deleted_by_server"
+                }),
+            )
+            .ok();
         }
         "mkdir" => {
             let path = match resolve_local_file(config, tc.folder_id, &tc.relative_path) {
                 Some(p) => p,
                 None => {
-                    sync_api::fail_task(&client, tc.task_id, "未找到本地路径").await.ok();
+                    sync_api::fail_task(&client, tc.task_id, "未找到本地路径")
+                        .await
+                        .ok();
                     return;
                 }
             };
@@ -231,7 +256,9 @@ async fn on_task_created(tc: TaskCreatedContent, config: &SharedSyncConfig, app:
                     logger::info("task", format!("已创建本地目录: {}", tc.relative_path));
                 }
                 Err(e) => {
-                    sync_api::fail_task(&client, tc.task_id, &e.to_string()).await.ok();
+                    sync_api::fail_task(&client, tc.task_id, &e.to_string())
+                        .await
+                        .ok();
                 }
             }
         }
@@ -256,39 +283,76 @@ async fn do_download(
     let local_root = match resolve_local_root(&config, folder_id) {
         Some(r) => r,
         None => {
-            sync_api::fail_task(&client, task_id, "未找到本地目录映射").await.ok();
+            sync_api::fail_task(&client, task_id, "未找到本地目录映射")
+                .await
+                .ok();
             return;
         }
     };
     let safe_rel = sanitize_rel(&relative_path);
     let final_str = local_root.join(&safe_rel).to_string_lossy().to_string();
 
-    app.emit("download-progress", serde_json::json!({
-        "path": final_str, "status": "downloading", "taskId": task_id
-    })).ok();
+    app.emit(
+        "download-progress",
+        serde_json::json!({
+            "path": final_str, "status": "downloading", "taskId": task_id
+        }),
+    )
+    .ok();
 
-    match download_and_publish(&client, remote_dir, &file_name, expected_hash.as_deref(), &local_root, &safe_rel).await {
+    match download_and_publish(
+        &client,
+        remote_dir,
+        &file_name,
+        expected_hash.as_deref(),
+        &local_root,
+        &safe_rel,
+    )
+    .await
+    {
         Ok(hash) => {
             sync_api::complete_task(&client, task_id, &hash).await.ok();
-            base_store::set_with_file(folder_id, &relative_path, &hash, &local_root.join(&safe_rel));
+            base_store::set_with_file(
+                folder_id,
+                &relative_path,
+                &hash,
+                &local_root.join(&safe_rel),
+            );
             logger::info("download", format!("已下载并发布: {}", relative_path));
-            app.emit("download-progress", serde_json::json!({
-                "path": final_str, "status": "done", "taskId": task_id
-            })).ok();
+            app.emit(
+                "download-progress",
+                serde_json::json!({
+                    "path": final_str, "status": "done", "taskId": task_id
+                }),
+            )
+            .ok();
         }
         Err(PublishErr::Locked) => {
-            sync_api::block_task(&client, task_id, "目标文件被占用").await.ok();
-            logger::warn("download", format!("目标被占用，转等待解锁: {}", relative_path));
-            app.emit("download-progress", serde_json::json!({
-                "path": final_str, "status": "blocked"
-            })).ok();
+            sync_api::block_task(&client, task_id, "目标文件被占用")
+                .await
+                .ok();
+            logger::warn(
+                "download",
+                format!("目标被占用，转等待解锁: {}", relative_path),
+            );
+            app.emit(
+                "download-progress",
+                serde_json::json!({
+                    "path": final_str, "status": "blocked"
+                }),
+            )
+            .ok();
         }
         Err(PublishErr::Other(msg)) => {
             sync_api::fail_task(&client, task_id, &msg).await.ok();
             logger::error("download", format!("下载失败 {}: {}", relative_path, msg));
-            app.emit("download-progress", serde_json::json!({
-                "path": final_str, "status": "error", "error": msg
-            })).ok();
+            app.emit(
+                "download-progress",
+                serde_json::json!({
+                    "path": final_str, "status": "error", "error": msg
+                }),
+            )
+            .ok();
         }
     }
 }
@@ -302,17 +366,25 @@ async fn download_and_publish(
     local_root: &PathBuf,
     safe_rel: &PathBuf,
 ) -> Result<String, PublishErr> {
-    let url = file_api::build_download_url(client, &DownloadParams {
-        path: remote_dir,
-        name: file_name.to_string(),
-        device_id: String::new(),
-    });
+    let url = file_api::build_download_url(
+        client,
+        &DownloadParams {
+            path: remote_dir,
+            name: file_name.to_string(),
+            device_id: String::new(),
+        },
+    );
 
-    let resp = reqwest::get(&url).await.map_err(|e| PublishErr::Other(e.to_string()))?;
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| PublishErr::Other(e.to_string()))?;
     if !resp.status().is_success() {
         return Err(PublishErr::Other(format!("HTTP {}", resp.status())));
     }
-    let bytes = resp.bytes().await.map_err(|e| PublishErr::Other(e.to_string()))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| PublishErr::Other(e.to_string()))?;
 
     // blake3 校验：算 blake3 hex 与 expected_hash 比对，不匹配直接失败。
     let actual = blake3_hex(&bytes);
@@ -329,7 +401,9 @@ async fn download_and_publish(
     let tmp_dir = local_root.join(".synctmp");
     tokio::fs::create_dir_all(&tmp_dir).await.ok();
     let tmp_path = tmp_dir.join(format!("{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
-    tokio::fs::write(&tmp_path, &bytes).await.map_err(|e| PublishErr::Other(e.to_string()))?;
+    tokio::fs::write(&tmp_path, &bytes)
+        .await
+        .map_err(|e| PublishErr::Other(e.to_string()))?;
 
     // 原子 rename 到主目录
     let final_path = local_root.join(safe_rel);
@@ -375,54 +449,92 @@ async fn on_conflict(cf: ConflictContent, config: &SharedSyncConfig, app: &AppHa
         (c.server_url.clone(), c.token.clone())
     };
     let client = ApiClient::new(&server_url, &token);
-    match download_and_publish(&client, remote_dir.clone(), &cf.file_name, Some(cf.server_hash.as_str()), &local_root, &safe_rel).await {
-        Ok(h) => base_store::set_with_file(cf.folder_id, &cf.relative_path, &h, &local_root.join(&safe_rel)),
+    match download_and_publish(
+        &client,
+        remote_dir.clone(),
+        &cf.file_name,
+        Some(cf.server_hash.as_str()),
+        &local_root,
+        &safe_rel,
+    )
+    .await
+    {
+        Ok(h) => base_store::set_with_file(
+            cf.folder_id,
+            &cf.relative_path,
+            &h,
+            &local_root.join(&safe_rel),
+        ),
         Err(_) => logger::warn("conflict", "收敛服务端版本失败，将于重连扫描后补齐"),
     }
 
     // 3) 记待办（供 keep_local 重提交）+ 通知 UI
     if cf.conflict_id != 0 {
-        pending().lock().insert(cf.conflict_id, PendingConflict {
-            folder_id: cf.folder_id,
-            relative_path: cf.relative_path.clone(),
-            file_name: cf.file_name.clone(),
-            remote_dir,
-            quarantine: quarantine.clone(),
-        });
+        pending().lock().insert(
+            cf.conflict_id,
+            PendingConflict {
+                folder_id: cf.folder_id,
+                relative_path: cf.relative_path.clone(),
+                file_name: cf.file_name.clone(),
+                remote_dir,
+                quarantine: quarantine.clone(),
+            },
+        );
     }
-    logger::warn("conflict", format!("冲突：已隔离本地副本并收敛服务端版本: {}", cf.relative_path));
-    app.emit("sync-conflict", serde_json::json!({
-        "conflictId": cf.conflict_id,
-        "folderId": cf.folder_id,
-        "relativePath": cf.relative_path,
-        "fileName": cf.file_name,
-        "serverHash": cf.server_hash,
-        "localHash": cf.local_hash,
-        "quarantine": quarantine.to_string_lossy(),
-    })).ok();
+    logger::warn(
+        "conflict",
+        format!("冲突：已隔离本地副本并收敛服务端版本: {}", cf.relative_path),
+    );
+    app.emit(
+        "sync-conflict",
+        serde_json::json!({
+            "conflictId": cf.conflict_id,
+            "folderId": cf.folder_id,
+            "relativePath": cf.relative_path,
+            "fileName": cf.file_name,
+            "serverHash": cf.server_hash,
+            "localHash": cf.local_hash,
+            "quarantine": quarantine.to_string_lossy(),
+        }),
+    )
+    .ok();
 }
 
-async fn on_conflict_resolved(cr: ConflictResolvedContent, config: &SharedSyncConfig, app: &AppHandle) {
+async fn on_conflict_resolved(
+    cr: ConflictResolvedContent,
+    config: &SharedSyncConfig,
+    app: &AppHandle,
+) {
     match cr.resolution.as_str() {
         "accept_server" => {
             let pc = pending().lock().remove(&cr.conflict_id); // 先取出，确保锁守卫在 await 前释放
             if let Some(pc) = pc {
                 tokio::fs::remove_file(&pc.quarantine).await.ok();
             }
-            logger::info("conflict", format!("冲突 {} 已按服务端版本解决", cr.conflict_id));
+            logger::info(
+                "conflict",
+                format!("冲突 {} 已按服务端版本解决", cr.conflict_id),
+            );
         }
         "keep_local" => {
             let pc = pending().lock().remove(&cr.conflict_id);
             match pc {
                 Some(pc) => keep_local_reupload(config, pc, &cr.server_hash).await,
-                None => logger::warn("conflict", format!("冲突 {} keep_local 但找不到隔离副本", cr.conflict_id)),
+                None => logger::warn(
+                    "conflict",
+                    format!("冲突 {} keep_local 但找不到隔离副本", cr.conflict_id),
+                ),
             }
         }
         _ => {}
     }
-    app.emit("sync-conflict-resolved", serde_json::json!({
-        "conflictId": cr.conflict_id, "resolution": cr.resolution
-    })).ok();
+    app.emit(
+        "sync-conflict-resolved",
+        serde_json::json!({
+            "conflictId": cr.conflict_id, "resolution": cr.resolution
+        }),
+    )
+    .ok();
 }
 
 /// keep_local：以 server_hash 为 base，把隔离副本作为新版本上传，并把它放回主目录。
@@ -435,15 +547,22 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
 
     // 隔离副本必须存在
     if !pc.quarantine.exists() {
-        logger::error("conflict", format!("keep_local 找不到隔离副本: {}", pc.quarantine.display()));
+        logger::error(
+            "conflict",
+            format!("keep_local 找不到隔离副本: {}", pc.quarantine.display()),
+        );
         return;
     }
 
     // 1) 同步场景需覆盖：先删远端旧文件（收敛的服务端版本），再分片上传
-    let _ = file_api::delete_file(&client, DeleteFileParams {
-        path: pc.remote_dir.clone(),
-        name: pc.file_name.clone(),
-    }).await;
+    let _ = file_api::delete_file(
+        &client,
+        DeleteFileParams {
+            path: pc.remote_dir.clone(),
+            name: pc.file_name.clone(),
+        },
+    )
+    .await;
 
     let options = UploadOptions::new(device_id.clone());
     let on_progress: chunked_uploader::ProgressFn = Arc::new(|_, _| {});
@@ -453,7 +572,9 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         &pc.remote_dir,
         &options,
         on_progress,
-    ).await {
+    )
+    .await
+    {
         Ok(d) => d,
         Err(e) => {
             logger::error("conflict", format!("keep_local 上传失败: {}", e));
@@ -465,18 +586,23 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
     let size = complete.file_size;
 
     // 2) 以 server_hash 为 base 上报 file_changed（快进，不再冲突）
-    sync_api::notify(&client, NotifyParams {
-        device_id,
-        folder_id: pc.folder_id,
-        relative_path: pc.relative_path.clone(),
-        file_name: pc.file_name.clone(),
-        action: "modify".into(),
-        file_size: Some(size),
-        file_hash: Some(hash.clone()),
-        base_hash: Some(server_hash.to_string()),
-        is_dir: false,
-        mtime: Some(now_secs()),
-    }).await.ok();
+    sync_api::notify(
+        &client,
+        NotifyParams {
+            device_id,
+            folder_id: pc.folder_id,
+            relative_path: pc.relative_path.clone(),
+            file_name: pc.file_name.clone(),
+            action: "modify".into(),
+            file_size: Some(size),
+            file_hash: Some(hash.clone()),
+            base_hash: Some(server_hash.to_string()),
+            is_dir: false,
+            mtime: Some(now_secs()),
+        },
+    )
+    .await
+    .ok();
     base_store::set_with_file(pc.folder_id, &pc.relative_path, &hash, &pc.quarantine);
 
     // 3) 把本地版本放回主目录（覆盖刚收敛的服务端版本）
@@ -487,7 +613,10 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         }
         tokio::fs::rename(&pc.quarantine, &dest).await.ok();
     }
-    logger::info("conflict", format!("冲突已按本地版本解决并重提交: {}", pc.relative_path));
+    logger::info(
+        "conflict",
+        format!("冲突已按本地版本解决并重提交: {}", pc.relative_path),
+    );
 }
 
 // ── 路径工具 ─────────────────────────────────────────────────────────────────
@@ -500,7 +629,11 @@ fn resolve_local_root(config: &SharedSyncConfig, folder_id: u64) -> Option<PathB
         .map(|m| PathBuf::from(&m.local_path))
 }
 
-fn resolve_local_file(config: &SharedSyncConfig, folder_id: u64, relative_path: &str) -> Option<PathBuf> {
+fn resolve_local_file(
+    config: &SharedSyncConfig,
+    folder_id: u64,
+    relative_path: &str,
+) -> Option<PathBuf> {
     let root = resolve_local_root(config, folder_id)?;
     Some(root.join(sanitize_rel(relative_path)))
 }
@@ -516,7 +649,11 @@ fn sanitize_rel(relative_path: &str) -> PathBuf {
 /// 由 folder 映射 + 相对路径拼出服务端远端目录（用于下载 URL 的 path）。
 fn build_remote_dir(config: &SharedSyncConfig, folder_id: u64, rel: &str) -> String {
     let cfg = config.read();
-    if let Some(m) = cfg.folder_mappings.iter().find(|m| m.folder_id == folder_id) {
+    if let Some(m) = cfg
+        .folder_mappings
+        .iter()
+        .find(|m| m.folder_id == folder_id)
+    {
         let rel_dir = PathBuf::from(rel)
             .parent()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -546,12 +683,54 @@ fn now_secs() -> i64 {
 }
 
 fn emit_ws_status(app: &AppHandle, connected: bool, message: &str) {
-    app.emit("ws-status", WsStatus { connected, message: message.into() }).ok();
+    app.emit(
+        "ws-status",
+        WsStatus {
+            connected,
+            message: message.into(),
+        },
+    )
+    .ok();
 }
 
 fn urlenc(s: &str) -> String {
-    s.chars().flat_map(|c| {
-        if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { vec![c] }
-        else { format!("%{:02X}", c as u32).chars().collect() }
-    }).collect()
+    s.chars()
+        .flat_map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                vec![c]
+            } else {
+                format!("%{:02X}", c as u32).chars().collect()
+            }
+        })
+        .collect()
+}
+
+/// 收到别的设备推来的剪贴板内容：始终发事件给前端（进历史列表），
+/// 是否写入本机剪贴板由用户开关 auto_apply 决定。
+fn on_clipboard(content: serde_json::Value, app: &AppHandle) {
+    let item: crate::clipboard_sync::ClipItem = match serde_json::from_value(content) {
+        Ok(v) => v,
+        Err(e) => {
+            logger::warn("clipboard", format!("解析剪贴板消息失败: {}", e));
+            return;
+        }
+    };
+    let state = app.state::<crate::clipboard_sync::SharedClipboardState>();
+    let (enabled, auto_apply) = {
+        let s = state.read();
+        (s.enabled, s.auto_apply)
+    };
+    if !enabled {
+        return; // 用户没开同步，收到也不处理
+    }
+    if auto_apply {
+        match crate::clipboard_sync::apply_to_clipboard(&state, &item.content) {
+            Ok(_) => logger::info(
+                "clipboard",
+                format!("已写入来自 {} 的剪贴板内容", item.device_name),
+            ),
+            Err(e) => logger::warn("clipboard", format!("写入剪贴板失败: {}", e)),
+        }
+    }
+    let _ = app.emit("clipboard-received", item);
 }

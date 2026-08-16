@@ -7,6 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"syc-file/config"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
@@ -121,6 +124,21 @@ func main() {
 		logger.Logger.Info("收到 ping 请求")
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
+	// 操作日志：记录写操作（谁、做了什么、成没成功）到 operation_log 表，供管理端查询。
+	// 必须在 RegisterRouters 之前 Use，且要在 db 就绪之后（所以没法和上面的中间件写在一起）。
+	r.Use(middleware.OperationLogger(db))
+
+	// 头像等静态资源。DB 里 user.avatar 存的是相对路径（默认 static/avatar/xxx.png），
+	// 客户端直接用「服务器根 + 该相对路径」取图，所以这里的挂载点必须和 avatar_path 逐字一致。
+	// 此前服务端根本没挂静态路由，头像能不能显示全看前面的反向代理有没有单独配 —— 换个入口
+	// （不同端口/不同前缀）就 404。挂上之后任何能打到本服务的入口都取得到。
+	if avatarPath := config.Conf.User.AvatarPath; avatarPath != "" {
+		rel := strings.Trim(filepath.ToSlash(avatarPath), "/")
+		wd, _ := os.Getwd()
+		r.Static("/"+rel, filepath.Join(wd, filepath.FromSlash(rel)))
+		logger.Logger.Info("静态资源已挂载", zap.String("url", "/"+rel), zap.String("dir", filepath.Join(wd, filepath.FromSlash(rel))))
+	}
+
 	handler.RegisterRouters(r, db, redisClient, syncEngine)
 
 	// 5. 启动服务

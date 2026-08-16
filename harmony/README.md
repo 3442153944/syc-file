@@ -225,7 +225,7 @@ README 第二节只验证过这种路径的 mkdir/open/write/read/rename，**从
 Android/桌面端直接遍历真实目录没这问题；鸿蒙必须像 Android 那样自己记账：
 
 - `sync/SyncBaseStore.ets`（对标 Android `SyncBaseStore.kt`）：
-  `folderId → (rel → {hash,size,mtime})`，持久化在 preferences，进程被杀也不丢。
+  `folderId → (rel → {hash,size,mtime})`，持久化在沙盒 JSON + 公共目录镜像（见下一节），进程被杀也不丢。
 - **每成功落一个文件就 `set()`**（下载完成时记；`alreadyHave` 跳过时回填，
   用于老版本升级上来台账为空的情况），**收到 delete 就 `remove()`**。
 - `catchUpFolder` 的清单：**台账为权威**（逐条 `fs.access` 确认还在，不在就抹掉让服务端重派），
@@ -252,6 +252,43 @@ Android/桌面端直接遍历真实目录没这问题；鸿蒙必须像 Android 
 写入走 `tmp + rename`：后台被冻结/杀进程是常态，中途挂掉最多留个 `.tmp`，
 原文件始终完整；JSON 解析失败按「空台账」处理，下一轮同步重建，绝不用半截数据。
 只有真正的小配置（服务器地址、开关、folder 映射）才继续留在 preferences。
+
+#### ⭐⭐ 「一上线就全量拉一次」的根因：台账和数据不在同一块存储上
+
+现象：**鸿蒙端每次上线，服务端把整个 folder 重派一遍**（`alreadyHave` 的 hash 比对拦下了真正的
+下载，所以不烧流量，但每个文件都要重算一遍 blake3，还刷出一整屏任务记录）。
+
+安卓为什么没这问题——两条，缺一不可：
+
+| | Android | 鸿蒙（改之前） |
+| --- | --- | --- |
+| 清单来源 | **真实磁盘遍历**（`walk(localRoot)`），磁盘就是唯一真相 | 沙盒台账（`listFile` 在授权目录不可信，见上一节） |
+| 台账位置 | `<ExternalStorage>/FileSync/sync_base.json`，**和同步数据同一块存储** | 沙盒 `filesDir`，**和数据（公共 Download/包名）是两块独立存储** |
+
+安卓的台账只用于 Phase1 变更探测，丢了顶多多算几次 hash，清单照样完整；
+鸿蒙的台账**就是清单本身**，而沙盒会被「重装 / 清除数据 / DevEco 每次装新调试包」单独清掉——
+数据还在公共目录里躺着，台账却归零了 → 清单为空 → `HandleScan` 判定本设备什么都没有 → 全量重派。
+靠 hash 校验兜住只是「下载前最后一道闸」，不是修复。
+
+三处改动（`SyncBaseStore.ets` / `SyncEngine.ets`）：
+
+1. **台账镜像与数据同生共死**：权威副本写到 `<Download/包名>/同步/.yt_baseline.json`，
+   沙盒那份降级成「公共目录还没授权时也能用」的快速副本。`SyncEngine.ensureBaselineMirror()`
+   在**每轮追赶的 scan 之前**调 `attachMirror()`：沙盒有账 → 补写镜像；沙盒空而镜像在 → 用镜像重建。
+2. **空清单闸门 + 枚举自检**：每个 folder 根下放哨兵 `.ytsync`（`ensureSentinel`）。
+   清单为空时先 `canTrustEmptyListing()`——`listFile` 连刚写进去的哨兵都列不出来，
+   说明这个目录上的「空」是枚举坏了而不是真没文件，**本轮不上报**（宁可不报，绝不报空）。
+   自检通过才认这个空，正常上报走全量补派（真·首次同步就走这条）。
+   哨兵和镜像都在 `shouldIgnore`（`.yt` 前缀）里，不会进清单被服务端派 delete。
+3. **强制落盘**：台账原本只有 1.5s 防抖保存，后台被冻结/杀掉就丢一截。新增 `flushNow()`，
+   在**上报 scan 前 / `SyncEngine.stop()` / `Ability.onBackground`** 各刷一次。
+
+用户侧出口：同步列表页「重新对齐」→ 二选一。「按台账对齐」走上面的闸门；
+「强制全量重取」(`triggerCatchUp(true)`) 才允许上报空清单 = 显式告诉服务端「全发给我」。
+**自动路径永远不会自己做这个决定。**
+
+排查入口还是那行 `SCAN汇总`，现在多了两个字段：`遍历=N`（listFile 到底列出几项）
+和 `镜像=在/无`。`台账=0 遍历=0 镜像=无` = 台账真丢了；`遍历=0` 而 `台账>0` = 枚举不可信。
 
 #### ⛔ `walk()` 里绝对不许静默跳过
 

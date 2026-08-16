@@ -2,7 +2,10 @@
 // 职责：同步相关 API 调用封装。
 // 每个函数只做：组装参数 + 调用 ApiClient，不包含业务逻辑。
 use super::{params::*, response::*};
-use crate::api::{client::{ApiClient, ApiResponse}, routes};
+use crate::api::{
+    client::{ApiClient, ApiResponse},
+    routes,
+};
 
 // ── 文件夹管理 ────────────────────────────────────────────────────────────
 
@@ -98,7 +101,14 @@ pub async fn complete_task(
     file_hash: &str,
 ) -> Result<ApiResponse<serde_json::Value>, String> {
     let path = routes::SYNC_TASK_COMPLETE.replace("{}", &task_id.to_string());
-    client.post(&path, &TaskCompleteParams { file_hash: file_hash.to_string() }).await
+    client
+        .post(
+            &path,
+            &TaskCompleteParams {
+                file_hash: file_hash.to_string(),
+            },
+        )
+        .await
 }
 
 pub async fn fail_task(
@@ -107,7 +117,14 @@ pub async fn fail_task(
     error: &str,
 ) -> Result<ApiResponse<serde_json::Value>, String> {
     let path = routes::SYNC_TASK_FAILED.replace("{}", &task_id.to_string());
-    client.post(&path, &TaskFailedParams { error: error.to_string() }).await
+    client
+        .post(
+            &path,
+            &TaskFailedParams {
+                error: error.to_string(),
+            },
+        )
+        .await
 }
 
 /// 目标文件被占用：转 waiting_unlock（不消耗重试次数）。
@@ -117,7 +134,14 @@ pub async fn block_task(
     reason: &str,
 ) -> Result<ApiResponse<serde_json::Value>, String> {
     let path = routes::SYNC_TASK_BLOCKED.replace("{}", &task_id.to_string());
-    client.post(&path, &TaskBlockedParams { reason: reason.to_string() }).await
+    client
+        .post(
+            &path,
+            &TaskBlockedParams {
+                reason: reason.to_string(),
+            },
+        )
+        .await
 }
 
 // ── 冲突管理 ─────────────────────────────────────────────────────────────
@@ -133,7 +157,14 @@ pub async fn resolve_conflict(
     resolution: &str,
 ) -> Result<ApiResponse<serde_json::Value>, String> {
     let path = routes::SYNC_CONFLICT_RESOLVE.replace("{}", &conflict_id.to_string());
-    client.post(&path, &ResolveConflictParams { resolution: resolution.to_string() }).await
+    client
+        .post(
+            &path,
+            &ResolveConflictParams {
+                resolution: resolution.to_string(),
+            },
+        )
+        .await
 }
 
 pub async fn delete_conflict(

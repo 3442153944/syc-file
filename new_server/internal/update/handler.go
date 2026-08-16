@@ -105,7 +105,9 @@ func (h *APIHandler) Publish(c *gin.Context) {
 		Enabled        *bool  `json:"enabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		jsonErr(c, 400, "参数解析失败")
+		// 带上真实原因：这里最常见的坑是 version_code 传了小数（如 1.2），
+		// 而它是 int64——只回一句「参数解析失败」的话，客户端根本无从判断是哪个字段。
+		jsonErr(c, 400, "参数解析失败: "+err.Error())
 		return
 	}
 	if req.Platform == "" {
@@ -170,7 +172,7 @@ func (h *APIHandler) UpdateRelease(c *gin.Context) {
 	}
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
-		jsonErr(c, 400, "参数解析失败")
+		jsonErr(c, 400, "参数解析失败: "+err.Error())
 		return
 	}
 	// 白名单字段，防止改到主键/路径

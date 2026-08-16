@@ -110,7 +110,10 @@ export struct FilesPage {
     Row() {
       Column() {
         Text(disk.path).fontSize(16).fontWeight(FontWeight.Medium);
-        Text(`${disk.total_gb} GB / 可用 ${disk.free_gb} GB`).fontSize(12).fontColor('#9E9E9E').margin({ top: 4 });
+        // ⚠ total_gb / free_gb 是服务端**已带单位**的字符串（"465.76 GB"，见 formatBytesForDisk），
+        //   再补一个 " GB" 就成了「465.76 GB GB」。对齐 Android DiskCard 的「可用 x / 总计 y」。
+        Text(`可用 ${disk.free_gb} / 总计 ${disk.total_gb}`)
+          .fontSize(12).fontColor('#9E9E9E').margin({ top: 4 });
       }.alignItems(HorizontalAlign.Start).layoutWeight(1);
 
       // 简易进度条

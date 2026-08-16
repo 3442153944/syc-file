@@ -261,6 +261,7 @@ object Request {
 
             if (code != 200) {
                 Log.w(TAG, "业务错误: code=$code, message=$message")
+                handleBusinessUnauthorized(code)
                 return@withContext Result.failure(Exception(message))
             }
 
@@ -346,6 +347,7 @@ object Request {
 
             if (code != 200) {
                 Log.w(TAG, "业务错误: code=$code, message=$message")
+                handleBusinessUnauthorized(code)
                 return@withContext Result.failure(Exception(message))
             }
 
@@ -362,6 +364,21 @@ object Request {
             Log.e(TAG, "请求失败: ${e.message}", e)
             Result.failure(e)
         }
+    }
+
+    /**
+     * 业务码 401 → 清 token + 广播 TokenExpired（UI 层跳登录页）。
+     *
+     * ⚠ 后端**所有**错误都是 HTTP 200 + body 里的 `code`（见 middleware/auth.go：
+     * `c.JSON(http.StatusOK, gin.H{"code": 401, ...})`），只在 `!response.isSuccessful`
+     * 里判 `response.code == 401` 永远不会命中——这就是「token 过期后不跳登录页、
+     * 必须手动退出一次」的原因。HTTP 401 那条分支保留（反代/网关可能真的返回 401）。
+     */
+    suspend fun handleBusinessUnauthorized(code: Int?) {
+        if (code != 401) return
+        Log.w(TAG, "业务码 401：token 已失效，清除并通知跳转登录")
+        clearToken()
+        AuthManager.notifyTokenExpired()
     }
 
     /**

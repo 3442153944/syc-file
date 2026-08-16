@@ -21,22 +21,29 @@ export async function traverseDirectory(path: string, page = 1, pageSize = 100):
  * Web   模式：传 File 对象，TS 侧 chunkedUploader 实现分片（@noble/hashes blake3，与 Rust 逐字节一致）。
  *
  * @param onProgress (已发送字节, 总字节)
+ * @param onConflict 目标同名时：'reject'=服务端报错（默认，同步链路用）；
+ *                   'timestamp'=服务端自动给文件名加时间戳（发布 APK 这类同名是常态的场景）
  */
 export async function uploadFile(
     localPathOrFile: string | File,
     remoteDir: string,
     onProgress: (sent: number, total: number) => void = () => {},
+    onConflict: 'reject' | 'timestamp' = 'reject',
 ): Promise<UploadCompleteData> {
     if (isTauri()) {
         // Rust command 内部已实现分片 + 进度事件 emit；这里不直接传进度回调
         // （Tauri command 无法把 JS 函数传入 Rust），调用方若需进度可监听 `upload-progress-byte` 事件。
-        return invoke<UploadCompleteData>('upload_file', {localPath: localPathOrFile as string, remoteDir})
+        return invoke<UploadCompleteData>('upload_file', {
+            localPath: localPathOrFile as string,
+            remoteDir,
+            onConflict,
+        })
     }
     const file = localPathOrFile as File
     return uploadChunkedWeb(
         file,
         remoteDir,
-        {chunkSize: DEFAULT_CHUNK_SIZE, concurrency: DEFAULT_CONCURRENCY, deviceId: getDeviceId()},
+        {chunkSize: DEFAULT_CHUNK_SIZE, concurrency: DEFAULT_CONCURRENCY, deviceId: getDeviceId(), onConflict},
         onProgress,
     )
 }

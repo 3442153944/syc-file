@@ -108,7 +108,8 @@ func (e *Engine) handleCreateOrModify(userID uint, source string, folder model.S
 			updates["file_hash"] = r.FileHash
 		}
 		e.db.Model(&file).Updates(updates)
-		e.appendVersion(file.ID, int(newVersion), r.FileSize, r.FileHash, userID)
+		// 带上 trunk 的物理路径：内容此刻就在那儿，版本仓库要按内容寻址留一份（见 version.go）
+		e.appendVersionWithContent(file.ID, int(newVersion), r.FileSize, r.FileHash, userID, remotePath)
 		e.dispatchToOthers(userID, source, folder, r, file.ID, taskTypeFor(r), r.FileHash)
 		return nil
 	}
@@ -131,7 +132,7 @@ func (e *Engine) handleCreateOrModify(userID uint, source string, folder model.S
 	if err := e.db.Create(&newFile).Error; err != nil {
 		return err
 	}
-	e.appendVersion(newFile.ID, 1, r.FileSize, r.FileHash, userID)
+	e.appendVersionWithContent(newFile.ID, 1, r.FileSize, r.FileHash, userID, remotePath)
 	e.dispatchToOthers(userID, source, folder, r, newFile.ID, taskTypeFor(r), r.FileHash)
 	return nil
 }
@@ -149,7 +150,38 @@ func (e *Engine) dispatchToOthers(userID uint, source string, folder model.SyncF
 }
 
 // createAndEnqueueTask 落库一条同步任务并入 Redis 队列，返回任务 ID。
+//
+// **同一目标设备 + 同一路径 + 同一类型，未结算的任务只留一条**：scan 追赶是全量比对，
+// 客户端每次上线/每次重连都会报一遍清单，只要有一条没对上就会再派一次。此前这里无脑 INSERT，
+// 于是同一个文件在 sync_task 里能堆出几十上百行（配合「complete 被静默丢弃」那个 bug 更是无上限），
+// Reaper 每 30s 把它们全部重新入队 → 每条一次 SELECT，设备一多就是持续的读库风暴。
 func (e *Engine) createAndEnqueueTask(userID uint, source, target string, folder model.SyncFolder, r FileChangeReport, fileID uint64, taskType, hash string) uint64 {
+	ctx := context.Background()
+
+	// 已有未结算的同路径同类型任务 → 复用它（顺带把内容指纹刷新成最新的 trunk），不再新建行。
+	// syncing 的不复用：客户端正拿着老 hash 在传，覆盖它会让那次传输的校验对不上。
+	var existing model.SyncTask
+	err := e.db.Where(
+		"user_id = ? AND target_device_id = ? AND folder_id = ? AND relative_path = ? AND task_type = ? AND sync_status IN ?",
+		userID, target, folder.ID, r.RelativePath, taskType,
+		[]string{model.SyncStatusPending, model.SyncStatusWaitingUnlock},
+	).First(&existing).Error
+	if err == nil {
+		updates := map[string]interface{}{
+			"source_device_id": source,
+			"file_id":          fileID,
+			"file_size":        r.FileSize,
+			"sync_status":      model.SyncStatusPending,
+		}
+		if hash != "" {
+			updates["file_hash"] = hash
+			updates["source_hash"] = hash
+		}
+		e.db.Model(&existing).Updates(updates)
+		e.store.EnqueueTask(ctx, existing.ID)
+		return existing.ID
+	}
+
 	task := &model.SyncTask{
 		UserID:         userID,
 		SourceDeviceID: source,
@@ -173,7 +205,6 @@ func (e *Engine) createAndEnqueueTask(userID uint, source, target string, folder
 		logger.Logger.Error("创建同步任务失败", zap.Error(err))
 		return 0
 	}
-	ctx := context.Background()
 	e.store.IncPending(ctx, userID)
 	e.store.EnqueueTask(ctx, task.ID)
 	return task.ID

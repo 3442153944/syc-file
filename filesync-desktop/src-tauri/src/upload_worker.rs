@@ -68,7 +68,10 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
         if cfg.server_url.is_empty() || cfg.token.is_empty() {
             return;
         }
-        (ApiClient::new(&cfg.server_url, &cfg.token), cfg.device_id.clone())
+        (
+            ApiClient::new(&cfg.server_url, &cfg.token),
+            cfg.device_id.clone(),
+        )
     };
 
     let file_name = match task.local_path.file_name() {
@@ -81,7 +84,10 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     if let Some(base) = crate::base_store::get(task.folder_id, &task.relative_path) {
         if let Ok(cur) = chunked_uploader::file_blake3_hex(&task.local_path) {
             if cur == base.hash {
-                crate::logger::debug("upload", format!("内容与基线一致，跳过回传: {}", task.relative_path));
+                crate::logger::debug(
+                    "upload",
+                    format!("内容与基线一致，跳过回传: {}", task.relative_path),
+                );
                 return;
             }
         }
@@ -135,7 +141,11 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     let folder_id = task.folder_id;
     let rel = task.relative_path.clone();
     let base_hash = crate::base_store::get(folder_id, &rel).map(|b| b.hash);
-    let action = if task.action.is_empty() { "modify" } else { &task.action };
+    let action = if task.action.is_empty() {
+        "modify"
+    } else {
+        &task.action
+    };
 
     sync_api::notify(
         &client,
@@ -157,7 +167,10 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
 
     // 上传被接受后，trunk hash 即为本次内容；更新基线（若实际冲突，conflict 处理会再纠正）。
     crate::base_store::set_with_file(folder_id, &rel, &file_hash, &task.local_path);
-    crate::logger::info("upload", format!("已上传并上报: {} ({} bytes)", rel, file_size));
+    crate::logger::info(
+        "upload",
+        format!("已上传并上报: {} ({} bytes)", rel, file_size),
+    );
 
     emit_progress(app, &path_str, "done", None);
 }

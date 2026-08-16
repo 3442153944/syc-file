@@ -46,6 +46,10 @@ export interface UploadInitData {
     chunk_count: number
     /** 仍缺失（需上传）的分片索引 */
     missing: number[]
+    /** 服务端最终采用的文件名（同名冲突加过时间戳时与本地不同）。仅秒传/已存在分支返回。 */
+    file_name?: string
+    /** 服务端最终落盘的完整路径。仅秒传/已存在分支返回。 */
+    storage_path?: string
 }
 
 export interface UploadChunkData {

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,10 +30,22 @@ import (
 // uploadSessionTTL 会话闲置多久后过期（元数据+位图+临时文件视作可回收）。
 const uploadSessionTTL = 24 * time.Hour
 
+// 目标同名文件的处理策略（uploadInitReq.OnConflict）。
+const (
+	// onConflictReject 默认：拒绝，让调用方自己删/改名。
+	// 同步引擎依赖这条语义——它是 delete-before-upload，不该出现同名残留；
+	// 真出现了必须报错而不是悄悄改名，否则同步目录里会凭空多出一个文件并被派发到所有设备。
+	onConflictReject = "reject"
+	// onConflictTimestamp 自动在文件名后加时间戳区分（发布 APK 这类「同名是常态」的场景用）。
+	onConflictTimestamp = "timestamp"
+)
+
 // uploadInitReq 前端上传前提交的“描述信息”。
 type uploadInitReq struct {
-	Path       string   `json:"path" binding:"required"`
-	Name       string   `json:"name" binding:"required"`
+	Path string `json:"path" binding:"required"`
+	Name string `json:"name" binding:"required"`
+	// OnConflict 目标已存在时怎么办：reject（默认）/ timestamp（自动加时间戳）。
+	OnConflict string   `json:"on_conflict"`
 	TotalSize  int64    `json:"total_size" binding:"required"`
 	ChunkSize  int64    `json:"chunk_size" binding:"required"`
 	ChunkCount int      `json:"chunk_count" binding:"required"`
@@ -105,13 +119,36 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			return
 		}
 
-		// 目标已存在则拒绝（覆盖需先删除/重命名）
-		if _, statErr := os.Stat(fullPath); statErr == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件已存在，请先删除或重命名", "data": nil})
-			return
+		ctx := context.Background()
+
+		// 目标已存在时怎么办。判据只看**磁盘**（os.Stat），不看 file 表——
+		// 库里有记录而盘上没有（被手工删过/清理过）不该挡住上传，反过来也一样。
+		if st, statErr := os.Stat(fullPath); statErr == nil {
+			switch {
+			case st.Size() == req.TotalSize && pathHashEquals(db, userID, fullPath, req.FileHash):
+				// 同路径 + 同大小 + 同哈希 = 要传的东西本来就在那儿（重复发布同一个包、
+				// init 重发）。这不是错误，直接当秒传成功返回，既不重传也不产生副本。
+				respondInstant(c, db, engine, userID, &req, fullPath,
+					upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize), "文件已是最新")
+				return
+			case req.OnConflict == onConflictTimestamp:
+				// 「同名是常态」的场景（发布 APK：每次 build 出来都叫 app-release.apk）。
+				// 报错逼用户改名没有意义，加时间戳区分即可，两个版本都留在盘上。
+				newName, newPath, err := uniqueNameWithTimestamp(req.Path, req.Name)
+				if err != nil {
+					c.JSON(http.StatusOK, gin.H{"code": 500, "message": "生成不重名文件名失败: " + err.Error(), "data": nil})
+					return
+				}
+				logger.Logger.Info("目标同名，自动加时间戳区分",
+					zap.String("old", req.Name), zap.String("new", newName))
+				req.Name = newName
+				fullPath = newPath
+			default:
+				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件已存在，请先删除或重命名", "data": nil})
+				return
+			}
 		}
 
-		ctx := context.Background()
 		id := upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize)
 
 		// 秒传：同用户已有相同 file_hash + 大小的文件且物理存在 → 直接复制落盘。
@@ -120,29 +157,7 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			if err := copyFile(src, fullPath); err != nil {
 				logger.Logger.Warn("秒传复制失败，回退普通上传", zap.String("src", src), zap.Error(err))
 			} else {
-				// 与 complete 相同的双分支：同步目录内 → 引擎维护 trunk + 派发拉取；否则普通落库
-				var fileID uint64
-				var handled bool
-				if engine != nil {
-					var herr error
-					handled, herr = engine.HandleUploadComplete(userID, req.DeviceID, fullPath, req.Name, req.TotalSize, req.FileHash)
-					if herr != nil {
-						logger.Logger.Warn("秒传同步派发失败", zap.String("path", fullPath), zap.Error(herr))
-					}
-					if handled {
-						fileID = lookupFileID(db, userID, fullPath)
-					}
-				}
-				if !handled {
-					fileID, _ = upsertFileRecord(db, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
-				}
-				writeUploadHistoryCompleted(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
-				logger.Logger.Info("秒传完成", zap.Uint("user_id", userID), zap.String("path", fullPath),
-					zap.Uint64("file_id", fileID), zap.Bool("synced", handled))
-				c.JSON(http.StatusOK, gin.H{"code": 200, "message": "秒传成功", "data": gin.H{
-					"upload_id": id, "instant": true, "chunk_size": req.ChunkSize,
-					"chunk_count": req.ChunkCount, "missing": []int{}, "synced": handled,
-				}})
+				respondInstant(c, db, engine, userID, &req, fullPath, id, "秒传成功")
 				return
 			}
 		}
@@ -236,6 +251,71 @@ func HandlerFuncUploadStatus(_ *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 }
 
 // ---- helpers ----
+
+// respondInstant 「内容已经在目标位置了」的统一收尾：登记 file 记录 / 交同步引擎派发 /
+// 写上传历史，然后按秒传形状返回（instant=true，客户端**不得**再调 complete）。
+// 用于两处：跨路径秒传复制完成后，以及目标路径本来就是同一份内容时。
+func respondInstant(c *gin.Context, db *gorm.DB, engine *sync.Engine, userID uint,
+	req *uploadInitReq, fullPath, id, message string) {
+	// 与 complete 相同的双分支：同步目录内 → 引擎维护 trunk + 派发拉取；否则普通落库
+	var fileID uint64
+	var handled bool
+	if engine != nil {
+		var herr error
+		handled, herr = engine.HandleUploadComplete(userID, req.DeviceID, fullPath, req.Name, req.TotalSize, req.FileHash)
+		if herr != nil {
+			logger.Logger.Warn("秒传同步派发失败", zap.String("path", fullPath), zap.Error(herr))
+		}
+		if handled {
+			fileID = lookupFileID(db, userID, fullPath)
+		}
+	}
+	if !handled {
+		fileID, _ = upsertFileRecord(db, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
+	}
+	writeUploadHistoryCompleted(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
+	logger.Logger.Info(message, zap.Uint("user_id", userID), zap.String("path", fullPath),
+		zap.Uint64("file_id", fileID), zap.Bool("synced", handled))
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": message, "data": gin.H{
+		"upload_id": id, "instant": true, "chunk_size": req.ChunkSize,
+		"chunk_count": req.ChunkCount, "missing": []int{}, "synced": handled,
+		"file_name": req.Name, "storage_path": fullPath,
+	}})
+}
+
+// pathHashEquals 该路径在 file 表里记录的哈希是否等于 want。
+// 只作为「同大小」之外的第二判据用：磁盘大小相同 + 库里哈希相同才认定是同一份内容，
+// 避免为了判断而去读几十 MB 的文件重算哈希。库里没记录则返回 false（宁可重传）。
+func pathHashEquals(db *gorm.DB, userID uint, fullPath, want string) bool {
+	if want == "" {
+		return false
+	}
+	var f model.File
+	if err := db.Where("user_id = ? AND file_path = ? AND is_deleted = ?", userID, fullPath, false).
+		First(&f).Error; err != nil {
+		return false
+	}
+	return f.FileHash != nil && *f.FileHash == want
+}
+
+// uniqueNameWithTimestamp 给同名文件加时间戳：`app-release.apk` → `app-release_20260816-225015.apk`。
+// 同一秒内再撞（连点两次发布）就往后加序号。返回新文件名与新全路径。
+func uniqueNameWithTimestamp(reqPath, name string) (string, string, error) {
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	stamp := time.Now().Format("20060102-150405")
+	for i := 0; i < 100; i++ {
+		candidate := fmt.Sprintf("%s_%s%s", base, stamp, ext)
+		if i > 0 {
+			candidate = fmt.Sprintf("%s_%s-%d%s", base, stamp, i, ext)
+		}
+		full := resolveUploadPath(reqPath, candidate)
+		if _, err := os.Stat(full); os.IsNotExist(err) {
+			return candidate, full, nil
+		}
+	}
+	return "", "", fmt.Errorf("同名文件过多，无法生成唯一文件名")
+}
 
 // resolveUploadPath 与旧单发上传一致：name 已是 path 末段则直接用，否则拼接。
 func resolveUploadPath(reqPath, name string) string {

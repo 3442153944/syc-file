@@ -8,6 +8,12 @@ import (
 )
 
 // findFolderForPath 找到包含 fullPath 的启用中同步文件夹，返回文件夹、相对路径（/ 分隔）、是否命中。
+// FolderForPath 是 findFolderForPath 的导出版本：给 file 域（版本回滚等）判断
+// 某个绝对路径是否落在启用的同步文件夹内，并拿到它的相对路径。
+func (e *Engine) FolderForPath(userID uint, fullPath string) (model.SyncFolder, string, bool) {
+	return e.findFolderForPath(userID, fullPath)
+}
+
 func (e *Engine) findFolderForPath(userID uint, fullPath string) (model.SyncFolder, string, bool) {
 	var folders []model.SyncFolder
 	e.db.Where("user_id = ? AND enabled = ?", userID, true).Find(&folders)
