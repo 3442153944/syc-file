@@ -97,10 +97,7 @@ impl ApiClient {
     }
 
     /// DELETE 请求
-    pub async fn delete<T: DeserializeOwned>(
-        &self,
-        path: &str,
-    ) -> Result<ApiResponse<T>, String> {
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<ApiResponse<T>, String> {
         let req = self
             .client
             .delete(self.url(path))
@@ -166,7 +163,11 @@ async fn send_and_parse<T: DeserializeOwned>(
                 return Err(format!("HTTP {}: {}", status, text));
             }
             serde_json::from_str::<ApiResponse<T>>(&text).map_err(|e| {
-                format!("JSON 解析失败: {} (body: {})", e, &text[..text.len().min(200)])
+                format!(
+                    "JSON 解析失败: {} (body: {})",
+                    e,
+                    &text[..text.len().min(200)]
+                )
             })
         }
         Err(e) => Err(e.to_string()),

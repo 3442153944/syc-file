@@ -3,6 +3,7 @@ mod app_paths;
 mod base_store;
 mod catch_up;
 mod chunked_uploader;
+mod clipboard_sync;
 mod config;
 mod device;
 mod logger;
@@ -11,20 +12,30 @@ mod upload_worker;
 mod watcher;
 mod ws_client;
 
+use api::client::ApiClient;
+use api::file::{api as file_api, params::*, response::*};
+use api::sync::{api as sync_api, params::*, response::*};
+use api::user::{api as user_api, params::*, response::*};
+use config::{init_sync_config, FolderMapping, SharedSyncConfig, SyncConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use api::client::ApiClient;
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
-use api::user::{api as user_api, params::*, response::*};
-use api::file::{api as file_api, params::*, response::*};
-use api::sync::{api as sync_api, params::*, response::*};
-use config::{FolderMapping, SharedSyncConfig, SyncConfig, init_sync_config};
-use sync_engine::{SharedSyncEngine, engine_enqueue_initial_sync, engine_watch_path, init_sync_engine, start_sync_engine, stop_sync_engine};
+use sync_engine::{
+    engine_enqueue_initial_sync, engine_watch_path, init_sync_engine, start_sync_engine,
+    stop_sync_engine, SharedSyncEngine,
+};
 use tauri::State;
-use watcher::{SharedWatcherState, add_watch_path, init_watcher_state, list_watch_paths, remove_watch_path};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use watcher::{
+    add_watch_path, init_watcher_state, list_watch_paths, remove_watch_path, SharedWatcherState,
+};
 
 // ── 辅助 ──────────────────────────────────────────────────────────────────────
+
+/// 供其它模块（clipboard_sync 等）复用的构造入口。
+pub fn make_client_public(cfg: &SyncConfig) -> Result<ApiClient, String> {
+    make_client(cfg)
+}
 
 fn make_client(cfg: &SyncConfig) -> Result<ApiClient, String> {
     if cfg.server_url.is_empty() {
@@ -60,8 +71,12 @@ fn add_watch(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let p = PathBuf::from(&path);
-    if !p.exists() { return Err(format!("路径不存在: {}", path)); }
-    if !p.is_dir() { return Err(format!("路径不是目录: {}", path)); }
+    if !p.exists() {
+        return Err(format!("路径不存在: {}", path));
+    }
+    if !p.is_dir() {
+        return Err(format!("路径不是目录: {}", path));
+    }
     add_watch_path(&state, p, app_handle)
 }
 
@@ -92,14 +107,23 @@ fn set_sync_config(
     cfg.server_url = server_url;
     cfg.ws_url = ws_url;
     cfg.token = token;
-    if let Some(w) = upload_workers { cfg.upload_workers = w; }
-    if let Some(w) = download_workers { cfg.download_workers = w; }
-    if let Some(d) = debounce_ms { cfg.debounce_ms = d; }
+    if let Some(w) = upload_workers {
+        cfg.upload_workers = w;
+    }
+    if let Some(w) = download_workers {
+        cfg.download_workers = w;
+    }
+    if let Some(d) = debounce_ms {
+        cfg.debounce_ms = d;
+    }
     if let Some(lvl) = log_level {
         cfg.log.level = lvl;
     }
     cfg.save(); // 持久化到 config/config.yml（token 不写入）
-    logger::info("config", format!("同步配置已更新并保存（日志级别: {}）", cfg.log.level));
+    logger::info(
+        "config",
+        format!("同步配置已更新并保存（日志级别: {}）", cfg.log.level),
+    );
 }
 
 // ── 日志窗口 ─────────────────────────────────────────────────────────────────
@@ -129,7 +153,11 @@ fn open_log_window_cmd(app: tauri::AppHandle) {
 #[tauri::command]
 fn get_sync_config(config: State<SharedSyncConfig>) -> SyncConfig {
     let mut cfg = config.read().clone();
-    cfg.token = if cfg.token.is_empty() { String::new() } else { "***".into() };
+    cfg.token = if cfg.token.is_empty() {
+        String::new()
+    } else {
+        "***".into()
+    };
     cfg
 }
 
@@ -156,10 +184,18 @@ fn add_folder_mapping(
     }
     {
         let mut cfg = config.write();
-        if cfg.folder_mappings.iter().any(|m| m.local_path == local_path) {
+        if cfg
+            .folder_mappings
+            .iter()
+            .any(|m| m.local_path == local_path)
+        {
             return Err(format!("目录已添加: {}", local_path));
         }
-        cfg.folder_mappings.push(FolderMapping { local_path: local_path.clone(), remote_path, folder_id });
+        cfg.folder_mappings.push(FolderMapping {
+            local_path: local_path.clone(),
+            remote_path,
+            folder_id,
+        });
     }
     let guard = engine.lock();
     if guard.is_some() {
@@ -171,7 +207,10 @@ fn add_folder_mapping(
 
 #[tauri::command]
 fn remove_folder_mapping(local_path: String, config: State<SharedSyncConfig>) {
-    config.write().folder_mappings.retain(|m| m.local_path != local_path);
+    config
+        .write()
+        .folder_mappings
+        .retain(|m| m.local_path != local_path);
 }
 
 async fn do_start_sync(
@@ -198,10 +237,17 @@ async fn do_start_sync(
 
     start_sync_engine(engine, config.clone(), app_handle.clone())?;
 
-    let paths: Vec<PathBuf> = config.read().folder_mappings
-        .iter().map(|m| PathBuf::from(&m.local_path)).collect();
+    let paths: Vec<PathBuf> = config
+        .read()
+        .folder_mappings
+        .iter()
+        .map(|m| PathBuf::from(&m.local_path))
+        .collect();
     if paths.is_empty() {
-        logger::warn("sync", "未配置任何同步目录，引擎已启动但不会监听任何文件。请先在「同步管理」创建同步文件夹。");
+        logger::warn(
+            "sync",
+            "未配置任何同步目录，引擎已启动但不会监听任何文件。请先在「同步管理」创建同步文件夹。",
+        );
     }
     for p in &paths {
         match engine_watch_path(engine, p.clone()) {
@@ -211,7 +257,10 @@ async fn do_start_sync(
     }
 
     engine_enqueue_initial_sync(engine, config);
-    logger::info("sync", format!("同步引擎已启动，监听 {} 个目录", paths.len()));
+    logger::info(
+        "sync",
+        format!("同步引擎已启动，监听 {} 个目录", paths.len()),
+    );
     Ok(())
 }
 
@@ -270,7 +319,15 @@ async fn register(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<serde_json::Value, String> {
     let client = make_client(&config.read())?;
-    let resp = user_api::register(&client, RegisterParams { username, password, email }).await?;
+    let resp = user_api::register(
+        &client,
+        RegisterParams {
+            username,
+            password,
+            email,
+        },
+    )
+    .await?;
     api_data(resp, "register")
 }
 
@@ -282,7 +339,15 @@ async fn reset_password(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = user_api::reset_password(&client, ResetPasswordParams { username, old_password, new_password }).await?;
+    let resp = user_api::reset_password(
+        &client,
+        ResetPasswordParams {
+            username,
+            old_password,
+            new_password,
+        },
+    )
+    .await?;
     ensure_ok(resp)
 }
 
@@ -294,7 +359,14 @@ async fn change_password(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = user_api::change_password(&client, ChangePasswordParams { old_password, new_password }).await?;
+    let resp = user_api::change_password(
+        &client,
+        ChangePasswordParams {
+            old_password,
+            new_password,
+        },
+    )
+    .await?;
     ensure_ok(resp)
 }
 
@@ -309,12 +381,22 @@ async fn update_profile(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let mut form = reqwest::multipart::Form::new();
-    if let Some(u) = username { form = form.text("username", u); }
-    if let Some(e) = email { form = form.text("email", e); }
-    if let Some(p) = phone { form = form.text("phone", p); }
+    if let Some(u) = username {
+        form = form.text("username", u);
+    }
+    if let Some(e) = email {
+        form = form.text("email", e);
+    }
+    if let Some(p) = phone {
+        form = form.text("phone", p);
+    }
     if let Some(path) = avatar_path {
         let p = std::path::Path::new(&path);
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("avatar").to_string();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("avatar")
+            .to_string();
         let bytes = std::fs::read(p).map_err(|e| format!("读取头像文件失败: {}", e))?;
         let part = reqwest::multipart::Part::bytes(bytes).file_name(name);
         form = form.part("avatar", part);
@@ -326,9 +408,18 @@ async fn update_profile(
 // ── 文件域 commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-async fn get_available_disks(config: State<'_, SharedSyncConfig>) -> Result<AvailableDisksData, String> {
+async fn get_available_disks(
+    config: State<'_, SharedSyncConfig>,
+) -> Result<AvailableDisksData, String> {
     let client = make_client(&config.read())?;
-    let resp = file_api::get_available_disks(&client, AvailableDisksParams { disk_path: String::new(), detailed: true }).await?;
+    let resp = file_api::get_available_disks(
+        &client,
+        AvailableDisksParams {
+            disk_path: String::new(),
+            detailed: true,
+        },
+    )
+    .await?;
     api_data(resp, "get_available_disks")
 }
 
@@ -340,7 +431,15 @@ async fn traverse_directory(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<TraverseDirectoryData, String> {
     let client = make_client(&config.read())?;
-    let resp = file_api::traverse_directory(&client, TraverseDirectoryParams { path, page, page_size }).await?;
+    let resp = file_api::traverse_directory(
+        &client,
+        TraverseDirectoryParams {
+            path,
+            page,
+            page_size,
+        },
+    )
+    .await?;
     api_data(resp, "traverse_directory")
 }
 
@@ -356,7 +455,7 @@ async fn upload_file(
     config: State<'_, SharedSyncConfig>,
     app_handle: tauri::AppHandle,
 ) -> Result<UploadCompleteData, String> {
-    use chunked_uploader::{UploadOptions, upload, ProgressFn};
+    use chunked_uploader::{upload, ProgressFn, UploadOptions};
     let path = std::path::Path::new(&local_path);
     if !path.exists() {
         return Err(format!("文件不存在: {}", local_path));
@@ -400,7 +499,8 @@ async fn delete_file(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = file_api::delete_file(&client, api::file::params::DeleteFileParams { path, name }).await?;
+    let resp =
+        file_api::delete_file(&client, api::file::params::DeleteFileParams { path, name }).await?;
     ensure_ok(resp)
 }
 
@@ -413,7 +513,14 @@ fn build_download_url(
     config: State<SharedSyncConfig>,
 ) -> Result<String, String> {
     let client = make_client(&config.read())?;
-    Ok(file_api::build_download_url(&client, &DownloadParams { path, name, device_id }))
+    Ok(file_api::build_download_url(
+        &client,
+        &DownloadParams {
+            path,
+            name,
+            device_id,
+        },
+    ))
 }
 
 #[tauri::command]
@@ -423,7 +530,14 @@ async fn get_download_history(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<DownloadHistoryData, String> {
     let client = make_client(&config.read())?;
-    let resp = file_api::get_download_history(&client, DownloadHistoryParams { page_num, page_size }).await?;
+    let resp = file_api::get_download_history(
+        &client,
+        DownloadHistoryParams {
+            page_num,
+            page_size,
+        },
+    )
+    .await?;
     api_data(resp, "get_download_history")
 }
 
@@ -433,7 +547,8 @@ async fn delete_download_history(
     config: State<'_, SharedSyncConfig>,
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = file_api::delete_download_history(&client, DeleteDownloadHistoryParams { ids }).await?;
+    let resp =
+        file_api::delete_download_history(&client, DeleteDownloadHistoryParams { ids }).await?;
     ensure_ok(resp)
 }
 
@@ -452,14 +567,24 @@ async fn create_sync_folder(
         let cfg = config.read();
         (cfg.device_id.clone(), make_client(&cfg)?)
     };
-    let params = CreateFolderParams { name, local_path: local_path.clone(), remote_path: remote_path.clone(), direction, owner_device_id: device_id };
+    let params = CreateFolderParams {
+        name,
+        local_path: local_path.clone(),
+        remote_path: remote_path.clone(),
+        direction,
+        owner_device_id: device_id,
+    };
     let resp = sync_api::create_folder(&client, params).await?;
     let folder = api_data(resp, "create_sync_folder")?;
 
     // 自动更新内存缓存
     {
         let mut cfg = config.write();
-        if !cfg.folder_mappings.iter().any(|m| m.local_path == local_path) {
+        if !cfg
+            .folder_mappings
+            .iter()
+            .any(|m| m.local_path == local_path)
+        {
             cfg.folder_mappings.push(FolderMapping {
                 local_path: local_path.clone(),
                 remote_path,
@@ -489,9 +614,14 @@ async fn delete_sync_folder(
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::delete_folder(&client, folder_id).await?;
-    if !resp.is_ok() { return Err(format!("[{}] {}", resp.code, resp.message)); }
+    if !resp.is_ok() {
+        return Err(format!("[{}] {}", resp.code, resp.message));
+    }
     // 从内存缓存移除（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
-    config.write().folder_mappings.retain(|m| m.folder_id != folder_id);
+    config
+        .write()
+        .folder_mappings
+        .retain(|m| m.folder_id != folder_id);
     Ok(())
 }
 
@@ -547,7 +677,11 @@ async fn update_sync_folder(
     let resp = sync_api::update_folder(
         &client,
         folder_id,
-        UpdateFolderParams { enabled, direction, name },
+        UpdateFolderParams {
+            enabled,
+            direction,
+            name,
+        },
     )
     .await?;
     ensure_ok(resp)
@@ -635,7 +769,11 @@ async fn api_request(
             Some(b) => client.post(&path, &b).await?,
             None => client.post_empty(&path).await?,
         },
-        "PUT" => client.put(&path, &body.unwrap_or(serde_json::Value::Null)).await?,
+        "PUT" => {
+            client
+                .put(&path, &body.unwrap_or(serde_json::Value::Null))
+                .await?
+        }
         "DELETE" => client.delete(&path).await?,
         other => return Err(format!("不支持的方法: {}", other)),
     };
@@ -643,6 +781,57 @@ async fn api_request(
         return Err(resp.message);
     }
     Ok(resp.data.unwrap_or(serde_json::Value::Null))
+}
+
+// ── 剪贴板同步 ───────────────────────────────────────────────────────────────
+
+/// 当前剪贴板同步开关状态。
+#[tauri::command]
+fn get_clipboard_settings(state: State<clipboard_sync::SharedClipboardState>) -> serde_json::Value {
+    let s = state.read();
+    serde_json::json!({ "enabled": s.enabled, "auto_apply": s.auto_apply })
+}
+
+/// 开关剪贴板同步。**默认关闭**，必须用户显式打开——剪贴板里常有密码和验证码，
+/// 内容会经过服务器（虽然只在 Redis 存 24 小时且不进数据库），这一点要在设置页写清楚。
+#[tauri::command]
+fn set_clipboard_settings(
+    enabled: Option<bool>,
+    auto_apply: Option<bool>,
+    state: State<clipboard_sync::SharedClipboardState>,
+) {
+    let mut s = state.write();
+    if let Some(v) = enabled {
+        s.enabled = v;
+    }
+    if let Some(v) = auto_apply {
+        s.auto_apply = v;
+    }
+    logger::info(
+        "clipboard",
+        format!(
+            "剪贴板同步: enabled={} auto_apply={}",
+            s.enabled, s.auto_apply
+        ),
+    );
+}
+
+/// 手动把当前剪贴板内容推送一次（不受 enabled 开关限制，用户点了就是要推）。
+#[tauri::command]
+async fn push_clipboard_now(
+    config: State<'_, SharedSyncConfig>,
+    state: State<'_, clipboard_sync::SharedClipboardState>,
+) -> Result<(), String> {
+    clipboard_sync::push_current(&config, &state).await
+}
+
+/// 把一条历史内容写回本机剪贴板（历史列表里点「复制」）。
+#[tauri::command]
+fn apply_clipboard_text(
+    text: String,
+    state: State<clipboard_sync::SharedClipboardState>,
+) -> Result<(), String> {
+    clipboard_sync::apply_to_clipboard(&state, &text)
 }
 
 #[tauri::command]
@@ -669,10 +858,7 @@ async fn update_app_release(
 }
 
 #[tauri::command]
-async fn delete_app_release(
-    id: u64,
-    config: State<'_, SharedSyncConfig>,
-) -> Result<(), String> {
+async fn delete_app_release(id: u64, config: State<'_, SharedSyncConfig>) -> Result<(), String> {
     let client = make_client(&config.read())?;
     let path = routes::UPDATE_RELEASE_BY_ID.replace("{}", &id.to_string());
     let resp: api::client::ApiResponse<serde_json::Value> = client.delete(&path).await?;
@@ -700,20 +886,32 @@ async fn check_app_update(
 pub fn run() {
     // 先创建共享配置，setup 与 manage 共用同一 Arc
     let shared_config = init_sync_config();
+    let clipboard_state = clipboard_sync::init_clipboard_state();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(init_watcher_state())
         .manage(shared_config.clone())
         .manage(init_sync_engine())
+        .manage(clipboard_state.clone())
         .setup(move |app| {
             // 绑定全局日志（事件 + 文件 + 级别过滤 + 轮转），任意模块即可 logger::info(...)
             let log_cfg = shared_config.read().log.clone();
             logger::init(app.handle().clone(), &log_cfg);
             base_store::init(); // 载入 base_hash 基线
+                                // 剪贴板监听：进程内一份，默认关闭（state.enabled=false），用户在设置里打开才真正干活
+            clipboard_sync::start_clipboard_watcher(
+                clipboard_state.clone(),
+                shared_config.clone(),
+                app.handle().clone(),
+            );
             logger::info(
                 "app",
-                format!("应用启动，配置目录: {} | 日志级别: {}", app_paths::config_dir().display(), log_cfg.level),
+                format!(
+                    "应用启动，配置目录: {} | 日志级别: {}",
+                    app_paths::config_dir().display(),
+                    log_cfg.level
+                ),
             );
 
             // 顶部菜单栏：一级菜单「工具」→「打开日志窗口」(Ctrl+Alt+T)
@@ -753,27 +951,60 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // 基础监听
-            add_watch, remove_watch, list_watches,
+            add_watch,
+            remove_watch,
+            list_watches,
             // 配置
-            set_sync_config, get_sync_config, get_device_id,
+            set_sync_config,
+            get_sync_config,
+            get_device_id,
             // 日志
             open_log_window_cmd,
             // 同步引擎
-            add_folder_mapping, remove_folder_mapping,
-            start_sync, stop_sync, is_sync_running,
+            add_folder_mapping,
+            remove_folder_mapping,
+            start_sync,
+            stop_sync,
+            is_sync_running,
             // 通用 API 代理（管理域等新接口统一走它）
             api_request,
+            // 剪贴板同步
+            get_clipboard_settings,
+            set_clipboard_settings,
+            push_clipboard_now,
+            apply_clipboard_text,
             // 用户域
-            login, verify, register, reset_password, update_profile, change_password,
+            login,
+            verify,
+            register,
+            reset_password,
+            update_profile,
+            change_password,
             // 文件域
-            get_available_disks, traverse_directory, upload_file, delete_file,
-            build_download_url, get_download_history, delete_download_history,
+            get_available_disks,
+            traverse_directory,
+            upload_file,
+            delete_file,
+            build_download_url,
+            get_download_history,
+            delete_download_history,
             // 同步域
-            create_sync_folder, list_sync_folders, delete_sync_folder, update_sync_folder,
-            list_pending_tasks, list_conflicts, resolve_conflict, delete_conflict,
-            list_sync_tasks, clear_sync_tasks,
+            create_sync_folder,
+            list_sync_folders,
+            delete_sync_folder,
+            update_sync_folder,
+            list_pending_tasks,
+            list_conflicts,
+            resolve_conflict,
+            delete_conflict,
+            list_sync_tasks,
+            clear_sync_tasks,
             // 应用更新域
-            list_app_releases, publish_app_release, update_app_release, delete_app_release, check_app_update,
+            list_app_releases,
+            publish_app_release,
+            update_app_release,
+            delete_app_release,
+            check_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

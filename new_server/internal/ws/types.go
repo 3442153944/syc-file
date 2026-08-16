@@ -24,6 +24,8 @@ const (
 	MessageTypeAck       MessageType = "ack"
 	MessageTypeFileSync  MessageType = "file_sync"
 	MessageTypeNotify    MessageType = "notification"
+	// MessageTypeClipboard 剪贴板同步：服务端 → 其它设备的单向投递（上报走 REST /clipboard/push）
+	MessageTypeClipboard MessageType = "clipboard"
 )
 
 type TargetType string

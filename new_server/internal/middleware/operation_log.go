@@ -35,6 +35,7 @@ var skipLogging = []string{
 	"/v1/ws/",                   // WS 相关（连接本身是 GET，这里兜住其余）
 	"/v1/user/verify",           // 每次启动都调
 	"/v1/monitor/",              // 监控页轮询
+	"/v1/clipboard/",            // ⚠ 剪贴板内容是敏感数据（密码/验证码），绝不能落日志表
 }
 
 // bodyRecorder 包一层 ResponseWriter 以便留存响应体。

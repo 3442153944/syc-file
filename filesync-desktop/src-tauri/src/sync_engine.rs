@@ -1,12 +1,12 @@
-use crate::config::SharedSyncConfig;
 use crate::api::{client::ApiClient, sync::api as sync_api};
+use crate::config::SharedSyncConfig;
 use crate::upload_worker::{start_upload_workers, UploadTask};
 use crate::ws_client::start_ws_client;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{PathBuf, Component};
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -87,7 +87,9 @@ pub fn start_sync_engine(
                 continue;
             }
             // 同路径取最新 kind（modify 覆盖 create 没关系；remove 要保留）
-            let entry = map.entry(path).or_insert((kind_str.to_string(), Instant::now()));
+            let entry = map
+                .entry(path)
+                .or_insert((kind_str.to_string(), Instant::now()));
             entry.0 = kind_str.to_string();
             entry.1 = Instant::now();
         }
@@ -128,14 +130,18 @@ async fn flush_debounce(
                 if let Some((folder_id, rel)) = find_mapping(config, &path) {
                     report_delete(config, folder_id, &rel, &path, app).await;
                 } else {
-                    crate::logger::debug("watch", format!("删除不在同步目录内，已忽略: {}", path.display()));
+                    crate::logger::debug(
+                        "watch",
+                        format!("删除不在同步目录内，已忽略: {}", path.display()),
+                    );
                 }
             }
             "create" | "modify" => {
                 if !path.is_file() {
                     continue;
                 }
-                if let Some((folder_id, rel, remote_dir)) = find_mapping_with_remote(config, &path) {
+                if let Some((folder_id, rel, remote_dir)) = find_mapping_with_remote(config, &path)
+                {
                     crate::logger::info("watch", format!("检测到变更，准备上传: {}", rel));
                     app.emit(
                         "sync-event",
@@ -155,7 +161,10 @@ async fn flush_debounce(
                     .await
                     .ok();
                 } else {
-                    crate::logger::warn("watch", format!("变更不在任何同步目录内，已忽略: {}", path.display()));
+                    crate::logger::warn(
+                        "watch",
+                        format!("变更不在任何同步目录内，已忽略: {}", path.display()),
+                    );
                 }
             }
             _ => {}
@@ -174,34 +183,50 @@ async fn report_delete(
 
     let (server_url, token, device_id) = {
         let cfg = config.read();
-        (cfg.server_url.clone(), cfg.token.clone(), cfg.device_id.clone())
+        (
+            cfg.server_url.clone(),
+            cfg.token.clone(),
+            cfg.device_id.clone(),
+        )
     };
     if server_url.is_empty() || token.is_empty() {
         return;
     }
 
-    let file_name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     let client = ApiClient::new(&server_url, &token);
 
-    sync_api::notify(&client, NotifyParams {
-        device_id,
-        folder_id,
-        relative_path: relative_path.to_string(),
-        file_name,
-        action: "delete".into(),
-        file_size: None,
-        file_hash: None,
-        base_hash: None,
-        is_dir: false,
-        mtime: None,
-    }).await.ok();
+    sync_api::notify(
+        &client,
+        NotifyParams {
+            device_id,
+            folder_id,
+            relative_path: relative_path.to_string(),
+            file_name,
+            action: "delete".into(),
+            file_size: None,
+            file_hash: None,
+            base_hash: None,
+            is_dir: false,
+            mtime: None,
+        },
+    )
+    .await
+    .ok();
     crate::base_store::remove(folder_id, relative_path);
     crate::logger::info("watch", format!("已上报删除: {}", relative_path));
 
-    app.emit("sync-event", SyncEvent {
-        path: path.to_string_lossy().to_string(),
-        kind: "delete".into(),
-    }).ok();
+    app.emit(
+        "sync-event",
+        SyncEvent {
+            path: path.to_string_lossy().to_string(),
+            kind: "delete".into(),
+        },
+    )
+    .ok();
 }
 
 pub fn engine_watch_path(engine: &SharedSyncEngine, path: PathBuf) -> Result<(), String> {
@@ -235,7 +260,13 @@ pub fn engine_enqueue_initial_sync(engine: &SharedSyncEngine, config: &SharedSyn
         .read()
         .folder_mappings
         .iter()
-        .map(|m| (m.folder_id, PathBuf::from(&m.local_path), m.remote_path.clone()))
+        .map(|m| {
+            (
+                m.folder_id,
+                PathBuf::from(&m.local_path),
+                m.remote_path.clone(),
+            )
+        })
         .collect();
 
     tokio::spawn(async move {

@@ -41,7 +41,14 @@ pub fn init() {
                         .map(|old| {
                             old.into_iter()
                                 .map(|(k, v)| {
-                                    (k, BaseEntry { hash: v, size: 0, mtime: 0 })
+                                    (
+                                        k,
+                                        BaseEntry {
+                                            hash: v,
+                                            size: 0,
+                                            mtime: 0,
+                                        },
+                                    )
                                 })
                                 .collect()
                         })
@@ -63,7 +70,11 @@ pub fn set(folder_id: u64, rel: &str, hash: &str, size: i64, mtime: i64) {
     }
     cell().lock().insert(
         key(folder_id, rel),
-        BaseEntry { hash: hash.to_string(), size, mtime },
+        BaseEntry {
+            hash: hash.to_string(),
+            size,
+            mtime,
+        },
     );
     persist();
 }

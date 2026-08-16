@@ -161,17 +161,33 @@ pub async fn upload(
     options: &UploadOptions,
     on_progress: ProgressFn,
 ) -> Result<UploadCompleteData, String> {
-    let desc = describe(file, options.chunk_size)
-        .map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+    let desc =
+        describe(file, options.chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
     on_progress(0, desc.total_size);
 
-    match run_once(client, file, remote_dir, &desc, options, on_progress.clone()).await {
+    match run_once(
+        client,
+        file,
+        remote_dir,
+        &desc,
+        options,
+        on_progress.clone(),
+    )
+    .await
+    {
         Ok(d) => Ok(d),
         Err(e) if e.is_session_gone() => {
             // 会话过期：重新 init 整流程一次（不重算哈希）
-            run_once(client, file, remote_dir, &desc, options, on_progress.clone())
-                .await
-                .map_err(|e2| e2.into_string())
+            run_once(
+                client,
+                file,
+                remote_dir,
+                &desc,
+                options,
+                on_progress.clone(),
+            )
+            .await
+            .map_err(|e2| e2.into_string())
         }
         Err(e) => Err(e.into_string()),
     }
@@ -227,9 +243,16 @@ async fn run_once(
         .to_string_lossy()
         .to_string();
 
-    let init = call_init(client, &file_name, remote_dir, desc, &options.device_id, &options.on_conflict)
-        .await
-        .map_err(UploadError::Other)?;
+    let init = call_init(
+        client,
+        &file_name,
+        remote_dir,
+        desc,
+        &options.device_id,
+        &options.on_conflict,
+    )
+    .await
+    .map_err(UploadError::Other)?;
 
     // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
     // 不能调 complete（会 404 会话不存在），结果就地合成。
@@ -238,7 +261,11 @@ async fn run_once(
         // 名字/路径以**服务端返回的**为准：同名冲突加了时间戳、或服务端另有落盘规则时，
         // 本地拼出来的是错的（曾经这里直接把 remote_dir 当 storage_path 返回，
         // 发布 APK 时会把「目录」当成 file_path 登记上去）。缺字段才回退本地推断。
-        let name = if init.file_name.is_empty() { file_name } else { init.file_name.clone() };
+        let name = if init.file_name.is_empty() {
+            file_name
+        } else {
+            init.file_name.clone()
+        };
         let path = if init.storage_path.is_empty() {
             format!("{}/{}", remote_dir.trim_end_matches(['/', '\\']), name)
         } else {
@@ -280,7 +307,10 @@ async fn run_once(
         // ApiClient 内部 reqwest::Client 是 Arc，clone 便宜，可 move 进 spawn
         let client_clone = client.clone();
         let h: tokio::task::JoinHandle<Result<(), UploadError>> = tokio::spawn(async move {
-            let _p = permit.acquire_owned().await.map_err(|e| UploadError::Other(e.to_string()))?;
+            let _p = permit
+                .acquire_owned()
+                .await
+                .map_err(|e| UploadError::Other(e.to_string()))?;
             // 让 cancel 信号有机会插入
             tokio::task::yield_now().await;
             let len = read_and_upload_chunk(

@@ -6,6 +6,7 @@ import (
 	"gorm.io/gorm"
 	"net/http"
 	"syc-file/internal/admin"
+	"syc-file/internal/clipboard"
 	"syc-file/internal/handler/file"
 	"syc-file/internal/handler/user"
 	"syc-file/internal/middleware"
@@ -33,4 +34,6 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	update.RegisterUpdateRouter(v1, db)
 	// 管理域：用户/设备/操作日志/存储配额/角色权限 + 系统监控
 	admin.RegisterAdminRouter(v1, db)
+	// 剪贴板同步（纯转发 + Redis 短期历史，不落 MySQL）
+	clipboard.RegisterClipboardRouter(v1, redisClient)
 }
