@@ -35,7 +35,9 @@ export class AppConfig {
   caPath: string = '';
   connectTimeoutMs: number = 30000;
   readTimeoutMs: number = 30000;
-  wsReconnectIntervalMs: number = 5000;
+  // 以下两个已废弃：WS 改为固定 3s 无限重连（见 net/WebSocketManager 的 RECONNECT_INTERVAL_MS），
+  // 唯一停机条件是 token 失效。字段保留仅为兼容旧持久化，不再被读取。
+  wsReconnectIntervalMs: number = 3000;
   wsMaxReconnectAttempts: number = -1;
   uploadChunkSize: number = 4 * 1024 * 1024;
   maxConcurrentUploads: number = 3;

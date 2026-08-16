@@ -98,6 +98,11 @@ export default class SunyuanlingAbility extends UIAbility {
 
   onBackground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+    // 退后台随时可能被冻结/回收：把基线台账防抖窗口里的账立刻落盘。
+    // 台账少一截 = 下次上线清单少一截 = 服务端把差的那截重派一遍。
+    syncBaseStore.flushNow().catch((e: Error) => {
+      hilog.warn(DOMAIN, '云梯Boot', 'baseline flush failed: %{public}s', e.message);
+    });
     // 这里**不要**去标记「不可写」。系统弹框（通知/定位授权、picker 自身）也会触发 onBackground，
     // 一标记就会把前台的正常写盘误判成不可写，整轮落沙盒。能不能写交给 fs.open 的结果说话。
   }

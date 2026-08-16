@@ -34,11 +34,11 @@ object AppConfig {
     /** HTTP 读取超时（毫秒） */
     var readTimeoutMs = 30_000
 
-    /** WebSocket 重连间隔（毫秒） */
-    var wsReconnectIntervalMs = 5_000L
+    /** WebSocket 重连间隔（毫秒）。固定间隔，不做指数退避——WS 是同步链路刚需，断了要尽快回来。 */
+    var wsReconnectIntervalMs = 3_000L
 
-    /** WebSocket 最大重连次数，-1 表示无限重连 */
-    var wsMaxReconnectAttempts = -1
+    // 注：原 wsMaxReconnectAttempts 已删除——WS 是同步刚需，无限重连，
+    //     唯一的停机条件是 token 失效（握手拿到 401 时停并跳登录）。
 
     // ==================== 文件传输 ====================
 

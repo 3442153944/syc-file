@@ -45,6 +45,21 @@ export class Request {
     return `${appConfig.getBaseUrl()}/v1`;
   }
 
+  /**
+   * 静态资源 URL（头像等），对标 Android `Request.baseStaticUrl`。
+   *
+   * ⚠ 服务端存的 `user.avatar` 已经是**含目录的相对路径**（`static/avatar/avatar_1_x.png`，
+   *   见 config.yaml `user.avatar_path`），所以这里**只拼服务器根，不能再补 `/static/`**——
+   *   补了就变成 `.../static/static/avatar/x.png`，必然 404，头像永远出不来。
+   *   另外静态资源不走 `/v1`（那是 API 前缀）。
+   */
+  static staticUrl(relPath: string): string {
+    if (relPath.length === 0) return '';
+    if (relPath.startsWith('http')) return relPath;
+    const rel: string = relPath.replace(/^\/+/, '');
+    return `${appConfig.getBaseUrl()}/${rel}`;
+  }
+
   private buildUrl(endpoint: string, queryParams?: Record<string, string>): string {
     let url = endpoint.startsWith('http') ? endpoint : `${this.baseUrl}${endpoint}`;
     if (queryParams !== undefined && queryParams !== null) {

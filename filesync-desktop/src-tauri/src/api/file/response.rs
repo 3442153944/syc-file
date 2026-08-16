@@ -76,6 +76,15 @@ pub struct UploadInitData {
     /// 仍缺失（需上传）的分片索引
     #[serde(default)]
     pub missing: Vec<i32>,
+    /// 服务端最终采用的文件名。**可能与本地文件名不同**——同名冲突策略为 timestamp 时
+    /// 服务端会自动加时间戳。秒传/已存在分支才返回，普通分支为空。
+    #[serde(rename = "file_name")]
+    #[serde(default)]
+    pub file_name: String,
+    /// 服务端最终落盘的完整路径（同上，仅秒传/已存在分支返回）。
+    #[serde(rename = "storage_path")]
+    #[serde(default)]
+    pub storage_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

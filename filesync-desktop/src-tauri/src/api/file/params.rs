@@ -56,6 +56,11 @@ pub struct UploadInitParams {
     #[serde(rename = "device_id")]
     #[serde(default)]
     pub device_id: String,
+    /// 目标同名时的策略：""/"reject"=报错（默认，同步链路用这个），"timestamp"=服务端自动加时间戳
+    #[serde(rename = "on_conflict")]
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub on_conflict: String,
 }
 
 /// 分片上传完成。

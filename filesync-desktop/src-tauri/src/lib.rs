@@ -350,6 +350,9 @@ async fn traverse_directory(
 async fn upload_file(
     local_path: String,
     remote_dir: String,
+    // on_conflict：目标同名时的策略。None/"reject"=报错；"timestamp"=服务端自动加时间戳区分
+    // （发布 APK 用这个：每次 build 出来都叫同一个名字，报错没意义）
+    on_conflict: Option<String>,
     config: State<'_, SharedSyncConfig>,
     app_handle: tauri::AppHandle,
 ) -> Result<UploadCompleteData, String> {
@@ -362,7 +365,10 @@ async fn upload_file(
         let cfg = config.read();
         (make_client(&cfg)?, cfg.device_id.clone())
     };
-    let options = UploadOptions::new(device_id);
+    let mut options = UploadOptions::new(device_id);
+    if on_conflict.as_deref() == Some("timestamp") {
+        options = options.with_timestamp_on_conflict();
+    }
     let app_for_progress = app_handle.clone();
     let local_for_progress = local_path.clone();
     let on_progress: ProgressFn = Arc::new(move |sent, total| {
@@ -599,6 +605,46 @@ async fn list_app_releases(
     api_data(resp, "list_app_releases")
 }
 
+/// 通用 API 代理：把任意 v1 接口透传给 Rust 侧的 ApiClient。
+///
+/// 为什么要有它：Tauri 模式下前端**不能**直接 fetch 后端（webview 里的 token 可能是陈旧的，
+/// 且要绕 CORS），既有做法是每个接口写一个 command。管理域一口气新增了二十来个只读/简单写的
+/// 接口，逐个包 command 纯属重复劳动，故提供一个统一代理：路径与 body 由前端给，
+/// token/服务器地址仍由 Rust 侧的 SyncConfig 提供（安全边界不变）。
+///
+/// 只允许 /v1 下的相对路径，防止被当成任意 URL 的转发器。
+#[tauri::command]
+async fn api_request(
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+    query: Option<std::collections::HashMap<String, String>>,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    if !path.starts_with('/') || path.contains("://") {
+        return Err("非法的接口路径".into());
+    }
+    let client = make_client(&config.read())?;
+    let params: Option<std::collections::HashMap<&str, String>> = query
+        .as_ref()
+        .map(|m| m.iter().map(|(k, v)| (k.as_str(), v.clone())).collect());
+
+    let resp: api::client::ApiResponse<serde_json::Value> = match method.to_uppercase().as_str() {
+        "GET" => client.get(&path, params.as_ref()).await?,
+        "POST" => match body {
+            Some(b) => client.post(&path, &b).await?,
+            None => client.post_empty(&path).await?,
+        },
+        "PUT" => client.put(&path, &body.unwrap_or(serde_json::Value::Null)).await?,
+        "DELETE" => client.delete(&path).await?,
+        other => return Err(format!("不支持的方法: {}", other)),
+    };
+    if !resp.is_ok() {
+        return Err(resp.message);
+    }
+    Ok(resp.data.unwrap_or(serde_json::Value::Null))
+}
+
 #[tauri::command]
 async fn publish_app_release(
     release: serde_json::Value,
@@ -715,6 +761,8 @@ pub fn run() {
             // 同步引擎
             add_folder_mapping, remove_folder_mapping,
             start_sync, stop_sync, is_sync_running,
+            // 通用 API 代理（管理域等新接口统一走它）
+            api_request,
             // 用户域
             login, verify, register, reset_password, update_profile, change_password,
             // 文件域

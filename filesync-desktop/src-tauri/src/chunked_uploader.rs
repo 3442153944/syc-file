@@ -38,6 +38,9 @@ pub struct UploadOptions {
     pub concurrency: usize,
     /// 本机设备 id，服务端派发同步任务时排除源设备。
     pub device_id: Arc<str>,
+    /// 目标同名时的策略：空/"reject" = 报错（默认，同步链路必须用这个），
+    /// "timestamp" = 服务端自动给文件名加时间戳区分（发布 APK 这类同名是常态的场景）。
+    pub on_conflict: Arc<str>,
 }
 
 impl UploadOptions {
@@ -46,7 +49,14 @@ impl UploadOptions {
             chunk_size: DEFAULT_CHUNK_SIZE,
             concurrency: DEFAULT_CONCURRENCY,
             device_id: Arc::from(device_id.into().into_boxed_str()),
+            on_conflict: Arc::from(""),
         }
+    }
+
+    /// 同名自动加时间戳（不影响其它字段）。
+    pub fn with_timestamp_on_conflict(mut self) -> Self {
+        self.on_conflict = Arc::from("timestamp");
+        self
     }
 }
 
@@ -217,7 +227,7 @@ async fn run_once(
         .to_string_lossy()
         .to_string();
 
-    let init = call_init(client, &file_name, remote_dir, desc, &options.device_id)
+    let init = call_init(client, &file_name, remote_dir, desc, &options.device_id, &options.on_conflict)
         .await
         .map_err(UploadError::Other)?;
 
@@ -225,10 +235,19 @@ async fn run_once(
     // 不能调 complete（会 404 会话不存在），结果就地合成。
     if init.instant {
         on_progress(desc.total_size, desc.total_size);
+        // 名字/路径以**服务端返回的**为准：同名冲突加了时间戳、或服务端另有落盘规则时，
+        // 本地拼出来的是错的（曾经这里直接把 remote_dir 当 storage_path 返回，
+        // 发布 APK 时会把「目录」当成 file_path 登记上去）。缺字段才回退本地推断。
+        let name = if init.file_name.is_empty() { file_name } else { init.file_name.clone() };
+        let path = if init.storage_path.is_empty() {
+            format!("{}/{}", remote_dir.trim_end_matches(['/', '\\']), name)
+        } else {
+            init.storage_path.clone()
+        };
         return Ok(UploadCompleteData {
             file_id: 0,
-            file_name,
-            storage_path: remote_dir.to_string(),
+            file_name: name,
+            storage_path: path,
             file_size: desc.total_size,
             file_hash: desc.file_hash_hex.clone(),
             synced: true,
@@ -350,6 +369,7 @@ async fn call_init(
     remote_dir: &str,
     desc: &Description,
     device_id: &str,
+    on_conflict: &str,
 ) -> Result<UploadInitData, String> {
     let params = UploadInitParams {
         path: remote_dir.to_string(),
@@ -361,6 +381,7 @@ async fn call_init(
         file_hash: desc.file_hash_hex.clone(),
         leaf_hashes: desc.leaf_hashes_hex.clone(),
         device_id: device_id.to_string(),
+        on_conflict: on_conflict.to_string(),
     };
     let resp = file_api::upload_init(client, params).await?;
     if resp.is_ok() {

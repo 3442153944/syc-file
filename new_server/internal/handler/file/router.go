@@ -21,5 +21,9 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	f.POST("/upload/complete", HandlerFuncUploadComplete(db, redisClient, engine))
 	f.POST("/delete", HandlerFuncDeleteFile(db, redisClient))
 	f.POST("/download-history", HandlerFuncDownloadHistory(db, redisClient))
+	// 版本历史（内容存版本仓库，见 internal/sync/version.go）
+	f.POST("/versions", HandlerFuncFileVersions(db))
+	f.GET("/version/download", HandlerFuncDownloadVersion(db))
+	f.POST("/version/rollback", HandlerFuncRollbackVersion(db, engine))
 	f.POST("/delete-download-history", DeleteDownloadHistory(db, redisClient))
 }

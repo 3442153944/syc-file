@@ -76,8 +76,11 @@ pub fn start_ws_client(
     tokio::spawn(run_ws_loop(config, upload_tx, app));
 }
 
+/// 重连间隔：固定 3 秒，**不做指数退避、不限次数**。
+/// WS 是同步链路的刚需（task_created 全靠它推），退避到 30s 只会让断网恢复后白等半分钟。
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+
 async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTask>, app: AppHandle) {
-    let mut backoff = 1u64;
     loop {
         let (ws_url, token, device_id, device_name) = {
             let cfg = config.read();
@@ -89,8 +92,9 @@ async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTas
             )
         };
 
+        // 还没配服务器 / 还没登录：没什么可连的，等下一轮
         if ws_url.is_empty() || token.is_empty() {
-            sleep(Duration::from_secs(5)).await;
+            sleep(RECONNECT_INTERVAL).await;
             continue;
         }
 
@@ -102,7 +106,6 @@ async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTas
 
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
-                backoff = 1;
                 logger::info("ws", "已连接到服务器");
                 emit_ws_status(&app, true, "已连接到服务器");
                 handle_session(ws_stream, &config, &upload_tx, &app).await;
@@ -115,8 +118,7 @@ async fn run_ws_loop(config: SharedSyncConfig, upload_tx: mpsc::Sender<UploadTas
             }
         }
 
-        sleep(Duration::from_secs(backoff.min(30))).await;
-        backoff = (backoff * 2).min(30);
+        sleep(RECONNECT_INTERVAL).await;
     }
 }
 

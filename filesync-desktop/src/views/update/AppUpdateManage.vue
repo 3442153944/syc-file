@@ -44,7 +44,9 @@ async function doUpload(entry: string | File) {
   uploading.value = true
   uploaded.value = null
   try {
-    const res = await uploadFile(entry, remoteDir.value.trim())
+    // APK 是 build 产物，每次出来都叫同一个名字（app-release.apk），同名是常态不是错误。
+    // 让服务端自动加时间戳区分，多个版本并存，file_path 用服务端返回的实际路径。
+    const res = await uploadFile(entry, remoteDir.value.trim(), () => {}, 'timestamp')
     uploaded.value = {
       storage_path: res.storage_path,
       file_name: res.file_name,
@@ -76,6 +78,12 @@ async function doPublish() {
   }
   if (!form.value.version_code || !form.value.version_name.trim()) {
     message.warning('请填写版本号与版本名')
+    return
+  }
+  // 服务端 version_code/min_version_code 都是 int64，小数会被 ShouldBindJSON 整个拒掉
+  // （只回一句「参数解析失败」，很难查）。输入框已限整数，这里再兜一道。
+  if (!Number.isInteger(form.value.version_code) || !Number.isInteger(form.value.min_version_code)) {
+    message.warning('版本号必须是整数（如 112），版本名才写 1.1.2')
     return
   }
   publishing.value = true
@@ -190,7 +198,17 @@ onMounted(refresh)
           </n-space>
         </n-form-item>
         <n-form-item label="版本号 (code)">
-          <n-input-number v-model:value="form.version_code" :min="1" placeholder="整数，比较用，如 2" style="width:200px" />
+          <!-- precision=0：服务端 version_code 是 int64，小数会让 ShouldBindJSON 直接失败
+               （曾经填 1.2 → 400 参数解析失败）。这里是 build 号，不是「1.1.2」那种版本名。 -->
+          <n-input-number
+            v-model:value="form.version_code"
+            :min="1"
+            :precision="0"
+            :step="1"
+            placeholder="整数 build 号，如 112"
+            style="width:200px"
+          />
+          <n-text depth="3" style="margin-left:8px">整数，只用于比大小；版本名填在下面</n-text>
         </n-form-item>
         <n-form-item label="版本名">
           <n-input v-model:value="form.version_name" placeholder="如 1.1.0" style="width:200px" />
@@ -202,7 +220,7 @@ onMounted(refresh)
           <n-switch v-model:value="form.mandatory" />
         </n-form-item>
         <n-form-item label="最低版本号">
-          <n-input-number v-model:value="form.min_version_code" :min="0" style="width:200px" />
+          <n-input-number v-model:value="form.min_version_code" :min="0" :precision="0" :step="1" style="width:200px" />
           <n-text depth="3" style="margin-left:8px">低于此版本号强制更新（0=不启用）</n-text>
         </n-form-item>
         <n-form-item label=" ">

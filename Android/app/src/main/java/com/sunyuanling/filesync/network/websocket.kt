@@ -5,6 +5,7 @@ import android.content.Context
 import android.util.Log
 import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.AppConfig.getWsUrl
+import com.sunyuanling.filesync.network.AuthManager
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.util.DeviceInfoUtil
 import kotlinx.coroutines.*
@@ -46,11 +47,8 @@ object WebSocketManager {
     /** 重连任务 */
     private var reconnectJob: Job? = null
 
-    /** 重连次数 */
+    /** 重连次数（仅用于日志/诊断，不再作为停止重连的判据） */
     private var reconnectAttempts = 0
-
-    /** 最大重连次数：接线 AppConfig.wsMaxReconnectAttempts，负数 = 无限重连 */
-    private val maxReconnectAttempts get() = AppConfig.wsMaxReconnectAttempts
 
     private var deviceInfoJson: String = ""
     private var deviceQueryParams: String = ""
@@ -168,6 +166,20 @@ object WebSocketManager {
                     Log.e(TAG, "连接失败: $errorMsg", t)
                     _connectionState.value = WsState.Error(errorMsg)
 
+                    // token 失效是唯一「重试也没用」的失败：必须停下来，否则 3s 一次砸服务端。
+                    // ⚠ 后端拒绝握手时回的是 HTTP 200 + body {"code":401}（不是 101 也不是 401），
+                    //   OkHttp 这里拿到的 response.code 是 200，所以必须看 body。
+                    if (isUnauthorized(response)) {
+                        Log.w(TAG, "WS 握手被拒：token 已失效，停止重连并通知跳转登录")
+                        shouldReconnect.set(false)
+                        _connectionState.value = WsState.Error("登录已过期")
+                        reconnectScope.launch {
+                            Request.clearToken()
+                            AuthManager.notifyTokenExpired()
+                        }
+                        return
+                    }
+
                     if (shouldReconnect.get()) {
                         scheduleReconnect()
                     }
@@ -189,18 +201,13 @@ object WebSocketManager {
      * 安排重连任务
      */
     private fun scheduleReconnect() {
-        if (maxReconnectAttempts >= 0 && reconnectAttempts >= maxReconnectAttempts) {
-            Log.e(TAG, "已达到最大重连次数，停止重连")
-            shouldReconnect.set(false)
-            _connectionState.value = WsState.Error("连接失败，已停止重试")
-            return
-        }
-
         cancelReconnect()
 
-        // 指数退避上限 30s；attempts 大时 1 shl n 会溢出，先夹在 [0,14]
-        val backoff = reconnectAttempts.coerceIn(0, 14)
-        val delayMs = (1500L * (1 shl backoff)).coerceAtMost(30000L)
+        // 固定间隔重试，**不做指数退避、不设次数上限**：
+        // WS 是同步链路的刚需（task_created 全靠它推），全 App 又只有这一条连接，
+        // 退避到 30s 意味着断网恢复后最长要干等半分钟才继续同步，收益为零。
+        // 唯一的停机条件是「没有 token」（见下），那时重连也没有意义。
+        val delayMs = AppConfig.wsReconnectIntervalMs
         reconnectAttempts++
 
         reconnectJob = reconnectScope.launch {
@@ -218,6 +225,14 @@ object WebSocketManager {
                 doConnect(token)
             }
         }
+    }
+
+    /** 握手失败是不是「未授权」：HTTP 401，或后端惯用的 200 + body `{"code":401}`。 */
+    private fun isUnauthorized(response: Response?): Boolean {
+        if (response == null) return false
+        if (response.code == 401) return true
+        val body = runCatching { response.body?.string() }.getOrNull() ?: return false
+        return body.contains("\"code\":401") || body.contains("\"code\": 401")
     }
 
     /**
