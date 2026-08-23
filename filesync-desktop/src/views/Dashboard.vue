@@ -9,17 +9,17 @@ import {
 } from 'naive-ui'
 import { getAvailableDisks, getDownloadHistory } from '@/api/file/fileApi'
 import { listSyncTasks, listConflicts } from '@/api/sync/syncApi'
-import { getSystemMetrics, getNetworkMetrics, myStorage } from '@/api/admin/adminApi'
-import type { SystemMetrics, NetworkMetrics } from '@/api/admin/adminTypes'
+import { myStorage } from '@/api/admin/adminApi'
 import type { DiskInfo } from '@/api/file/fileTypes'
 import type { SyncTask, SyncConflict } from '@/api/sync/syncTypes'
 import { useTransferStore } from '@/store/useTransferStore'
+import { useMonitor } from '@/api/monitor/useMonitor'
 
 const router = useRouter()
 const transferStore = useTransferStore()
 
-const system = ref<SystemMetrics | null>(null)
-const network = ref<NetworkMetrics | null>(null)
+// 系统/网络指标走 WS 实时推送（3s 一帧），不再 HTTP 轮询——概览页跟着实时刷。
+const { system, network } = useMonitor(3)
 const disks = ref<DiskInfo[]>([])
 const recentTasks = ref<SyncTask[]>([])
 const conflicts = ref<SyncConflict[]>([])
@@ -36,8 +36,6 @@ const wsConnected = computed(() => transferStore.wsConnected)
 async function loadAll() {
   errors.value = []
   const jobs: Array<Promise<void>> = [
-    getSystemMetrics().then((d) => { system.value = d }).catch((e) => { errors.value.push(`系统指标: ${e}`) }),
-    getNetworkMetrics().then((d) => { network.value = d }).catch(() => { /* 网络指标失败不提示，首页不是监控页 */ }),
     getAvailableDisks().then((d) => { disks.value = d.allowed_disks ?? [] }).catch((e) => { errors.value.push(`磁盘: ${e}`) }),
     listSyncTasks(1, 8).then((d) => { recentTasks.value = d.list ?? [] }).catch(() => {}),
     listConflicts().then((d) => { conflicts.value = d ?? [] }).catch(() => {}),

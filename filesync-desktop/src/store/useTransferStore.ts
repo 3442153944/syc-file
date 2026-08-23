@@ -75,6 +75,10 @@ export const useTransferStore = defineStore('transfer', () => {
       wsUnlisten = await listen<{ connected: boolean; message: string }>('ws-status', (e) => {
         wsConnected.value = e.payload.connected
       })
+      // ws-status 是边沿事件：WS 在 app 启动时就连上了，那一下 emit 早于本监听注册 → 丢失，
+      // 状态会永远卡在「未连接」。注册后主动查一次电平补齐（见 Rust is_ws_connected）。
+      const { invoke } = await import('@tauri-apps/api/core')
+      wsConnected.value = await invoke<boolean>('is_ws_connected')
     } catch { /* 非 Tauri */ }
   }
 

@@ -1,169 +1,95 @@
 <script setup lang="ts">
-// 网络监控：服务端网卡吞吐 + WS 在线连接概况，轮询 /v1/monitor/network。
-// 速率由服务端按两次调用的计数器差值算出，所以首次进来是 0，第二次起才有值。
-import { ref, onMounted, onUnmounted, computed, h } from 'vue'
-import { NCard, NGrid, NGi, NStatistic, NSpace, NText, NDataTable, NSelect, NSpin, NTag } from 'naive-ui'
-import type { DataTableColumns } from 'naive-ui'
-import { getNetworkMetrics } from '@/api/admin/adminApi'
-import type { NetworkMetrics } from '@/api/admin/adminTypes'
+// 网络监控：实时上/下行速率 + 累计流量 + 网卡明细 + WS 连接概况。数据经 WS 推送。
+import { computed, ref, watch } from 'vue'
+import {
+  NCard, NGrid, NGi, NStatistic, NSpace, NText, NTag, NDataTable, NEmpty,
+} from 'naive-ui'
+import { useMonitor, fmtBytes, fmtRate } from '@/api/monitor/useMonitor'
 
-const metrics = ref<NetworkMetrics | null>(null)
-const loading = ref(false)
-const errorMsg = ref('')
-const intervalMs = ref(3000)
-let timer: number | undefined
+const { network, connected } = useMonitor(2)
 
-/** 最近的速率采样，用来画一条简易走势（不引图表库，够看趋势即可）。 */
-const HISTORY_LEN = 60
-const sendHistory = ref<number[]>([])
-const recvHistory = ref<number[]>([])
+// 速率曲线：保留最近 60 个点，用纯 SVG 画迷你折线（不引图表库）
+const HISTORY = 60
+const sendHist = ref<number[]>([])
+const recvHist = ref<number[]>([])
 
-const intervalOptions = [
-  { label: '1 秒', value: 1000 },
-  { label: '3 秒', value: 3000 },
-  { label: '5 秒', value: 5000 },
-  { label: '暂停', value: 0 },
-]
-
-async function refresh() {
-  loading.value = true
-  try {
-    const m = await getNetworkMetrics()
-    metrics.value = m
-    sendHistory.value = [...sendHistory.value, m.send_rate].slice(-HISTORY_LEN)
-    recvHistory.value = [...recvHistory.value, m.recv_rate].slice(-HISTORY_LEN)
-    errorMsg.value = ''
-  } catch (e: any) {
-    errorMsg.value = String(e?.message || e)
-  } finally {
-    loading.value = false
-  }
-}
-
-function restartTimer() {
-  if (timer) window.clearInterval(timer)
-  timer = undefined
-  if (intervalMs.value > 0) timer = window.setInterval(refresh, intervalMs.value)
-}
-
-onMounted(() => {
-  refresh()
-  restartTimer()
-})
-onUnmounted(() => {
-  if (timer) window.clearInterval(timer)
+watch(network, (n) => {
+  if (!n) return
+  sendHist.value = [...sendHist.value, n.send_rate].slice(-HISTORY)
+  recvHist.value = [...recvHist.value, n.recv_rate].slice(-HISTORY)
 })
 
-function fmtBytes(n: number): string {
-  if (!n) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let v = n
-  let i = 0
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
+/** 把一串速率值转成 SVG polyline 点集（宽 300 高 60，按当前窗口最大值归一）。 */
+function sparkline(data: number[]): string {
+  if (data.length < 2) return ''
+  const w = 300
+  const h = 60
+  const max = Math.max(...data, 1)
+  const step = w / (HISTORY - 1)
+  return data
+    .map((v, i) => {
+      const x = (i + (HISTORY - data.length)) * step
+      const y = h - (v / max) * h
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
 }
 
-const fmtRate = (n: number) => `${fmtBytes(n)}/s`
+const interfaces = computed(() => network.value?.interfaces ?? [])
 
-/** 把一串速率映射成 0-100 的柱高（按窗口内峰值归一，峰值为 0 时全 0）。 */
-function bars(series: number[]): number[] {
-  const peak = Math.max(...series, 1)
-  return series.map((v) => Math.round((v / peak) * 100))
-}
-
-const sendBars = computed(() => bars(sendHistory.value))
-const recvBars = computed(() => bars(recvHistory.value))
-
-type NIC = NetworkMetrics['interfaces'][number]
-const nicColumns: DataTableColumns<NIC> = [
-  { title: '网卡', key: 'name', width: 160 },
-  { title: '发送', key: 'bytes_sent', render: (r) => fmtBytes(r.bytes_sent), width: 110 },
-  { title: '接收', key: 'bytes_recv', render: (r) => fmtBytes(r.bytes_recv), width: 110 },
-  { title: '发包', key: 'packets_sent', width: 110 },
-  { title: '收包', key: 'packets_recv', width: 110 },
-  {
-    title: '错误 / 丢弃',
-    key: 'err',
-    render: (r) => {
-      const bad = r.errin + r.errout + r.dropin + r.dropout
-      return h(
-        NTag,
-        { type: bad > 0 ? 'warning' : 'success', size: 'small' },
-        { default: () => `${r.errin + r.errout} / ${r.dropin + r.dropout}` },
-      )
-    },
-  },
+const nicColumns = [
+  { title: '网卡', key: 'name' },
+  { title: '发送', key: 'bytes_sent', render: (r: any) => fmtBytes(r.bytes_sent) },
+  { title: '接收', key: 'bytes_recv', render: (r: any) => fmtBytes(r.bytes_recv) },
+  { title: '错误(收/发)', key: 'err', render: (r: any) => `${r.errin ?? 0}/${r.errout ?? 0}` },
+  { title: '丢包(收/发)', key: 'drop', render: (r: any) => `${r.dropin ?? 0}/${r.dropout ?? 0}` },
 ]
 </script>
 
 <template>
   <div class="monitor-network">
     <NSpace justify="space-between" align="center" style="margin-bottom: 12px">
-      <NSpace align="center">
-        <h2 style="margin: 0">网络监控</h2>
-        <NSpin :show="loading" size="small" />
-      </NSpace>
-      <NSpace align="center">
-        <NText depth="3">刷新间隔</NText>
-        <NSelect v-model:value="intervalMs" :options="intervalOptions" style="width: 110px"
-                 @update:value="restartTimer" />
-      </NSpace>
+      <h2 style="margin: 0">网络监控</h2>
+      <NTag :type="connected ? 'success' : 'warning'" size="small" round>
+        {{ connected ? '实时' : '连接中…' }}
+      </NTag>
     </NSpace>
 
-    <NCard v-if="errorMsg" size="small" style="margin-bottom: 12px">
-      <NText type="error">读取失败：{{ errorMsg }}</NText>
+    <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+      <NGi span="2 m:1">
+        <NCard size="small"><NStatistic label="↑ 上行速率" :value="fmtRate(network?.send_rate ?? 0)" /></NCard>
+      </NGi>
+      <NGi span="2 m:1">
+        <NCard size="small"><NStatistic label="↓ 下行速率" :value="fmtRate(network?.recv_rate ?? 0)" /></NCard>
+      </NGi>
+      <NGi span="2 m:1">
+        <NCard size="small"><NStatistic label="在线设备" :value="String(network?.online_devices ?? 0)" /></NCard>
+      </NGi>
+      <NGi span="2 m:1">
+        <NCard size="small"><NStatistic label="活动连接" :value="String(network?.active_connections ?? 0)" /></NCard>
+      </NGi>
+    </NGrid>
+
+    <NCard size="small" title="速率曲线" style="margin-top: 12px">
+      <div class="chart">
+        <svg viewBox="0 0 300 60" preserveAspectRatio="none" class="spark">
+          <polyline :points="sparkline(recvHist)" fill="none" stroke="#409eff" stroke-width="1.5" />
+          <polyline :points="sparkline(sendHist)" fill="none" stroke="#f0a020" stroke-width="1.5" />
+        </svg>
+      </div>
+      <NSpace size="large" style="margin-top: 6px">
+        <NText depth="3" style="font-size: 12px"><span class="dot recv" /> 下行</NText>
+        <NText depth="3" style="font-size: 12px"><span class="dot send" /> 上行</NText>
+        <NText depth="3" style="font-size: 12px">
+          累计 ↑{{ fmtBytes(network?.bytes_sent ?? 0) }} · ↓{{ fmtBytes(network?.bytes_recv ?? 0) }}
+        </NText>
+      </NSpace>
     </NCard>
 
-    <template v-if="metrics">
-      <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-        <NGi span="4 m:2 l:1">
-          <NCard size="small">
-            <NStatistic label="上行速率" :value="fmtRate(metrics.send_rate)" />
-            <NText depth="3" style="font-size: 12px">累计 {{ fmtBytes(metrics.bytes_sent) }}</NText>
-          </NCard>
-        </NGi>
-        <NGi span="4 m:2 l:1">
-          <NCard size="small">
-            <NStatistic label="下行速率" :value="fmtRate(metrics.recv_rate)" />
-            <NText depth="3" style="font-size: 12px">累计 {{ fmtBytes(metrics.bytes_recv) }}</NText>
-          </NCard>
-        </NGi>
-        <NGi span="4 m:2 l:1">
-          <NCard size="small">
-            <NStatistic label="在线设备" :value="metrics.online_devices" />
-            <NText depth="3" style="font-size: 12px">{{ metrics.online_users }} 个用户在线</NText>
-          </NCard>
-        </NGi>
-        <NGi span="4 m:2 l:1">
-          <NCard size="small">
-            <NStatistic label="活跃连接" :value="metrics.active_connections" />
-            <NText depth="3" style="font-size: 12px">一台设备可能有多条</NText>
-          </NCard>
-        </NGi>
-      </NGrid>
-
-      <NCard size="small" title="速率走势（按窗口峰值归一）" style="margin-top: 12px">
-        <div class="spark-row">
-          <NTag size="small" type="info">上行</NTag>
-          <div class="spark">
-            <div v-for="(v, i) in sendBars" :key="i" class="bar up" :style="{ height: `${v}%` }" />
-          </div>
-        </div>
-        <div class="spark-row" style="margin-top: 12px">
-          <NTag size="small" type="success">下行</NTag>
-          <div class="spark">
-            <div v-for="(v, i) in recvBars" :key="i" class="bar down" :style="{ height: `${v}%` }" />
-          </div>
-        </div>
-      </NCard>
-
-      <NCard size="small" title="网卡" style="margin-top: 12px">
-        <NDataTable :columns="nicColumns" :data="metrics.interfaces" :bordered="false" size="small" />
-      </NCard>
-    </template>
+    <NCard size="small" title="网卡明细" style="margin-top: 12px">
+      <NEmpty v-if="!interfaces.length" description="无网卡数据" size="small" />
+      <NDataTable v-else :columns="nicColumns" :data="interfaces" size="small" :bordered="false" />
+    </NCard>
   </div>
 </template>
 
@@ -171,32 +97,27 @@ const nicColumns: DataTableColumns<NIC> = [
 .monitor-network {
   padding: 16px;
 }
-
-.spark-row {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
+.chart {
+  height: 80px;
+  background: rgba(128, 128, 128, 0.06);
+  border-radius: 6px;
+  padding: 8px;
 }
-
 .spark {
-  flex: 1;
-  height: 64px;
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
+  width: 100%;
+  height: 100%;
 }
-
-.bar {
-  flex: 1;
-  min-height: 2px;
-  border-radius: 2px 2px 0 0;
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
 }
-
-.bar.up {
-  background: #2080f0;
+.dot.recv {
+  background: #409eff;
 }
-
-.bar.down {
-  background: #18a058;
+.dot.send {
+  background: #f0a020;
 }
 </style>
