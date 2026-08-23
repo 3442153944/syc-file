@@ -30,7 +30,52 @@ type netSnapshot struct {
 	recv uint64
 }
 
-var lastNet netSnapshot
+// NetSampler 有状态的网卡速率采样器。
+//
+// ⚠ 速率 = 两次采样的字节差 / 时间差，所以**基线必须是私有的**。
+// 早先这里用一个包级全局 lastNet，HTTP 一次性接口和 WS 流式推送共用它 →
+// 谁先采一次就把对方的基线吃掉、重置，两边算出来的速率互相打架。
+// 现在每个消费者（HTTP handler、WS broadcaster）各持一个 NetSampler，互不干扰。
+type NetSampler struct {
+	last netSnapshot
+}
+
+// Sample 采一次：返回累计字节与瞬时速率（字节/秒）。首次调用无基线，速率为 0。
+func (s *NetSampler) Sample() (sent, recv uint64, sendRate, recvRate float64, perNIC []gin.H) {
+	now := time.Now()
+	if counters, err := psnet.IOCounters(false); err == nil && len(counters) > 0 {
+		sent, recv = counters[0].BytesSent, counters[0].BytesRecv
+	}
+	if !s.last.at.IsZero() {
+		if elapsed := now.Sub(s.last.at).Seconds(); elapsed > 0 {
+			if sent >= s.last.sent {
+				sendRate = float64(sent-s.last.sent) / elapsed
+			}
+			if recv >= s.last.recv {
+				recvRate = float64(recv-s.last.recv) / elapsed
+			}
+		}
+	}
+	s.last = netSnapshot{at: now, sent: sent, recv: recv}
+
+	perNIC = make([]gin.H, 0, 4)
+	if counters, err := psnet.IOCounters(true); err == nil {
+		for _, c2 := range counters {
+			if c2.BytesSent == 0 && c2.BytesRecv == 0 {
+				continue // 没跑过流量的虚拟网卡，列出来只是噪音
+			}
+			perNIC = append(perNIC, gin.H{
+				"name": c2.Name, "bytes_sent": c2.BytesSent, "bytes_recv": c2.BytesRecv,
+				"packets_sent": c2.PacketsSent, "packets_recv": c2.PacketsRecv,
+				"errin": c2.Errin, "errout": c2.Errout, "dropin": c2.Dropin, "dropout": c2.Dropout,
+			})
+		}
+	}
+	return
+}
+
+// httpNetSampler HTTP /monitor/network 专用采样器（与 WS broadcaster 的分开）。
+var httpNetSampler NetSampler
 
 type cpuInfo struct {
 	UsedPercent float64   `json:"used_percent"`
@@ -73,15 +118,21 @@ type diskItem struct {
 	UsedPercent float64 `json:"used_percent"`
 }
 
-// System GET /v1/monitor/system —— CPU / 内存 / 主机 / 磁盘 概览。
-func System(c *gin.Context) {
-	data := gin.H{
+// SystemSnapshot 采一次系统概览。纯采集、无状态，供 HTTP 一次性接口与 WS 流式推送共用。
+// ⚠ 含 cpuSampleWindow 的阻塞采样（默认 300ms），不要在持锁时调用。
+func SystemSnapshot() gin.H {
+	return gin.H{
 		"cpu":    collectCPU(),
 		"memory": collectMem(),
 		"host":   collectHost(),
 		"disks":  collectDisks(),
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
+}
+
+// System GET /v1/monitor/system —— CPU / 内存 / 主机 / 磁盘 概览（一次性）。
+// 实时刷新走 WS（见 broadcaster.go），本接口保留给 Web 端 / 首屏快照。
+func System(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": SystemSnapshot()})
 }
 
 func collectCPU() cpuInfo {
@@ -149,46 +200,12 @@ func collectDisks() []diskItem {
 	return items
 }
 
-// Network GET /v1/monitor/network —— 网卡吞吐 + WS 连接概况。
-//
-// 速率由两次调用之间的累计字节差算出：首次调用没有基线，速率返回 0，
-// 前端按固定间隔轮询即可得到连续曲线。
-func Network(c *gin.Context) {
-	now := time.Now()
-	var sent, recv uint64
-	if counters, err := psnet.IOCounters(false); err == nil && len(counters) > 0 {
-		sent, recv = counters[0].BytesSent, counters[0].BytesRecv
-	}
-
-	var sendRate, recvRate float64
-	if !lastNet.at.IsZero() {
-		if elapsed := now.Sub(lastNet.at).Seconds(); elapsed > 0 {
-			if sent >= lastNet.sent {
-				sendRate = float64(sent-lastNet.sent) / elapsed
-			}
-			if recv >= lastNet.recv {
-				recvRate = float64(recv-lastNet.recv) / elapsed
-			}
-		}
-	}
-	lastNet = netSnapshot{at: now, sent: sent, recv: recv}
-
-	perNIC := make([]gin.H, 0, 4)
-	if counters, err := psnet.IOCounters(true); err == nil {
-		for _, c2 := range counters {
-			if c2.BytesSent == 0 && c2.BytesRecv == 0 {
-				continue // 没跑过流量的虚拟网卡，列出来只是噪音
-			}
-			perNIC = append(perNIC, gin.H{
-				"name": c2.Name, "bytes_sent": c2.BytesSent, "bytes_recv": c2.BytesRecv,
-				"packets_sent": c2.PacketsSent, "packets_recv": c2.PacketsRecv,
-				"errin": c2.Errin, "errout": c2.Errout, "dropin": c2.Dropin, "dropout": c2.Dropout,
-			})
-		}
-	}
-
+// NetworkSnapshot 用给定采样器采一次网络概览 + WS 连接概况。
+// 速率由 sampler 的私有基线算出（见 NetSampler 注释），供 HTTP 与 WS 各自复用。
+func NetworkSnapshot(sampler *NetSampler) gin.H {
+	sent, recv, sendRate, recvRate, perNIC := sampler.Sample()
 	hub := ws.GetHub()
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+	return gin.H{
 		"bytes_sent":         sent,
 		"bytes_recv":         recv,
 		"send_rate":          sendRate, // 字节/秒
@@ -197,6 +214,12 @@ func Network(c *gin.Context) {
 		"online_devices":     len(hub.OnlineDeviceIDs()),
 		"online_users":       len(hub.GetOnlineUsers()),
 		"active_connections": hub.ConnectionCount(),
-		"server_time":        now.Unix(),
-	}})
+		"server_time":        time.Now().Unix(),
+	}
+}
+
+// Network GET /v1/monitor/network —— 网卡吞吐 + WS 连接概况（一次性）。
+// 实时刷新走 WS（见 broadcaster.go）。
+func Network(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": NetworkSnapshot(&httpNetSampler)})
 }

@@ -26,6 +26,8 @@ const (
 	MessageTypeNotify    MessageType = "notification"
 	// MessageTypeClipboard 剪贴板同步：服务端 → 其它设备的单向投递（上报走 REST /clipboard/push）
 	MessageTypeClipboard MessageType = "clipboard"
+	// MessageTypeMonitor 系统监控：客户端上行 subscribe/unsubscribe，服务端定时推送指标帧
+	MessageTypeMonitor MessageType = "monitor"
 )
 
 type TargetType string

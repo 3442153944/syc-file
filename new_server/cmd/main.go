@@ -16,6 +16,7 @@ import (
 	filehandler "syc-file/internal/handler/file"
 	"syc-file/internal/middleware"
 	"syc-file/internal/model"
+	"syc-file/internal/monitor"
 	"syc-file/internal/sync"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
@@ -105,6 +106,9 @@ func main() {
 
 	//初始化ws
 	ws.InitWS(db)
+
+	//初始化监控推送器（注册 WS monitor 处理器）
+	monitor.InitBroadcaster()
 
 	//初始化设备状态Redis存储
 	device_store.Init(redisClient)
