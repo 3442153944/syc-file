@@ -36,4 +36,6 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	admin.RegisterAdminRouter(v1, db)
 	// 剪贴板同步（纯转发 + Redis 短期历史，不落 MySQL）
 	clipboard.RegisterClipboardRouter(v1, redisClient)
+	// 注：/monitor 的 HTTP 路由在 admin.RegisterAdminRouter 里注册，此处不要重复挂
+	// （重复注册同一路径 gin 会直接 panic）。实时刷新走 WS 推送（monitor/broadcaster.go）。
 }

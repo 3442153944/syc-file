@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Component, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -80,6 +81,48 @@ pub fn start_ws_client(
 /// WS 是同步链路的刚需（task_created 全靠它推），退避到 30s 只会让断网恢复后白等半分钟。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 
+/// 当前会话的出站发送端。前端通过 Tauri 命令要往 WS 上发东西（如订阅监控），都经这里。
+/// 会话建立时装上、断开时清掉；没有活动会话时发送返回 false。
+static WS_OUTBOUND: OnceLock<Mutex<Option<mpsc::UnboundedSender<Message>>>> = OnceLock::new();
+
+fn ws_outbound() -> &'static Mutex<Option<mpsc::UnboundedSender<Message>>> {
+    WS_OUTBOUND.get_or_init(|| Mutex::new(None))
+}
+
+/// 往当前 WS 会话发一帧文本。无活动会话返回 false（调用方据此决定是否稍后重试）。
+pub fn ws_send_text(json: String) -> bool {
+    if let Some(tx) = ws_outbound().lock().as_ref() {
+        return tx.send(Message::Text(json)).is_ok();
+    }
+    false
+}
+
+/// 监控订阅意向：断线重连后 connID 会变、服务端旧订阅随之失效，
+/// 所以要在每次新会话建立时自动补发一次 subscribe。0 = 未订阅，>0 = 订阅且为推送间隔（秒）。
+static MONITOR_SUB_INTERVAL: AtomicI64 = AtomicI64::new(0);
+
+/// 设置/取消监控订阅意向，并立即对当前会话生效。interval<=0 表示退订。
+pub fn set_monitor_subscription(interval: i64) {
+    MONITOR_SUB_INTERVAL.store(interval.max(0), Ordering::SeqCst);
+    let frame = if interval > 0 {
+        serde_json::json!({"type":"monitor","content":{"event":"subscribe","interval":interval}})
+    } else {
+        serde_json::json!({"type":"monitor","content":{"event":"unsubscribe"}})
+    };
+    ws_send_text(frame.to_string());
+}
+
+/// 新会话建立后调用：若之前订阅了监控，自动补发 subscribe。
+fn resubscribe_monitor() {
+    let interval = MONITOR_SUB_INTERVAL.load(Ordering::SeqCst);
+    if interval > 0 {
+        let frame = serde_json::json!({
+            "type":"monitor","content":{"event":"subscribe","interval":interval}
+        });
+        ws_send_text(frame.to_string());
+    }
+}
+
 async fn run_ws_loop(
     config: SharedSyncConfig,
     upload_tx: mpsc::Sender<UploadTask>,
@@ -112,7 +155,12 @@ async fn run_ws_loop(
             Ok((ws_stream, _)) => {
                 logger::info("ws", "已连接到服务器");
                 emit_ws_status(&app, true, "已连接到服务器");
-                handle_session(ws_stream, &config, &upload_tx, &app).await;
+                // 装上本会话的出站通道，供前端命令（订阅监控等）往 WS 发消息
+                let (out_tx, out_rx) = mpsc::unbounded_channel::<Message>();
+                *ws_outbound().lock() = Some(out_tx);
+                handle_session(ws_stream, out_rx, &config, &upload_tx, &app).await;
+                // 会话结束：清掉出站通道，之后的 ws_send_text 会返回 false
+                *ws_outbound().lock() = None;
                 logger::warn("ws", "连接断开，正在重连…");
                 emit_ws_status(&app, false, "连接断开，正在重连...");
             }
@@ -130,20 +178,32 @@ async fn handle_session(
     mut ws: impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + SinkExt<Message>
         + Unpin,
+    mut out_rx: mpsc::UnboundedReceiver<Message>,
     config: &SharedSyncConfig,
     upload_tx: &mpsc::Sender<UploadTask>,
     app: &AppHandle,
 ) {
     catch_up::catch_up_all_folders(config, upload_tx, app).await;
+    // 断线重连后 connID 变了，服务端旧订阅已失效——重新补发一次监控订阅
+    resubscribe_monitor();
 
-    while let Some(msg) = ws.next().await {
-        match msg {
-            Ok(Message::Text(text)) => on_text(&text, config, app).await,
-            Ok(Message::Ping(d)) => {
-                ws.send(Message::Pong(d)).await.ok();
+    // 读写双路：既收服务端推送，又把前端要发的帧（订阅监控等）写出去。
+    loop {
+        tokio::select! {
+            inbound = ws.next() => {
+                match inbound {
+                    Some(Ok(Message::Text(text))) => on_text(&text, config, app).await,
+                    Some(Ok(Message::Ping(d))) => { ws.send(Message::Pong(d)).await.ok(); }
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
             }
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => {}
+            outbound = out_rx.recv() => {
+                match outbound {
+                    Some(frame) => { ws.send(frame).await.ok(); }
+                    None => {} // 发送端全部 drop，理论上不会发生（静态持有）
+                }
+            }
         }
     }
 }
@@ -157,6 +217,13 @@ async fn on_text(text: &str, config: &SharedSyncConfig, app: &AppHandle) {
     if env.kind == "clipboard" {
         if let Some(c) = env.content {
             on_clipboard(c, app);
+        }
+        return;
+    }
+    // 监控：服务端定时推送的指标帧，原样转成 Tauri 事件给监控页
+    if env.kind == "monitor" {
+        if let Some(c) = env.content {
+            let _ = app.emit("monitor-metrics", c);
         }
         return;
     }
@@ -682,7 +749,18 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// 当前 WS 连接状态（电平）。`ws-status` 事件是边沿信号，只在连上/断开的瞬间发一次，
+/// 前端若在那一下之前还没注册监听（app 启动即连上，监听注册在其后）就会永远错过，
+/// 状态卡在初始的「未连接」。所以这里额外保留一份电平，供前端注册后主动查询补齐。
+static WS_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// 前端注册监听后主动查一次，补上可能已错过的连接事件。
+pub fn ws_is_connected() -> bool {
+    WS_CONNECTED.load(Ordering::SeqCst)
+}
+
 fn emit_ws_status(app: &AppHandle, connected: bool, message: &str) {
+    WS_CONNECTED.store(connected, Ordering::SeqCst);
     app.emit(
         "ws-status",
         WsStatus {

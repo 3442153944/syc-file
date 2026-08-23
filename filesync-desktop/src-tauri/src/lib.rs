@@ -287,6 +287,13 @@ fn is_sync_running(engine: State<SharedSyncEngine>) -> bool {
     engine.lock().is_some()
 }
 
+/// 查询当前 WS 是否已连接。`ws-status` 事件是边沿信号，前端注册监听后应主动查一次，
+/// 补齐可能已错过的连接事件（详见 ws_client::WS_CONNECTED）。
+#[tauri::command]
+fn is_ws_connected() -> bool {
+    ws_client::ws_is_connected()
+}
+
 // ── 用户域 commands ───────────────────────────────────────────────────────────
 
 /// 登录：成功后把 token 写入 SyncConfig
@@ -834,6 +841,21 @@ fn apply_clipboard_text(
     clipboard_sync::apply_to_clipboard(&state, &text)
 }
 
+// ── 系统监控（WS 推送）────────────────────────────────────────────────────────
+
+/// 订阅系统监控。进入监控页时调用，指标经 WS 推来，前端监听 `monitor-metrics` 事件。
+/// interval 是期望推送间隔（秒），服务端会夹到 [1,10]。断线重连由 Rust 侧自动补订阅。
+#[tauri::command]
+fn subscribe_monitor(interval: Option<i64>) {
+    ws_client::set_monitor_subscription(interval.unwrap_or(2).max(1));
+}
+
+/// 退订系统监控。离开监控页时调用，服务端随即停止为本连接采样。
+#[tauri::command]
+fn unsubscribe_monitor() {
+    ws_client::set_monitor_subscription(0);
+}
+
 #[tauri::command]
 async fn publish_app_release(
     release: serde_json::Value,
@@ -966,6 +988,7 @@ pub fn run() {
             start_sync,
             stop_sync,
             is_sync_running,
+            is_ws_connected,
             // 通用 API 代理（管理域等新接口统一走它）
             api_request,
             // 剪贴板同步
@@ -973,6 +996,9 @@ pub fn run() {
             set_clipboard_settings,
             push_clipboard_now,
             apply_clipboard_text,
+            // 系统监控（WS 推送）
+            subscribe_monitor,
+            unsubscribe_monitor,
             // 用户域
             login,
             verify,
