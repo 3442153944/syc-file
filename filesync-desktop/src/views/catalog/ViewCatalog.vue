@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { onMounted, h, ref } from "vue"
+import { onMounted, h, ref, computed } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { storeToRefs } from "pinia"
 import { useCatalogStore } from "./composeables/useCatalogStore"
-import { NDataTable, NButton, NSpace, NEmpty, useMessage, useDialog } from "naive-ui"
+import { NDataTable, NButton, NSpace, NEmpty, NRadioGroup, NRadioButton, NInputNumber, NSelect, useMessage, useDialog } from "naive-ui"
 import type { DataTableColumns } from "naive-ui"
 import type { FileItem } from "@/api/file/fileTypes"
-import { deleteFile, buildDownloadUrl } from "@/api/file/fileApi"
+import { deleteFile, buildDownloadUrl, createShareLink } from "@/api/file/fileApi"
 import { isTauri } from "@tauri-apps/api/core"
 import { open } from "@tauri-apps/plugin-dialog"
 import { useTransferStore } from "@/store/useTransferStore"
+import { getServerUrl } from "@/api/platform"
+import { copyText } from "@/utils/clipboard"
 
 const route = useRoute()
 const router = useRouter()
@@ -79,6 +81,109 @@ const handleDelete = (row: FileItem) => {
         await deleteFile(currentPath.value, row.name)
         message.success("已删除")
         refresh()
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+  })
+}
+
+// 创建分享链接：选择有效期（预设或自定义）→ 服务端硬链接/打包到 temp 目录 → 自动写入剪贴板
+const expirePreset = ref(60)
+const customValue = ref(1)
+const customUnit = ref("小时")
+const customMax = computed(() => (customUnit.value === "分钟" ? 43200 : customUnit.value === "小时" ? 720 : 30))
+
+const computeExpireMinutes = (): number => {
+  if (expirePreset.value !== -1) return expirePreset.value
+  const factor = customUnit.value === "分钟" ? 1 : customUnit.value === "小时" ? 60 : 1440
+  return customValue.value * factor
+}
+
+const handleCreateShareLink = (row: FileItem) => {
+  expirePreset.value = 60
+  dialog.warning({
+    title: `创建分享链接：${row.name}`,
+    content: () =>
+      h(NSpace, { vertical: true }, {
+        default: () => [
+          h("div", { style: { fontSize: "13px", color: "#666" } }, "选择文件存在时间（到期后自动删除）"),
+          h(NRadioGroup, { value: expirePreset.value, onUpdateValue: (v: number) => { expirePreset.value = v } }, {
+            default: () =>
+              h(NSpace, null, {
+                default: () => [
+                  h(NRadioButton, { value: 60 }, { default: () => "1 小时" }),
+                  h(NRadioButton, { value: 1440 }, { default: () => "1 天" }),
+                  h(NRadioButton, { value: 4320 }, { default: () => "3 天" }),
+                  h(NRadioButton, { value: 10080 }, { default: () => "7 天" }),
+                  h(NRadioButton, { value: 43200 }, { default: () => "30 天" }),
+                  h(NRadioButton, { value: -1 }, { default: () => "自定义" }),
+                ],
+              }),
+          }),
+          expirePreset.value === -1
+            ? h(NSpace, { align: "center" }, {
+                default: () => [
+                  h(NInputNumber, {
+                    value: customValue.value,
+                    min: 1,
+                    max: customMax.value,
+                    onUpdateValue: (v: number | null) => { if (v) customValue.value = v },
+                  }),
+                  h(NSelect, {
+                    value: customUnit.value,
+                    options: [
+                      { label: "分钟", value: "分钟" },
+                      { label: "小时", value: "小时" },
+                      { label: "天", value: "天" },
+                    ],
+                    onUpdateValue: (v: string) => { customUnit.value = v },
+                    style: { width: "90px" },
+                  }),
+                ],
+              })
+            : null,
+        ],
+      }),
+    positiveText: "创建",
+    negativeText: "取消",
+    onPositiveClick: async () => {
+      try {
+        const expireMinutes = computeExpireMinutes()
+        if (expireMinutes <= 0) {
+          message.warning("请填写有效的有效期")
+          return
+        }
+        const data = await createShareLink(currentPath.value, row.name, expireMinutes)
+        const base = isTauri() ? getServerUrl().replace(/\/+$/, "") : window.location.origin
+        const url = base + data.url_path
+        let copied = true
+        try {
+          await copyText(url)
+        } catch {
+          copied = false
+        }
+        dialog.success({
+          title: copied ? "分享链接已创建（已写入剪贴板）" : "分享链接已创建",
+          content: () =>
+            h(NSpace, { vertical: true }, {
+              default: () => [
+                h("div", { style: { wordBreak: "break-all", fontSize: "13px" } }, url),
+                copied
+                  ? null
+                  : h("div", { style: { fontSize: "12px", color: "#e88080" } }, "自动写入剪贴板失败，请手动复制"),
+              ],
+            }),
+          positiveText: "复制链接",
+          onPositiveClick: async () => {
+            try {
+              await copyText(url)
+              message.success("已复制")
+            } catch {
+              message.error("复制失败，请选中上方链接手动复制")
+            }
+          },
+        })
       } catch (e) {
         message.error(String(e))
       }
@@ -159,12 +264,19 @@ const columns: DataTableColumns<FileItem> = [
   { title: "修改时间", key: "mod_time", width: 180, render: (row) => formatTime(row.mod_time) },
   { title: "包含项", key: "children_count", width: 90, render: (row) => (row.is_dir ? `${row.children_count} 项` : "-") },
   {
-    title: "操作", key: "actions", width: 140,
+    title: "操作", key: "actions", width: 200,
     render(row) {
-      if (row.is_dir) return "-"
+      if (row.is_dir) {
+        return h(NSpace, { size: 4 }, {
+          default: () => [
+            h(NButton, { size: "small", type: "info", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleCreateShareLink(row) } }, { default: () => "分享" }),
+          ],
+        })
+      }
       return h(NSpace, { size: 4 }, {
         default: () => [
           h(NButton, { size: "small", type: "primary", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleDownload(row) } }, { default: () => "下载" }),
+          h(NButton, { size: "small", type: "info", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleCreateShareLink(row) } }, { default: () => "分享" }),
           h(NButton, { size: "small", type: "error", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleDelete(row) } }, { default: () => "删除" }),
         ],
       })

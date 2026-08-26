@@ -82,3 +82,35 @@ export interface DownloadHistoryData {
     list: DownloadHistoryItem[]
     total: number
 }
+
+// ==================== 分享链接 ====================
+export interface CreateShareLinkData {
+    share_code: string
+    temp_name: string
+    file_name: string
+    file_size: number
+    expire_time: string
+    /** 服务器相对路径，如 /v1/file/share-link/download/xxx（每次访问都会重新校验有效期） */
+    url_path: string
+}
+
+/** 分享链接状态：1=有效 0=自然到期 2=创建者主动吊销 */
+export type ShareLinkStatus = 0 | 1 | 2
+
+export interface ShareLinkItem {
+    id: number
+    share_code: string
+    file_name: string
+    file_size: number
+    expire_time: string
+    status: ShareLinkStatus
+    expired_at: string | null
+    created_at: string
+}
+
+export interface ShareLinkListData {
+    list: ShareLinkItem[]
+    total: number
+    pageNum: number
+    pageSize: number
+}

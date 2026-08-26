@@ -119,6 +119,9 @@ func main() {
 	//启动临时文件清理器（清理过期上传遗留的 .part）
 	filehandler.StartTempJanitor()
 
+	//启动分享链接清理器（30 分钟兜底扫描；每条链接另有独立协程到期自毁）
+	filehandler.StartShareLinkJanitor(db, redisClient)
+
 	//初始化文件同步引擎（Redis队列 + worker）
 	syncEngine := sync.InitSync(db, redisClient, config.Conf.Sync)
 
@@ -141,6 +144,15 @@ func main() {
 		wd, _ := os.Getwd()
 		r.Static("/"+rel, filepath.Join(wd, filepath.FromSlash(rel)))
 		logger.Logger.Info("静态资源已挂载", zap.String("url", "/"+rel), zap.String("dir", filepath.Join(wd, filepath.FromSlash(rel))))
+	}
+
+	// 分享链接临时目录：与 nginx /temp/ 的 alias 保持一致。
+	// 挂载后任何直达本服务的入口（Tauri 本地、无 nginx 的开发环境）都能取到分享文件。
+	if tempPath := config.Conf.Share.TempPath; tempPath != "" {
+		if err := os.MkdirAll(tempPath, 0o755); err == nil {
+			r.Static("/temp", tempPath)
+			logger.Logger.Info("分享临时目录已挂载", zap.String("url", "/temp"), zap.String("dir", tempPath))
+		}
 	}
 
 	handler.RegisterRouters(r, db, redisClient, syncEngine)

@@ -26,4 +26,11 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	f.GET("/version/download", HandlerFuncDownloadVersion(db))
 	f.POST("/version/rollback", HandlerFuncRollbackVersion(db, engine))
 	f.POST("/delete-download-history", DeleteDownloadHistory(db, redisClient))
+	// 分享链接：硬链接到 temp 目录 + Redis + 独立生命周期协程
+	f.POST("/share-link/create", HandlerFuncCreateShareLink(db, redisClient))
+	// 分享链接下载（"阳"接口，见 config.yaml share 段落说明）：公开路由，在 whitelist 放行免登录
+	f.GET("/share-link/download/:code", HandlerFuncShareDownload(db, redisClient))
+	// 分享管理：仅创建者本人可查看/吊销自己的分享链接
+	f.POST("/share-link/list", HandlerFuncShareLinkList(db))
+	f.POST("/share-link/revoke", HandlerFuncShareLinkRevoke(db, redisClient))
 }
