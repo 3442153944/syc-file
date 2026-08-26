@@ -31,6 +31,11 @@ export const router = createRouter({
                     component: () => import("../views/catalog/ViewCatalog.vue")
                 },
                 {
+                    path: "file/share",
+                    name: "FileShareManage",
+                    component: () => import("../views/share/ShareManage.vue")
+                },
+                {
                     path: "clipboard",
                     name: "ClipboardSync",
                     component: () => import("../views/clipboard/ClipboardSync.vue")

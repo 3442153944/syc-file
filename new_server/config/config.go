@@ -21,6 +21,7 @@ type Config struct {
 	Redis     RedisConfig  `mapstructure:"redis"`
 	File      FileConfig   `mapstructure:"file"`
 	User      UserCfg      `mapstructure:"user"`
+	Share     ShareConfig  `mapstructure:"share"`
 	Sync      SyncConfig   `mapstructure:"sync"`
 }
 
@@ -93,6 +94,13 @@ type UserCfg struct {
 	AvatarPath        string   `mapstructure:"avatar_path"`
 	AllowedExtensions []string `mapstructure:"allowed_extensions"`
 	MaxSize           int64    `mapstructure:"max_size"`
+}
+
+// ShareConfig 分享链接配置
+type ShareConfig struct {
+	TempPath             string `mapstructure:"temp_path"`
+	MaxExpireMinutes     int    `mapstructure:"max_expire_minutes"`
+	CleanIntervalMinutes int    `mapstructure:"clean_interval_minutes"`
 }
 
 // SyncConfig 文件同步引擎配置

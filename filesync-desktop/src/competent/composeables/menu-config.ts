@@ -26,6 +26,12 @@ export const useMenuConfig=()=>{
                     path: "/file/upload",
                     icon: "file-list",
                     click: () => router.push("/file/upload"),
+                },
+                {
+                    name: "分享管理",
+                    path: "/file/share",
+                    icon: "file-list",
+                    click: () => router.push("/file/share"),
                 }
             ]
         },

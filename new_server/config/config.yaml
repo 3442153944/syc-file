@@ -34,6 +34,7 @@ whitelist:
   - /v1/user/login
   - /v1/user/reset-password
   - /v1/user/verify
+  - /v1/file/share-link/download
 
 # 认证配置
 auth:
@@ -97,6 +98,33 @@ user:
     - ".o"
     - ".db"
   max_size: 50485760              # 最大头像大小 50MB（字节）
+
+# 分享链接配置
+share:
+  # 临时文件目录：创建分享链接时把源文件硬链接到此目录
+  temp_path: "E:/fileSynchronization/temp/"
+  # 分享链接最大有效期（分钟）
+  max_expire_minutes: 43200
+  # 定时扫描过期分享链接的间隔（分钟）
+  clean_interval_minutes: 30
+  #
+  # 下载接口 GET /v1/file/share-link/download/:code 每次访问都会重新校验有效期/状态；
+  # 校验通过后是 Go 自己吐文件、还是丢给 nginx 用 sendfile 吐文件，是按请求头
+  # X-Via-Nginx 自动判断的（由 nginx 的 /file/ location 用 proxy_set_header 强制打上，
+  # 客户端自己带这个头没用，会被 proxy_set_header 覆盖），不需要在这里配置开关——
+  # 同一个 Go 进程要同时服务网页端（走 nginx）和 Tauri 桌面端（直连本服务，没有 nginx），
+  # 全局开关没法同时满足两边。
+  # nginx 侧需要新增一段 internal location（浏览器无法直接访问，只能被本服务通过
+  # X-Accel-Redirect 内部调度到）：
+  #
+  #   location /internal-temp/ {
+  #       internal;
+  #       alias E:/fileSynchronization/temp/;
+  #   }
+  #
+  # 并在现有 /file/ 反代 location 里加一行：
+  #
+  #   proxy_set_header X-Via-Nginx "1";
 
 # 文件同步引擎配置
 sync:

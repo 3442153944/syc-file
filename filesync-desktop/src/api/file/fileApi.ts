@@ -2,7 +2,7 @@ import {invoke, isTauri} from '@tauri-apps/api/core'
 import {httpPost, buildGetUrl} from '../http'
 import {getDeviceId} from '../platform'
 import {uploadChunked as uploadChunkedWeb, DEFAULT_CHUNK_SIZE, DEFAULT_CONCURRENCY} from './chunkedUploader'
-import type {AvailableDisksData, TraverseDirectoryData, UploadCompleteData, DownloadHistoryData} from './fileTypes'
+import type {AvailableDisksData, TraverseDirectoryData, UploadCompleteData, DownloadHistoryData, CreateShareLinkData, ShareLinkListData} from './fileTypes'
 
 export async function getAvailableDisks(): Promise<AvailableDisksData> {
     if (isTauri()) return invoke<AvailableDisksData>('get_available_disks')
@@ -66,4 +66,37 @@ export async function getDownloadHistory(pageNum: number, pageSize: number): Pro
 export async function deleteDownloadHistory(ids: number[]): Promise<void> {
     if (isTauri()) return invoke('delete_download_history', {ids})
     await httpPost('/file/delete-download-history', {ids})
+}
+
+export async function createShareLink(path: string, name: string, expireMinutes: number): Promise<CreateShareLinkData> {
+    if (isTauri()) return invoke<CreateShareLinkData>('api_request', {
+        method: 'POST',
+        path: '/file/share-link/create',
+        body: {path, name, expire_minutes: expireMinutes},
+        query: null,
+    })
+    return httpPost<CreateShareLinkData>('/file/share-link/create', {path, name, expire_minutes: expireMinutes})
+}
+
+export async function listShareLinks(pageNum: number, pageSize: number): Promise<ShareLinkListData> {
+    if (isTauri()) return invoke<ShareLinkListData>('api_request', {
+        method: 'POST',
+        path: '/file/share-link/list',
+        body: {pageNum, pageSize},
+        query: null,
+    })
+    return httpPost<ShareLinkListData>('/file/share-link/list', {pageNum, pageSize})
+}
+
+export async function revokeShareLink(shareCode: string): Promise<void> {
+    if (isTauri()) {
+        await invoke('api_request', {
+            method: 'POST',
+            path: '/file/share-link/revoke',
+            body: {share_code: shareCode},
+            query: null,
+        })
+        return
+    }
+    await httpPost('/file/share-link/revoke', {share_code: shareCode})
 }
