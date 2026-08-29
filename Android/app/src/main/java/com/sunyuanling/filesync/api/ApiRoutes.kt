@@ -132,8 +132,8 @@ object ApiRoutes {
     /** DELETE /v1/sync/conflicts/:id —— 删除冲突记录 */
     const val SYNC_CONFLICT_DELETE = "/sync/conflicts/%s"
 
-    /** GET /v1/sync/folders —— 同步文件夹列表 */
-    const val SYNC_FOLDERS = "/sync/folders"
+    /** GET /v1/sync/folder —— 该账号唯一的同步文件夹配置（可能为 null） */
+    const val SYNC_FOLDER = "/sync/folder"
 
     // ==================== 应用更新（internal/update/router.go） ====================
 

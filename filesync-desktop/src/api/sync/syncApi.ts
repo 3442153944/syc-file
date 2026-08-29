@@ -3,37 +3,38 @@ import { httpPost, httpGet, httpPut, httpDelete } from '../http'
 import { getDeviceId } from '../platform'
 import type { SyncFolder, SyncTask, SyncTaskPage, SyncConflict, ConflictResolution } from './syncTypes'
 
-export async function createSyncFolder(
+/** 创建或更新该账号唯一的同步文件夹配置（upsert）。 */
+export async function saveSyncFolder(
   name: string,
   localPath: string,
   remotePath: string,
   direction: string,
 ): Promise<SyncFolder> {
-  if (isTauri()) return invoke<SyncFolder>('create_sync_folder', { name, localPath, remotePath, direction })
+  if (isTauri()) return invoke<SyncFolder>('save_sync_folder', { name, localPath, remotePath, direction })
   // web 模式：device_id 从 localStorage 取
-  return httpPost<SyncFolder>('/sync/folders', {
+  return httpPost<SyncFolder>('/sync/folder', {
     name, local_path: localPath, remote_path: remotePath,
     direction, owner_device_id: getDeviceId(),
   })
 }
 
-export async function listSyncFolders(): Promise<SyncFolder[]> {
-  if (isTauri()) return invoke<SyncFolder[]>('list_sync_folders')
-  return httpGet<SyncFolder[]>('/sync/folders')
+/** 取该账号唯一的同步文件夹配置，未配置时返回 null。 */
+export async function getSyncFolder(): Promise<SyncFolder | null> {
+  if (isTauri()) return invoke<SyncFolder | null>('get_sync_folder')
+  return httpGet<SyncFolder | null>('/sync/folder')
 }
 
-export async function deleteSyncFolder(folderId: number): Promise<void> {
-  if (isTauri()) return invoke('delete_sync_folder', { folderId })
-  await httpDelete(`/sync/folders/${folderId}`)
+export async function deleteSyncFolder(): Promise<void> {
+  if (isTauri()) return invoke('delete_sync_folder')
+  await httpDelete('/sync/folder')
 }
 
 /** 更新同步文件夹（仅传需要改的字段）。 */
 export async function updateSyncFolder(
-  folderId: number,
   updates: { enabled?: boolean; direction?: string; name?: string },
 ): Promise<void> {
-  if (isTauri()) return invoke('update_sync_folder', { folderId, ...updates })
-  await httpPut(`/sync/folders/${folderId}`, updates)
+  if (isTauri()) return invoke('update_sync_folder', updates)
+  await httpPut('/sync/folder', updates)
 }
 
 export async function listPendingTasks(): Promise<SyncTask[]> {

@@ -9,32 +9,28 @@ use crate::api::{
 
 // ── 文件夹管理 ────────────────────────────────────────────────────────────
 
-pub async fn create_folder(
+/// 创建或更新该账号唯一的同步文件夹配置（upsert）。
+pub async fn save_folder(
     client: &ApiClient,
-    params: CreateFolderParams,
+    params: SaveFolderParams,
 ) -> Result<ApiResponse<SyncFolder>, String> {
-    client.post(routes::SYNC_FOLDERS, &params).await
+    client.post(routes::SYNC_FOLDER, &params).await
 }
 
-pub async fn list_folders(client: &ApiClient) -> Result<ApiResponse<Vec<SyncFolder>>, String> {
-    client.get(routes::SYNC_FOLDERS, None).await
+/// 取该账号唯一的同步文件夹配置，未配置时 data 为 null。
+pub async fn get_folder(client: &ApiClient) -> Result<ApiResponse<Option<SyncFolder>>, String> {
+    client.get(routes::SYNC_FOLDER, None).await
 }
 
 pub async fn update_folder(
     client: &ApiClient,
-    folder_id: u64,
     params: UpdateFolderParams,
 ) -> Result<ApiResponse<serde_json::Value>, String> {
-    let path = routes::SYNC_FOLDER_BY_ID.replace("{}", &folder_id.to_string());
-    client.put(&path, &params).await
+    client.put(routes::SYNC_FOLDER, &params).await
 }
 
-pub async fn delete_folder(
-    client: &ApiClient,
-    folder_id: u64,
-) -> Result<ApiResponse<serde_json::Value>, String> {
-    let path = routes::SYNC_FOLDER_BY_ID.replace("{}", &folder_id.to_string());
-    client.delete(&path).await
+pub async fn delete_folder(client: &ApiClient) -> Result<ApiResponse<serde_json::Value>, String> {
+    client.delete(routes::SYNC_FOLDER).await
 }
 
 // ── 事件上报（HTTP 回退，WS 不可用时使用） ──────────────────────────────────

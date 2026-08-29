@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS `file_version` (
 -- ============================================
 -- 5. 同步文件夹配置表
 -- ============================================
--- 客户端无本地持久化，sync_folder 是同步映射的权威数据源。
+-- 客户端无本地持久化，sync_folder 是同步映射的权威数据源。每个用户始终只保留一条记录（user_id 唯一）。
 CREATE TABLE IF NOT EXISTS `sync_folder` (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id         INT           NOT NULL,
@@ -113,7 +113,11 @@ CREATE TABLE IF NOT EXISTS `sync_folder` (
     owner_device_id VARCHAR(100)  NULL,
     created_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_folder_user (user_id),
+    -- 索引名必须叫 idx_sync_folder_user_id：这是 GORM AutoMigrate 按 model.SyncFolder.UserID
+    -- 的 gorm:"uniqueIndex" 标签算出来的默认名字，AutoMigrate 每次启动都会跑（cmd/main.go），
+    -- 名字对不上它就不认得这是"已经满足的唯一约束"，会在旧的同名非唯一索引上再折腾一次，
+    -- 之前就是这样把手工建的 uniq_folder_user 干掉、留下一个非唯一索引，唯一约束名存实亡。
+    UNIQUE INDEX idx_sync_folder_user_id (user_id),
     INDEX idx_folder_enabled (enabled),
     CONSTRAINT fk_folder_user FOREIGN KEY (user_id) REFERENCES `user`(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='同步文件夹配置表';

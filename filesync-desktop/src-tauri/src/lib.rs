@@ -336,20 +336,18 @@ async fn do_start_sync(
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = sync_api::list_folders(&client).await?;
+    let resp = sync_api::get_folder(&client).await?;
     if resp.is_ok() {
-        if let Some(folders) = resp.data {
-            let mut cfg = config.write();
-            cfg.folder_mappings = folders
-                .into_iter()
-                .filter(|f| f.enabled)
-                .map(|f| FolderMapping {
-                    local_path: f.local_path,
-                    remote_path: f.remote_path,
-                    folder_id: f.id,
-                })
-                .collect();
-        }
+        let mapping = resp
+            .data
+            .flatten()
+            .filter(|f| f.enabled)
+            .map(|f| FolderMapping {
+                local_path: f.local_path,
+                remote_path: f.remote_path,
+                folder_id: f.id,
+            });
+        config.write().folder_mappings = mapping.into_iter().collect();
     }
 
     start_sync_engine(engine, config.clone(), app_handle.clone())?;
@@ -747,8 +745,9 @@ async fn delete_download_history(
 
 // ── 同步域 commands ───────────────────────────────────────────────────────────
 
+/// 创建或更新该账号唯一的同步文件夹配置（upsert）。
 #[tauri::command]
-async fn create_sync_folder(
+async fn save_sync_folder(
     name: String,
     local_path: String,
     remote_path: String,
@@ -760,30 +759,24 @@ async fn create_sync_folder(
         let cfg = config.read();
         (cfg.device_id.clone(), make_client(&cfg)?)
     };
-    let params = CreateFolderParams {
+    let params = SaveFolderParams {
         name,
         local_path: local_path.clone(),
         remote_path: remote_path.clone(),
         direction,
         owner_device_id: device_id,
     };
-    let resp = sync_api::create_folder(&client, params).await?;
-    let folder = api_data(resp, "create_sync_folder")?;
+    let resp = sync_api::save_folder(&client, params).await?;
+    let folder = api_data(resp, "save_sync_folder")?;
 
-    // 自动更新内存缓存
+    // 覆盖式更新内存缓存：全局只保留这一条映射
     {
         let mut cfg = config.write();
-        if !cfg
-            .folder_mappings
-            .iter()
-            .any(|m| m.local_path == local_path)
-        {
-            cfg.folder_mappings.push(FolderMapping {
-                local_path: local_path.clone(),
-                remote_path,
-                folder_id: folder.id,
-            });
-        }
+        cfg.folder_mappings = vec![FolderMapping {
+            local_path: local_path.clone(),
+            remote_path,
+            folder_id: folder.id,
+        }];
     }
     // 如果引擎已在运行，立即开始监听新目录
     if engine.lock().is_some() {
@@ -793,28 +786,23 @@ async fn create_sync_folder(
     Ok(folder)
 }
 
+/// 取该账号唯一的同步文件夹配置，未配置时返回 null。
 #[tauri::command]
-async fn list_sync_folders(config: State<'_, SharedSyncConfig>) -> Result<Vec<SyncFolder>, String> {
+async fn get_sync_folder(config: State<'_, SharedSyncConfig>) -> Result<Option<SyncFolder>, String> {
     let client = make_client(&config.read())?;
-    let resp = sync_api::list_folders(&client).await?;
-    api_data(resp, "list_sync_folders")
+    let resp = sync_api::get_folder(&client).await?;
+    api_data(resp, "get_sync_folder")
 }
 
 #[tauri::command]
-async fn delete_sync_folder(
-    folder_id: u64,
-    config: State<'_, SharedSyncConfig>,
-) -> Result<(), String> {
+async fn delete_sync_folder(config: State<'_, SharedSyncConfig>) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = sync_api::delete_folder(&client, folder_id).await?;
+    let resp = sync_api::delete_folder(&client).await?;
     if !resp.is_ok() {
         return Err(format!("[{}] {}", resp.code, resp.message));
     }
-    // 从内存缓存移除（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
-    config
-        .write()
-        .folder_mappings
-        .retain(|m| m.folder_id != folder_id);
+    // 清空内存缓存（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
+    config.write().folder_mappings.clear();
     Ok(())
 }
 
@@ -857,10 +845,9 @@ async fn delete_conflict(
     ensure_ok(resp)
 }
 
-/// 更新同步文件夹（enabled/direction/name，None 字段不动）。
+/// 更新该账号唯一的同步文件夹配置（enabled/direction/name，None 字段不动）。
 #[tauri::command]
 async fn update_sync_folder(
-    folder_id: u64,
     enabled: Option<bool>,
     direction: Option<String>,
     name: Option<String>,
@@ -869,7 +856,6 @@ async fn update_sync_folder(
     let client = make_client(&config.read())?;
     let resp = sync_api::update_folder(
         &client,
-        folder_id,
         UpdateFolderParams {
             enabled,
             direction,
@@ -1239,8 +1225,8 @@ pub fn run() {
             get_download_history,
             delete_download_history,
             // 同步域
-            create_sync_folder,
-            list_sync_folders,
+            save_sync_folder,
+            get_sync_folder,
             delete_sync_folder,
             update_sync_folder,
             list_pending_tasks,

@@ -6,8 +6,8 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Component, PathBuf};
-use std::sync::Arc;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
@@ -20,7 +20,34 @@ pub struct SyncEvent {
     pub kind: String,
 }
 
-type DebounceMap = Arc<Mutex<HashMap<PathBuf, (String, Instant)>>>;
+type DebounceMap = Arc<Mutex<HashMap<PathBuf, Instant>>>;
+
+/// 近期由引擎自己写入/删除的路径（执行 task_created 下发的 download/delete），
+/// 用于防回环：watcher 分不清"我自己刚执行的同步指令"和"用户在资源管理器里真手删/改"，
+/// 前者不打上静音标记就会被当成本地新变更再报一次，造成 A 删→B 删→B 报"删了"→A 又收到
+/// 一遍删除指令的乒乓（对标 Android 端 SyncEngine.kt 的 selfMuted/muteWatch）。
+static SELF_MUTED: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+const SELF_MUTE_WINDOW: Duration = Duration::from_secs(10);
+
+fn self_muted() -> &'static Mutex<HashMap<PathBuf, Instant>> {
+    SELF_MUTED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 在引擎自己对某路径做写入/删除之前调用，接下来 10 秒内该路径触发的 watcher 事件会被吞掉。
+pub fn mute_path(path: &Path) {
+    self_muted().lock().insert(path.to_path_buf(), Instant::now());
+}
+
+fn is_self_muted(path: &Path) -> bool {
+    let mut map = self_muted().lock();
+    if let Some(t) = map.get(path) {
+        if t.elapsed() < SELF_MUTE_WINDOW {
+            return true;
+        }
+        map.remove(path);
+    }
+    false
+}
 
 pub struct SyncEngine {
     pub watcher: RecommendedWatcher,
@@ -75,23 +102,24 @@ pub fn start_sync_engine(
             Ok(e) => e,
             Err(_) => return,
         };
-        let kind_str = match event.kind {
-            EventKind::Create(_) => "create",
-            EventKind::Modify(_) => "modify",
-            EventKind::Remove(_) => "remove",
+        // 不按具体 event kind 分派 create/modify/delete：重命名在不同平台、配对成功与否
+        // 会拆成不同形状的事件（Linux inotify 配对成功是一个 Modify(Name(Both)) 带两个
+        // 路径，配对失败退化成两条独立的 From/To；Windows ReadDirectoryChangesW 行为
+        // 又不完全一样），死抠 notify crate 在每个平台上的具体 RenameMode 语义很容易漏。
+        // 这里改成对标 Android 端 SyncEngine.onWatchEvent 的做法：不管触发原因是什么，
+        // 统一记一笔"这个路径有动静"，防抖窗口过后在 flush_debounce 里看它此刻到底还
+        // 在不在磁盘上——重命名的旧路径这时候必然已经不存在，自然落到删除分支；新路径
+        // 存在，自然落到创建/修改分支。两个平台、任何事件形状都归到同一套判定逻辑。
+        match event.kind {
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
             _ => return,
-        };
+        }
         let mut map = dm.lock();
         for path in event.paths {
-            if should_ignore(&path) {
+            if should_ignore(&path) || is_self_muted(&path) {
                 continue;
             }
-            // 同路径取最新 kind（modify 覆盖 create 没关系；remove 要保留）
-            let entry = map
-                .entry(path)
-                .or_insert((kind_str.to_string(), Instant::now()));
-            entry.0 = kind_str.to_string();
-            entry.1 = Instant::now();
+            map.insert(path, Instant::now());
         }
     })
     .map_err(|e| e.to_string())?;
@@ -110,74 +138,75 @@ async fn flush_debounce(
     let now = Instant::now();
     let threshold = Duration::from_millis(debounce_ms);
 
-    let ready: Vec<(PathBuf, String)> = {
+    let ready: Vec<PathBuf> = {
         let mut map = dm.lock();
         let ready: Vec<_> = map
             .iter()
-            .filter(|(_, (_, t))| now.duration_since(*t) >= threshold)
-            .map(|(p, (k, _))| (p.clone(), k.clone()))
+            .filter(|(_, t)| now.duration_since(**t) >= threshold)
+            .map(|(p, _)| p.clone())
             .collect();
-        for (p, _) in &ready {
+        for p in &ready {
             map.remove(p);
         }
         ready
     };
 
-    for (path, kind) in ready {
-        match kind.as_str() {
-            "remove" => {
-                // 上报删除事件给服务端（不上传文件）
-                if let Some((folder_id, rel)) = find_mapping(config, &path) {
-                    report_delete(config, folder_id, &rel, &path, app).await;
-                } else {
-                    crate::logger::debug(
-                        "watch",
-                        format!("删除不在同步目录内，已忽略: {}", path.display()),
-                    );
-                }
+    for path in ready {
+        // 防抖窗口过后才看这个路径此刻的真实状态：不在了 → 删除；是文件 → 创建/修改；
+        // 是目录 → 忽略（新增空目录不走实时 watcher 上报，靠追赶时的全量扫描补上 mkdir）。
+        if !path.exists() {
+            if let Some((folder_id, rel)) = find_mapping(config, &path) {
+                // 上报删除事件给服务端（不上传文件）。
+                // 不在这里 await：删除是纯 HTTP 通知，没有文件 I/O，跟上传走 channel+worker
+                // 池并发不一样，这里以前是直接 await，导致成百上千个删除只能挨个走网络往返
+                // （每个都要等一轮 HTTP 请求响应），批量删除时严重拖慢，还会连带挡住同一批
+                // 里排在后面的 create/modify 上传。spawn 出去让它们并发跑。
+                tokio::spawn(report_delete(config.clone(), folder_id, rel, path.clone(), app.clone()));
+            } else {
+                crate::logger::debug(
+                    "watch",
+                    format!("删除不在同步目录内，已忽略: {}", path.display()),
+                );
             }
-            "create" | "modify" => {
-                if !path.is_file() {
-                    continue;
-                }
-                if let Some((folder_id, rel, remote_dir)) = find_mapping_with_remote(config, &path)
-                {
-                    crate::logger::info("watch", format!("检测到变更，准备上传: {}", rel));
-                    app.emit(
-                        "sync-event",
-                        SyncEvent {
-                            path: path.to_string_lossy().to_string(),
-                            kind: kind.clone(),
-                        },
-                    )
-                    .ok();
-                    tx.send(UploadTask {
-                        local_path: path,
-                        remote_dir,
-                        folder_id,
-                        relative_path: rel,
-                        action: "modify".into(),
-                    })
-                    .await
-                    .ok();
-                } else {
-                    crate::logger::warn(
-                        "watch",
-                        format!("变更不在任何同步目录内，已忽略: {}", path.display()),
-                    );
-                }
-            }
-            _ => {}
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        if let Some((folder_id, rel, remote_dir)) = find_mapping_with_remote(config, &path) {
+            crate::logger::info("watch", format!("检测到变更，准备上传: {}", rel));
+            app.emit(
+                "sync-event",
+                SyncEvent {
+                    path: path.to_string_lossy().to_string(),
+                    kind: "modify".into(),
+                },
+            )
+            .ok();
+            tx.send(UploadTask {
+                local_path: path,
+                remote_dir,
+                folder_id,
+                relative_path: rel,
+                action: "modify".into(),
+            })
+            .await
+            .ok();
+        } else {
+            crate::logger::warn(
+                "watch",
+                format!("变更不在任何同步目录内，已忽略: {}", path.display()),
+            );
         }
     }
 }
 
 async fn report_delete(
-    config: &SharedSyncConfig,
+    config: SharedSyncConfig,
     folder_id: u64,
-    relative_path: &str,
-    path: &PathBuf,
-    app: &AppHandle,
+    relative_path: String,
+    path: PathBuf,
+    app: AppHandle,
 ) {
     use crate::api::sync::params::NotifyParams;
 
@@ -204,7 +233,7 @@ async fn report_delete(
         NotifyParams {
             device_id,
             folder_id,
-            relative_path: relative_path.to_string(),
+            relative_path: relative_path.clone(),
             file_name,
             action: "delete".into(),
             file_size: None,
@@ -216,7 +245,7 @@ async fn report_delete(
     )
     .await
     .ok();
-    crate::base_store::remove(folder_id, relative_path);
+    crate::base_store::remove(folder_id, &relative_path);
     crate::logger::info("watch", format!("已上报删除: {}", relative_path));
 
     app.emit(

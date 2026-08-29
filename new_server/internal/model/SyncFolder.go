@@ -4,7 +4,7 @@ import "time"
 
 type SyncFolder struct {
 	ID            uint64    `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID        uint      `gorm:"not null;index" json:"user_id"`
+	UserID        uint      `gorm:"not null;uniqueIndex" json:"user_id"`
 	Name          string    `gorm:"size:100" json:"name"`
 	LocalPath     string    `gorm:"size:1000;not null" json:"local_path"`
 	RemotePath    string    `gorm:"size:1000;not null" json:"remote_path"`

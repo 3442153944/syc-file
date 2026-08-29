@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // ── 文件夹注册 ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CreateFolderParams {
+pub struct SaveFolderParams {
     pub name: String,
     pub local_path: String,
     pub remote_path: String,

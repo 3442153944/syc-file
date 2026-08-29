@@ -50,9 +50,8 @@ pub const WS_GROUP_SEND: &str = "/ws/group/send";
 pub const WS_GROUP_USERS: &str = "/ws/group/{}/users";
 
 // ── 同步（需 Token） ──────────────────────────────────────────────────────
-pub const SYNC_FOLDERS: &str = "/sync/folders";
-/// 路径参数：folder_id
-pub const SYNC_FOLDER_BY_ID: &str = "/sync/folders/{}";
+/// 该账号唯一的同步文件夹配置（GET/POST/PUT/DELETE，无需 folder_id）
+pub const SYNC_FOLDER: &str = "/sync/folder";
 /// HTTP 回退上报（WS 不可用时）
 pub const SYNC_NOTIFY: &str = "/sync/notify";
 pub const SYNC_SCAN: &str = "/sync/scan";

@@ -21,7 +21,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-global-shortcut = "=2.2.0"
+tauri-plugin-global-shortcut = "2"
+# 说明：曾经短暂把 tauri/tauri-plugin-dialog/tauri-plugin-global-shortcut 精确锁过版本，
+# 因为当时 cargo 解析出的 tauri-runtime-wry 2.10.1 + wry 0.54.2 这个组合编不过（缺
+# eval_script_with_callback 实现、闭包 Send+Sync 约束不满足）。后来验证过，那只是
+# 2.10.1 这一个具体版本的问题，tauri-runtime-wry 2.11.4（随当前 tauri 2.11.x 解出）
+# 已经修好了，所以改回宽松版本号即可，不需要精确锁定。
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"

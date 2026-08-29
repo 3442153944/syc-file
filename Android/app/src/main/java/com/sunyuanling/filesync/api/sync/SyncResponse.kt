@@ -58,7 +58,7 @@ data class SyncConflictInfo(
     @SerialName("updated_at") val updatedAt: String = "",
 )
 
-/** 同步文件夹（GET /sync/folders） */
+/** 同步文件夹（GET /sync/folder，系统始终只保留一个，可能为 null） */
 @Serializable
 data class SyncFolderInfo(
     val id: Long = 0,
