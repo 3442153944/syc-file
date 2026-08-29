@@ -4,14 +4,21 @@ import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTransferStore } from './store/useTransferStore'
 import LogViewer from './views/logs/LogViewer.vue'
+import QuickPaste from './views/share/QuickPaste.vue'
+import GlobalPasteListener from './components/GlobalPasteListener.vue'
 
-// 日志窗口（label === 'logs'）只渲染 LogViewer，跳过主应用路由。
+// 日志窗口（label === 'logs'）只渲染 LogViewer，粘贴快传悬浮窗（label === 'quick-paste'）
+// 只渲染 QuickPaste，两者都跳过主应用路由。
 let isLogWindow = false
+let isQuickPasteWindow = false
 if (isTauri()) {
   try {
-    isLogWindow = getCurrentWindow().label === 'logs'
+    const label = getCurrentWindow().label
+    isLogWindow = label === 'logs'
+    isQuickPasteWindow = label === 'quick-paste'
   } catch {
     isLogWindow = false
+    isQuickPasteWindow = false
   }
 }
 
@@ -22,10 +29,15 @@ useTransferStore().initWs()
 <template>
   <LogViewer v-if="isLogWindow" />
 
+  <n-message-provider v-else-if="isQuickPasteWindow">
+    <QuickPaste />
+  </n-message-provider>
+
   <n-message-provider v-else>
     <n-notification-provider>
       <n-dialog-provider>
         <div class="main">
+          <GlobalPasteListener />
           <router-view />
         </div>
       </n-dialog-provider>

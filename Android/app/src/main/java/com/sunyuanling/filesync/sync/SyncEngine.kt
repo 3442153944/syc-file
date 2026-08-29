@@ -25,7 +25,6 @@ import com.example.filesync.data.sync.WsMessage
 import com.example.filesync.data.sync.WsState
 import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.api.file.ChunkedUploader
-import com.sunyuanling.filesync.api.file.DeleteFileParams
 import com.sunyuanling.filesync.api.file.DownloadParams
 import com.sunyuanling.filesync.api.file.FileApi
 import com.sunyuanling.filesync.api.sync.ScanItemDto
@@ -43,6 +42,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -118,6 +118,9 @@ object SyncEngine {
     val lastActivity: StateFlow<String> = _lastActivity.asStateFlow()
 
     private val folders = MutableStateFlow<Map<Long, SyncFolderInfo>>(emptyMap())
+    private val _folder = MutableStateFlow<SyncFolderInfo?>(null)
+    /** 该账号唯一的同步文件夹配置（UI 消费用），未配置为 null。 */
+    val folder: StateFlow<SyncFolderInfo?> = _folder.asStateFlow()
     private val watchers = ConcurrentHashMap<Long, RecursiveWatcher>()
     private val debounceJobs = ConcurrentHashMap<String, Job>()
     private val inFlightTasks: MutableSet<Long> = ConcurrentHashMap.newKeySet()
@@ -369,33 +372,41 @@ object SyncEngine {
 
         // Phase 1：本地离线变更先上传（download_only 的 folder 不上传）
         if (folder.direction != "download_only") {
-            for ((rel, f) in files) {
-                val base = SyncBaseStore.get(folder.id, rel)
-                val size = f.length()
-                val mtime = f.lastModified() / 1000
-                when {
-                    base == null -> uploadAndNotify(folder, localRoot, rel, f, action = "create", baseHash = "")
-                    base.size != size || base.mtime != mtime -> {
-                        val hash = computeFileHash(f)
-                        if (hash != null && hash != base.hash) {
-                            uploadAndNotify(folder, localRoot, rel, f, action = "modify", baseHash = base.hash)
-                        } else if (hash != null) {
-                            SyncBaseStore.set(folder.id, rel, base.hash, size, mtime) // 只刷新 stat
+            // coroutineScope + launch：追赶一批本地变更时不能挨个 await 网络往返——
+            // 大批量删除/新建时会被拖到几百次 HTTP 往返串行执行，实测能拖到几分钟。
+            // uploadAndNotify 内部本来就有 uploadSem 限流，这里并发发起才能真正吃到那个限流，
+            // 而不是靠外层顺序调用把并发数锁死在 1。
+            coroutineScope {
+                for ((rel, f) in files) {
+                    val base = SyncBaseStore.get(folder.id, rel)
+                    val size = f.length()
+                    val mtime = f.lastModified() / 1000
+                    when {
+                        base == null -> launch { uploadAndNotify(folder, localRoot, rel, f, action = "create", baseHash = "") }
+                        base.size != size || base.mtime != mtime -> launch {
+                            val hash = computeFileHash(f)
+                            if (hash != null && hash != base.hash) {
+                                uploadAndNotify(folder, localRoot, rel, f, action = "modify", baseHash = base.hash)
+                            } else if (hash != null) {
+                                SyncBaseStore.set(folder.id, rel, base.hash, size, mtime) // 只刷新 stat
+                            }
                         }
                     }
                 }
-            }
-            // 本地已删（有基线但文件不在）→ 上报 delete
-            val present = files.map { it.first }.toHashSet()
-            for ((rel, base) in SyncBaseStore.folderSnapshot(folder.id)) {
-                if (rel !in present) {
-                    SyncApi.notify(
-                        SyncNotifyParams(
-                            deviceId = deviceId, folderId = folder.id,
-                            relativePath = rel, fileName = rel.substringAfterLast('/'),
-                            action = "delete", baseHash = base.hash,
-                        )
-                    ).onSuccess { SyncBaseStore.remove(folder.id, rel) }
+                // 本地已删（有基线但文件不在）→ 上报 delete
+                val present = files.map { it.first }.toHashSet()
+                for ((rel, base) in SyncBaseStore.folderSnapshot(folder.id)) {
+                    if (rel !in present) {
+                        launch {
+                            SyncApi.notify(
+                                SyncNotifyParams(
+                                    deviceId = deviceId, folderId = folder.id,
+                                    relativePath = rel, fileName = rel.substringAfterLast('/'),
+                                    action = "delete", baseHash = base.hash,
+                                )
+                            ).onSuccess { SyncBaseStore.remove(folder.id, rel) }
+                        }
+                    }
                 }
             }
         }
@@ -433,8 +444,11 @@ object SyncEngine {
     // ------------------------------------------------------------------ 探测（watcher）
 
     private suspend fun refreshFolders() {
-        SyncApi.listFolders().getOrNull()?.data?.let { list ->
-            folders.value = list.associateBy { it.id }
+        // 系统始终只保留一个同步文件夹；内部仍以 Map 存取（0/1 个元素），
+        // 保留既有的按 folderId 查找逻辑不动。
+        SyncApi.getFolder().getOrNull()?.let { resp ->
+            folders.value = resp.data?.let { mapOf(it.id to it) } ?: emptyMap()
+            _folder.value = resp.data
         }
     }
 
@@ -555,8 +569,11 @@ object SyncEngine {
         uploadSem.withPermit {
             val remoteDir = joinRemote(folder.remotePath, rel.substringBeforeLast('/', ""))
             log("上传 $rel")
-            // 同步覆盖：先删远端旧文件（不存在则忽略），init 才不会被"已存在"拒绝
-            FileApi.deleteFile(DeleteFileParams(path = remoteDir, name = file.name))
+            // 不再先删远端旧文件：同步场景下 base 丢失/被清（比如一次映射重设）会让一批
+            // 其实早就同步过的文件被误判成"本地新文件"，这里如果照旧先删除服务端正确内容
+            // 再重传，一旦重传失败就是真实数据丢失。服务端 init 本来就会处理"内容相同"
+            // 的情况（同路径+同大小+同哈希直接秒传成功，不需要真的删除重传）；真冲突
+            // （同名不同内容）会被拒绝，交给上层冲突协议处理，好过静默删掉对方的数据。
             val result = ChunkedUploader.upload(
                 file, remoteDir,
                 ChunkedUploader.UploadOptions(deviceId = deviceId),

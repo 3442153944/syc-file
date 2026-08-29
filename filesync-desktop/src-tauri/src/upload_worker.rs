@@ -1,11 +1,10 @@
 // upload_worker.rs
 // 职责：同步场景的文件上传 worker 池。
-// 只做调度：从 channel 取任务 → 删除旧文件（sync overwrite）→ 分片上传 → 上报 file_changed。
+// 只做调度：从 channel 取任务 → 分片上传（目标已存在时由服务端 init 决定秒传/拒绝，
+// 不在客户端先删旧文件）→ 上报 file_changed。
 // 哈希统一用 blake3（与 chunked_uploader / file_lib 一致），base_store 存 blake3 hex。
 use crate::api::{
     client::ApiClient,
-    file::api as file_api,
-    file::params::DeleteFileParams,
     sync::{api as sync_api, params::NotifyParams},
 };
 use crate::chunked_uploader::{self, UploadOptions};
@@ -95,15 +94,10 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
 
     emit_progress(app, &path_str, "uploading", None);
 
-    // 同步场景需要覆盖已存在文件：先删远端旧文件（不存在则忽略 404），再分片上传
-    let _ = file_api::delete_file(
-        &client,
-        DeleteFileParams {
-            path: task.remote_dir.clone(),
-            name: file_name.clone(),
-        },
-    )
-    .await;
+    // 不再先删远端旧文件：base 丢失/被清时会把早就同步过的文件误判成本地新文件，
+    // 这里如果照旧先删除服务端正确内容再重传，重传一失败就是真实数据丢失。服务端
+    // init 本来就会处理"内容相同"（同路径+同大小+同哈希直接秒传成功，不必真删重传），
+    // 真冲突（同名不同内容）会被拒绝，交给上层冲突协议处理，好过静默删掉对方的数据。
 
     // 分片上传（blake3 + merkle + 乱序并发 + 断点续传 + 秒传 + SessionGone 重试一次）
     let options = UploadOptions::new(device_id.clone());

@@ -6,6 +6,7 @@ mod chunked_uploader;
 mod clipboard_sync;
 mod config;
 mod device;
+mod hotkey_codec;
 mod logger;
 mod sync_engine;
 mod upload_worker;
@@ -96,7 +97,7 @@ fn list_watches(state: State<SharedWatcherState>) -> Vec<String> {
 fn set_sync_config(
     server_url: String,
     ws_url: String,
-    token: String,
+    token: Option<String>,
     upload_workers: Option<usize>,
     download_workers: Option<usize>,
     debounce_ms: Option<u64>,
@@ -106,7 +107,13 @@ fn set_sync_config(
     let mut cfg = config.write();
     cfg.server_url = server_url;
     cfg.ws_url = ws_url;
-    cfg.token = token;
+    // 只有明确传了非空 token 才覆盖：ServerSettings.vue 只是改服务器地址，不该动登录态；
+    // 之前这里无条件用调用方传来的空字符串覆盖，导致每次改地址都把已登录的 token 清空。
+    if let Some(t) = token {
+        if !t.is_empty() {
+            cfg.token = t;
+        }
+    }
     if let Some(w) = upload_workers {
         cfg.upload_workers = w;
     }
@@ -147,6 +154,116 @@ fn open_log_window(app: &tauri::AppHandle) {
 #[tauri::command]
 fn open_log_window_cmd(app: tauri::AppHandle) {
     open_log_window(&app);
+}
+
+// ── 粘贴快传：悬浮窗 + 全局快捷键 ──────────────────────────────────────────────
+
+/// 打开（或聚焦）粘贴快传悬浮窗，label = "quick-paste"，渲染前端 QuickPaste.vue（见
+/// App.vue 按 label 的硬分支，和 "logs" 窗口同款处理，不走 vue-router）。
+///
+/// 用带原生标题栏的普通窗口（decorations 保持默认 true），不是无边框弹窗：无边框窗口
+/// 自己实现关闭/最小化/拖动这些事，windows/linux 各个窗口管理器表现还不一致，容易出
+/// "点了没反应"这种问题；用系统原生标题栏，关闭/最小化/拖动全部是操作系统自己处理，
+/// Windows 和 Linux（不管什么桌面环境/窗口管理器）都是一样的原生行为，不用自己糊一套。
+/// 只保留置顶 + 不进任务栏——按下快捷键唤起，用完随手关掉，不是一个常驻的应用窗口。
+/// 允许拖边框缩放（最大 800x600），但不给最大化按钮：这本来就是个小工具窗口，不需要
+/// 占满屏幕，但拖大一点看长文件名/长链接还是有用的。
+fn open_quick_paste_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("quick-paste") {
+        let _ = w.set_focus();
+        return;
+    }
+    match WebviewWindowBuilder::new(app, "quick-paste", WebviewUrl::App("index.html".into()))
+        .title("粘贴快传")
+        .inner_size(380.0, 300.0)
+        .resizable(true)
+        .maximizable(false)
+        .max_inner_size(800.0, 600.0)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .center()
+        .build()
+    {
+        Ok(_) => logger::info("app", "已打开粘贴快传悬浮窗"),
+        Err(e) => logger::error("app", format!("打开粘贴快传悬浮窗失败: {}", e)),
+    }
+}
+
+/// 注册（或替换）全局唤起快捷键：先注销掉之前可能注册过的，再注册新的。
+/// 空字符串视为"不注册"（用户还没配置过，或者显式清空）。`hotkey` 是前端录制后编码出来的
+/// 十六进制字符串（见 hotkey_codec.rs），不是 "Ctrl+Shift+V" 这种平台相关的文本。
+fn register_quick_paste_shortcut(app: &tauri::AppHandle, hotkey: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+    if hotkey.trim().is_empty() {
+        return Ok(());
+    }
+    let shortcut = hotkey_codec::decode_hotkey(hotkey)?;
+    gs.register(shortcut)
+        .map_err(|e| format!("注册快捷键失败: {}", e))?;
+    logger::info("app", format!("粘贴快传快捷键已注册: {}", hotkey));
+    Ok(())
+}
+
+/// 保存快捷键（本地持久化）并立即让它生效，供用户中心设置页保存时调用，不用重启应用。
+#[tauri::command]
+fn set_quick_paste_hotkey(
+    hotkey: String,
+    app: tauri::AppHandle,
+    config: State<SharedSyncConfig>,
+) -> Result<(), String> {
+    register_quick_paste_shortcut(&app, &hotkey)?;
+    let mut cfg = config.write();
+    cfg.quick_share_hotkey = Some(hotkey);
+    cfg.save();
+    Ok(())
+}
+
+// ── 系统托盘 ─────────────────────────────────────────────────────────────────
+
+/// 建托盘图标 + 右键菜单（快速分享 / 退出）。主窗口点 × 只是 hide（见 Builder::on_window_event），
+/// 不会真的退出进程——退出只有这里的「退出」菜单项会调 app.exit(0)。
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let quick_share_item = MenuItemBuilder::with_id("tray_quick_share", "快速分享").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("tray_quit", "退出").build(app)?;
+    let tray_menu = MenuBuilder::new(app)
+        .item(&quick_share_item)
+        .item(&quit_item)
+        .build()?;
+
+    TrayIconBuilder::new()
+        .icon(app.default_window_icon().cloned().ok_or_else(|| {
+            tauri::Error::AssetNotFound("缺少默认窗口图标，无法创建托盘图标".into())
+        })?)
+        .menu(&tray_menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_quit" => app.exit(0),
+            "tray_quick_share" => open_quick_paste_window(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            // 左键单击托盘图标：把主窗口找回来（右键菜单已经处理了唤起快速分享/退出）
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+
+    Ok(())
 }
 
 /// 返回当前配置（token 脱敏）
@@ -219,20 +336,18 @@ async fn do_start_sync(
     app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = sync_api::list_folders(&client).await?;
+    let resp = sync_api::get_folder(&client).await?;
     if resp.is_ok() {
-        if let Some(folders) = resp.data {
-            let mut cfg = config.write();
-            cfg.folder_mappings = folders
-                .into_iter()
-                .filter(|f| f.enabled)
-                .map(|f| FolderMapping {
-                    local_path: f.local_path,
-                    remote_path: f.remote_path,
-                    folder_id: f.id,
-                })
-                .collect();
-        }
+        let mapping = resp
+            .data
+            .flatten()
+            .filter(|f| f.enabled)
+            .map(|f| FolderMapping {
+                local_path: f.local_path,
+                remote_path: f.remote_path,
+                folder_id: f.id,
+            });
+        config.write().folder_mappings = mapping.into_iter().collect();
     }
 
     start_sync_engine(engine, config.clone(), app_handle.clone())?;
@@ -296,26 +411,95 @@ fn is_ws_connected() -> bool {
 
 // ── 用户域 commands ───────────────────────────────────────────────────────────
 
-/// 登录：成功后把 token 写入 SyncConfig
+/// 登录：成功后把 token 写入 SyncConfig，顺带把账号里的粘贴快传设置（快捷键/默认有效期）
+/// 同步进本地配置并立即注册快捷键——换设备/重装后登录一次就直接能用，不用再手动去
+/// 设置页触发一次保存。
 #[tauri::command]
 async fn login(
     username: String,
     password: String,
     config: State<'_, SharedSyncConfig>,
+    app: tauri::AppHandle,
 ) -> Result<LoginData, String> {
     let client = make_client(&config.read())?;
     let resp = user_api::login(&client, LoginParams { username, password }).await?;
     let data = api_data(resp, "login")?;
     config.write().token = data.token.clone();
+    apply_quick_share_user_settings(&app, &config, &data.user);
     Ok(data)
 }
 
-/// 用当前 config 里的 token 验证登录态
+/// 用当前 config 里的 token 验证登录态，同步把账号里的粘贴快传设置应用到本地。
 #[tauri::command]
-async fn verify(config: State<'_, SharedSyncConfig>) -> Result<VerifyData, String> {
+async fn verify(config: State<'_, SharedSyncConfig>, app: tauri::AppHandle) -> Result<VerifyData, String> {
     let client = make_client(&config.read())?;
     let resp = user_api::verify(&client).await?;
-    api_data(resp, "verify")
+    let data = api_data(resp, "verify")?;
+    if let Some(u) = &data.user {
+        apply_quick_share_user_settings(&app, &config, u);
+    }
+    Ok(data)
+}
+
+/// 把账号里配置的粘贴快传快捷键/默认有效期同步进本地 SyncConfig 并立即注册快捷键。
+/// login/verify 成功后都要走一遍，保证换设备/重装后不用手动去设置页触发一次才生效。
+fn apply_quick_share_user_settings(
+    app: &tauri::AppHandle,
+    config: &State<SharedSyncConfig>,
+    user: &UserInfo,
+) {
+    if let Some(hotkey) = &user.quick_share_hotkey {
+        if let Err(e) = register_quick_paste_shortcut(app, hotkey) {
+            logger::warn("app", format!("登录后注册粘贴快传快捷键失败: {}", e));
+        }
+    }
+    let mut cfg = config.write();
+    if user.quick_share_hotkey.is_some() {
+        cfg.quick_share_hotkey = user.quick_share_hotkey.clone();
+    }
+    if user.quick_share_expire_minutes.is_some() {
+        cfg.quick_share_expire_minutes = user.quick_share_expire_minutes;
+    }
+    cfg.save();
+}
+
+// ── 记住密码：OS 原生凭据管理器 ────────────────────────────────────────────────
+//
+// 不用自己拿对称密钥加密再存本地文件——密钥和密文摆在同一台机器上，密钥藏哪都等于
+// 没加密，纯自研方案在“不用二次输入就能自动解密”这个前提下必然是假加密。真正站得住
+// 脚的是操作系统自己的凭据管理器：Windows Credential Manager（DPAPI，绑定当前系统账户）、
+// macOS Keychain、Linux Secret Service（多数发行版的桌面环境自带，没有的话下面会优雅降级
+// 成“记不住密码”而不是崩溃）。userName 只是索引键，不敏感，继续放 localStorage 就行。
+const CREDENTIAL_SERVICE: &str = "com.sunyuanling.filesync-desktop";
+
+/// 记住密码：保存到 OS 凭据管理器。
+#[tauri::command]
+fn save_remembered_credential(username: String, password: String) -> Result<(), String> {
+    let entry = keyring::Entry::new(CREDENTIAL_SERVICE, &username).map_err(|e| e.to_string())?;
+    entry.set_password(&password).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 取记住的密码：没记住过（或者已被清掉）时返回 `None`，不是错误。
+#[tauri::command]
+fn get_remembered_credential(username: String) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(CREDENTIAL_SERVICE, &username).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 清掉记住的密码（取消勾选"记住密码"、或者换记别的账号时用来清旧的）。
+/// 本来就没有也不算错误，幂等。
+#[tauri::command]
+fn clear_remembered_credential(username: String) -> Result<(), String> {
+    let entry = keyring::Entry::new(CREDENTIAL_SERVICE, &username).map_err(|e| e.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -561,8 +745,9 @@ async fn delete_download_history(
 
 // ── 同步域 commands ───────────────────────────────────────────────────────────
 
+/// 创建或更新该账号唯一的同步文件夹配置（upsert）。
 #[tauri::command]
-async fn create_sync_folder(
+async fn save_sync_folder(
     name: String,
     local_path: String,
     remote_path: String,
@@ -574,30 +759,24 @@ async fn create_sync_folder(
         let cfg = config.read();
         (cfg.device_id.clone(), make_client(&cfg)?)
     };
-    let params = CreateFolderParams {
+    let params = SaveFolderParams {
         name,
         local_path: local_path.clone(),
         remote_path: remote_path.clone(),
         direction,
         owner_device_id: device_id,
     };
-    let resp = sync_api::create_folder(&client, params).await?;
-    let folder = api_data(resp, "create_sync_folder")?;
+    let resp = sync_api::save_folder(&client, params).await?;
+    let folder = api_data(resp, "save_sync_folder")?;
 
-    // 自动更新内存缓存
+    // 覆盖式更新内存缓存：全局只保留这一条映射
     {
         let mut cfg = config.write();
-        if !cfg
-            .folder_mappings
-            .iter()
-            .any(|m| m.local_path == local_path)
-        {
-            cfg.folder_mappings.push(FolderMapping {
-                local_path: local_path.clone(),
-                remote_path,
-                folder_id: folder.id,
-            });
-        }
+        cfg.folder_mappings = vec![FolderMapping {
+            local_path: local_path.clone(),
+            remote_path,
+            folder_id: folder.id,
+        }];
     }
     // 如果引擎已在运行，立即开始监听新目录
     if engine.lock().is_some() {
@@ -607,28 +786,23 @@ async fn create_sync_folder(
     Ok(folder)
 }
 
+/// 取该账号唯一的同步文件夹配置，未配置时返回 null。
 #[tauri::command]
-async fn list_sync_folders(config: State<'_, SharedSyncConfig>) -> Result<Vec<SyncFolder>, String> {
+async fn get_sync_folder(config: State<'_, SharedSyncConfig>) -> Result<Option<SyncFolder>, String> {
     let client = make_client(&config.read())?;
-    let resp = sync_api::list_folders(&client).await?;
-    api_data(resp, "list_sync_folders")
+    let resp = sync_api::get_folder(&client).await?;
+    api_data(resp, "get_sync_folder")
 }
 
 #[tauri::command]
-async fn delete_sync_folder(
-    folder_id: u64,
-    config: State<'_, SharedSyncConfig>,
-) -> Result<(), String> {
+async fn delete_sync_folder(config: State<'_, SharedSyncConfig>) -> Result<(), String> {
     let client = make_client(&config.read())?;
-    let resp = sync_api::delete_folder(&client, folder_id).await?;
+    let resp = sync_api::delete_folder(&client).await?;
     if !resp.is_ok() {
         return Err(format!("[{}] {}", resp.code, resp.message));
     }
-    // 从内存缓存移除（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
-    config
-        .write()
-        .folder_mappings
-        .retain(|m| m.folder_id != folder_id);
+    // 清空内存缓存（停止对该目录的上传调度；watcher 不主动 unwatch，重启后自然消失）
+    config.write().folder_mappings.clear();
     Ok(())
 }
 
@@ -671,10 +845,9 @@ async fn delete_conflict(
     ensure_ok(resp)
 }
 
-/// 更新同步文件夹（enabled/direction/name，None 字段不动）。
+/// 更新该账号唯一的同步文件夹配置（enabled/direction/name，None 字段不动）。
 #[tauri::command]
 async fn update_sync_folder(
-    folder_id: u64,
     enabled: Option<bool>,
     direction: Option<String>,
     name: Option<String>,
@@ -683,7 +856,6 @@ async fn update_sync_folder(
     let client = make_client(&config.read())?;
     let resp = sync_api::update_folder(
         &client,
-        folder_id,
         UpdateFolderParams {
             enabled,
             direction,
@@ -912,6 +1084,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    use tauri_plugin_global_shortcut::ShortcutState;
+                    if event.state == ShortcutState::Pressed {
+                        open_quick_paste_window(app);
+                    }
+                })
+                .build(),
+        )
         .manage(init_watcher_state())
         .manage(shared_config.clone())
         .manage(init_sync_engine())
@@ -945,6 +1127,18 @@ pub fn run() {
             let menu = MenuBuilder::new(app).item(&tools).build()?;
             app.set_menu(menu)?;
 
+            // 粘贴快传：本地已经知道快捷键（上次登录/verify 写回过）就直接注册，
+            // 不用等这次再登录一遍才能用
+            if let Some(hotkey) = shared_config.read().quick_share_hotkey.clone() {
+                if let Err(e) = register_quick_paste_shortcut(app.handle(), &hotkey) {
+                    logger::warn("app", format!("启动时注册粘贴快传快捷键失败: {}", e));
+                }
+            }
+
+            // 系统托盘：主窗口点 × 不退出程序（见下面 on_window_event），缩到这个图标；
+            // 右键菜单可以直接唤起粘贴快传悬浮窗，或者真正退出程序
+            setup_tray(app)?;
+
             // 同步默认启用：延迟 1s 后自动启动（等 app 就绪 + token 可能已加载）
             {
                 let cfg = shared_config.clone();
@@ -971,6 +1165,16 @@ pub fn run() {
                 open_log_window(app);
             }
         })
+        .on_window_event(|window, event| {
+            // 只拦主窗口的关闭：点 × 不退出程序，缩到托盘图标；日志窗口/粘贴快传悬浮窗
+            // 该关就关，不受影响。真正退出走托盘右键菜单的「退出」（app.exit）。
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // 基础监听
             add_watch,
@@ -982,6 +1186,12 @@ pub fn run() {
             get_device_id,
             // 日志
             open_log_window_cmd,
+            // 粘贴快传
+            set_quick_paste_hotkey,
+            // 记住密码
+            save_remembered_credential,
+            get_remembered_credential,
+            clear_remembered_credential,
             // 同步引擎
             add_folder_mapping,
             remove_folder_mapping,
@@ -1015,8 +1225,8 @@ pub fn run() {
             get_download_history,
             delete_download_history,
             // 同步域
-            create_sync_folder,
-            list_sync_folders,
+            save_sync_folder,
+            get_sync_folder,
             delete_sync_folder,
             update_sync_folder,
             list_pending_tasks,

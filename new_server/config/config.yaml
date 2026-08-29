@@ -126,6 +126,20 @@ share:
   #
   #   proxy_set_header X-Via-Nginx "1";
 
+# 粘贴快传配置：剪贴板粘贴文件 → 自动传到该账号的专属子目录 → 立即生成分享链接
+quick_share:
+  # 子目录根：系统会在这里按 base_path/<user_id>/ 自动分配每个用户的专属目录，
+  # 用户中心看不到也改不了这个路径（和 share.temp_path 是两个独立目录，quick-share
+  # 内容不出现在文件浏览器里，也不参与同步引擎）
+  base_path: "E:/fileSynchronization/quickshare/"
+  # 每个用户当前有效（未过期/未吊销）的 quick-share 内容总大小上限，默认 10GB。
+  # 个人使用场景，觉得不够可以调大
+  max_capacity_bytes: 10737418240
+  # 粘贴内容不超过这个大小就直接放内存里模拟磁盘，不落盘；超过才落盘到 base_path/<user_id>/
+  memory_threshold_bytes: 20971520
+  # 粘贴上传后分享链接的默认有效期（分钟），用户中心可以覆盖成自己的值
+  default_expire_minutes: 60
+
 # 文件同步引擎配置
 sync:
   worker_concurrency: 4          # worker goroutine 数量

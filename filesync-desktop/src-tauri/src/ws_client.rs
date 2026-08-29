@@ -295,6 +295,7 @@ async fn on_task_created(tc: TaskCreatedContent, config: &SharedSyncConfig, app:
                     return;
                 }
             };
+            crate::sync_engine::mute_path(&path); // 防回环：这是引擎自己执行的删除，不是用户手删
             tokio::fs::remove_file(&path).await.ok(); // 不存在也视为成功
             base_store::remove(tc.folder_id, &tc.relative_path);
             sync_api::complete_task(&client, tc.task_id, "").await.ok();
@@ -454,8 +455,10 @@ async fn download_and_publish(
         .map_err(|e| PublishErr::Other(e.to_string()))?;
 
     // blake3 校验：算 blake3 hex 与 expected_hash 比对，不匹配直接失败。
+    // expected_hash 为空字符串（trunk 尚未知道该文件 hash，比如刚被收编的远端已有文件）
+    // 时不校验、直接采信下载内容——远端目录是权威源，此时没有可比对的基准。
     let actual = blake3_hex(&bytes);
-    if let Some(exp) = expected_hash {
+    if let Some(exp) = expected_hash.filter(|s| !s.is_empty()) {
         if exp != actual {
             return Err(PublishErr::Other(format!(
                 "hash 不匹配 expected={} actual={}",
@@ -477,6 +480,7 @@ async fn download_and_publish(
     if let Some(parent) = final_path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
+    crate::sync_engine::mute_path(&final_path); // 防回环：这是引擎自己落盘的内容，不是用户手改
     match tokio::fs::rename(&tmp_path, &final_path).await {
         Ok(_) => Ok(actual),
         Err(e) => {
@@ -506,6 +510,9 @@ async fn on_conflict(cf: ConflictContent, config: &SharedSyncConfig, app: &AppHa
     let ts = now_secs();
     let quarantine = pend_dir.join(format!("{}.{}", cf.file_name, ts));
     if main_path.exists() {
+        // 防回环：这一步只是把本地分叉挪去隔离区，不是用户删除，不能被 watcher 当真删除上报
+        // （不然会把这次冲突处理误传播成"删除"指令派给其它设备）。
+        crate::sync_engine::mute_path(&main_path);
         tokio::fs::rename(&main_path, &quarantine).await.ok();
     }
 
@@ -678,6 +685,7 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
+        crate::sync_engine::mute_path(&dest); // 防回环：内容跟基线一致，避免又被 watcher 当新变更
         tokio::fs::rename(&pc.quarantine, &dest).await.ok();
     }
     logger::info(

@@ -114,3 +114,9 @@ export interface ShareLinkListData {
     pageNum: number
     pageSize: number
 }
+
+// ==================== 粘贴快传 ====================
+export interface QuickShareQuota {
+    used_bytes: number
+    max_bytes: number
+}

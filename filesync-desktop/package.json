@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "update": "pnpm update @tauri-apps/api @tauri-apps/plugin-dialog @tauri-apps/plugin-opener @tauri-apps/cli ; cargo update --manifest-path src-tauri/Cargo.toml -p tauri -p tauri-plugin-dialog -p tauri-plugin-opener -p tauri-plugin-global-shortcut -p keyring",
+    "build-exe": "tauri build"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -15,9 +17,9 @@
     "@syl/base-request": "workspace:*",
     "@syl/icon": "workspace:*",
     "@syl/models": "workspace:*",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@vicons/fa": "^0.13.0",
     "@vue/devtools": "^8.0.5",
     "element-plus": "^2.13.0",
@@ -28,7 +30,7 @@
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
+    "@tauri-apps/cli": "^2.11.4",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "~5.6.2",
     "vite": "8.0.5",

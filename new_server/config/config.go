@@ -13,16 +13,17 @@ var Conf = new(Config)
 
 // Config 根节点配置，完全对齐你的 YAML
 type Config struct {
-	DB        DBConfig     `mapstructure:"db"`
-	Log       LogConfig    `mapstructure:"log"`
-	Whitelist []string     `mapstructure:"whitelist"` // 白名单路由
-	Auth      AuthConfig   `mapstructure:"auth"`
-	Server    ServerConfig `mapstructure:"server"`
-	Redis     RedisConfig  `mapstructure:"redis"`
-	File      FileConfig   `mapstructure:"file"`
-	User      UserCfg      `mapstructure:"user"`
-	Share     ShareConfig  `mapstructure:"share"`
-	Sync      SyncConfig   `mapstructure:"sync"`
+	DB         DBConfig         `mapstructure:"db"`
+	Log        LogConfig        `mapstructure:"log"`
+	Whitelist  []string         `mapstructure:"whitelist"` // 白名单路由
+	Auth       AuthConfig       `mapstructure:"auth"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Redis      RedisConfig      `mapstructure:"redis"`
+	File       FileConfig       `mapstructure:"file"`
+	User       UserCfg          `mapstructure:"user"`
+	Share      ShareConfig      `mapstructure:"share"`
+	QuickShare QuickShareConfig `mapstructure:"quick_share"`
+	Sync       SyncConfig       `mapstructure:"sync"`
 }
 
 // DBConfig 数据库配置 (注意：这里将 uri 拆分为 host 和 port 以适配 GORM)
@@ -101,6 +102,14 @@ type ShareConfig struct {
 	TempPath             string `mapstructure:"temp_path"`
 	MaxExpireMinutes     int    `mapstructure:"max_expire_minutes"`
 	CleanIntervalMinutes int    `mapstructure:"clean_interval_minutes"`
+}
+
+// QuickShareConfig 粘贴快传配置：每用户一个自动分配的子目录 + 独立配额，小文件走内存不落盘
+type QuickShareConfig struct {
+	BasePath             string `mapstructure:"base_path"`
+	MaxCapacityBytes     int64  `mapstructure:"max_capacity_bytes"`
+	MemoryThresholdBytes int64  `mapstructure:"memory_threshold_bytes"`
+	DefaultExpireMinutes int    `mapstructure:"default_expire_minutes"`
 }
 
 // SyncConfig 文件同步引擎配置

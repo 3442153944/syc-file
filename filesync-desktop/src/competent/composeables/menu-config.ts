@@ -1,8 +1,43 @@
 // composeables/menu-config.ts
 import {useRouter} from "vue-router";
+import type {UserInfo} from "@/api/user/userTypes";
+
+function isAdmin(): boolean {
+    const saved = localStorage.getItem("userInfo")
+    if (!saved) return false
+    try {
+        return (JSON.parse(saved) as UserInfo).role === "admin"
+    } catch {
+        return false
+    }
+}
 
 export const useMenuConfig=()=>{
     const router=useRouter()
+    const monitorChildren = [
+        {
+            name: "系统状态",
+            path: "/monitor/system",
+            icon: "setting",
+            click: () => router.push("/monitor/system"),
+        },
+        {
+            name: "网络监控",
+            path: "/monitor/network",
+            icon: "setting",
+            click: () => router.push("/monitor/network"),
+        },
+    ]
+    // 缓存管理涉及跨用户查看/清理粘贴快传缓存，只给管理员看得见这个入口
+    // （后端 /admin/quick-share 也会再校验一遍角色，这里只是不给非管理员显示）
+    if (isAdmin()) {
+        monitorChildren.push({
+            name: "缓存管理",
+            path: "/monitor/cache",
+            icon: "setting",
+            click: () => router.push("/monitor/cache"),
+        })
+    }
     const menuConfig=[{
         name: "首页",
         path: "/",
@@ -32,6 +67,12 @@ export const useMenuConfig=()=>{
                     path: "/file/share",
                     icon: "file-list",
                     click: () => router.push("/file/share"),
+                },
+                {
+                    name: "快速分享",
+                    path: "/file/quick-share",
+                    icon: "file-list",
+                    click: () => router.push("/file/quick-share"),
                 }
             ]
         },
@@ -80,20 +121,7 @@ export const useMenuConfig=()=>{
             path: "/monitor",
             icon: "setting",
             click: () => router.push("/monitor"),
-            children: [
-                {
-                    name: "系统状态",
-                    path: "/monitor/system",
-                    icon: "setting",
-                    click: () => router.push("/monitor/system"),
-                },
-                {
-                    name: "网络监控",
-                    path: "/monitor/network",
-                    icon: "setting",
-                    click: () => router.push("/monitor/network"),
-                }
-            ]
+            children: monitorChildren
         }]
     return {
         menuConfig,

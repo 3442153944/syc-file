@@ -91,9 +91,9 @@ object SyncApi {
         )
     }
 
-    /** 同步文件夹列表。 */
-    suspend fun listFolders(): Result<ApiResponse<List<SyncFolderInfo>?>> {
-        return Request.getSuspend<ApiResponse<List<SyncFolderInfo>?>>(ApiRoutes.SYNC_FOLDERS)
+    /** 该账号唯一的同步文件夹配置，未配置时 data 为 null。 */
+    suspend fun getFolder(): Result<ApiResponse<SyncFolderInfo?>> {
+        return Request.getSuspend<ApiResponse<SyncFolderInfo?>>(ApiRoutes.SYNC_FOLDER)
     }
 
     // ==================== 探测上报（客户端 → 服务端） ====================

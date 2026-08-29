@@ -19,7 +19,8 @@ func NewAPIHandler(engine *Engine) *APIHandler {
 	return &APIHandler{engine: engine}
 }
 
-func (h *APIHandler) CreateFolder(c *gin.Context) {
+// SaveFolder 创建或更新该用户唯一的同步文件夹配置（upsert）。
+func (h *APIHandler) SaveFolder(c *gin.Context) {
 	userID, ok := requireUser(c)
 	if !ok {
 		return
@@ -35,7 +36,7 @@ func (h *APIHandler) CreateFolder(c *gin.Context) {
 		jsonErr(c, 400, "参数解析失败")
 		return
 	}
-	f, err := h.engine.CreateFolder(userID, req.OwnerDeviceID, req.Name, req.LocalPath, req.RemotePath, req.Direction)
+	f, err := h.engine.UpsertFolder(userID, req.OwnerDeviceID, req.Name, req.LocalPath, req.RemotePath, req.Direction)
 	if err != nil {
 		jsonErr(c, 400, err.Error())
 		return
@@ -43,17 +44,18 @@ func (h *APIHandler) CreateFolder(c *gin.Context) {
 	jsonOK(c, f)
 }
 
-func (h *APIHandler) ListFolders(c *gin.Context) {
+// GetFolder 取该用户唯一的同步文件夹配置，不存在时 data 为 null。
+func (h *APIHandler) GetFolder(c *gin.Context) {
 	userID, ok := requireUser(c)
 	if !ok {
 		return
 	}
-	fs, err := h.engine.ListFolders(userID)
+	f, err := h.engine.GetFolder(userID)
 	if err != nil {
 		jsonErr(c, 500, err.Error())
 		return
 	}
-	jsonOK(c, fs)
+	jsonOK(c, f)
 }
 
 func (h *APIHandler) UpdateFolder(c *gin.Context) {
@@ -61,17 +63,12 @@ func (h *APIHandler) UpdateFolder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		jsonErr(c, 400, "无效的文件夹ID")
-		return
-	}
 	var updates map[string]interface{}
 	if err := c.ShouldBindJSON(&updates); err != nil {
 		jsonErr(c, 400, "参数解析失败")
 		return
 	}
-	if err := h.engine.UpdateFolder(userID, id, updates); err != nil {
+	if err := h.engine.UpdateFolder(userID, updates); err != nil {
 		jsonErr(c, 400, err.Error())
 		return
 	}
@@ -83,12 +80,7 @@ func (h *APIHandler) DeleteFolder(c *gin.Context) {
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		jsonErr(c, 400, "无效的文件夹ID")
-		return
-	}
-	if err := h.engine.DeleteFolder(userID, id); err != nil {
+	if err := h.engine.DeleteFolder(userID); err != nil {
 		jsonErr(c, 400, err.Error())
 		return
 	}

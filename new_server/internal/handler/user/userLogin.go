@@ -133,6 +133,10 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 					// 三端一律显示「未知」。字段与 model.User 的 json tag 保持一致。
 					"last_login": u.LastLogin,
 					"created_at": u.CreatedAt,
+					// 粘贴快传：桌面端登录后要立即知道这两个值才能注册全局快捷键 /
+					// 决定分享有效期，不等用户手动打开设置页
+					"quick_share_hotkey":         u.QuickShareHotkey,
+					"quick_share_expire_minutes": u.QuickShareExpireMinutes,
 				},
 			},
 		})

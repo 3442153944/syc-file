@@ -116,7 +116,13 @@ func (h *Hub) handleUnregister(conn *Connection) {
 	}
 
 	delete(h.connByID, conn.ID)
-	delete(h.connByDevice, conn.Device.DeviceID)
+	// 只有 connByDevice 当前仍指向这一条连接时才清——同设备快速重连时，新连接的
+	// handleRegister 会先把 connByDevice 指向新连接 ID 再异步关闭旧连接，旧连接的
+	// unregister 事件可能晚于新连接注册才被处理，无条件删会把刚顶替上去的新连接也
+	// 一并标记成"离线"，导致 Worker/Reaper 判该设备不在线、任务派发静默失效。
+	if h.connByDevice[conn.Device.DeviceID] == conn.ID {
+		delete(h.connByDevice, conn.Device.DeviceID)
+	}
 
 	if userConns, exists := h.connsByUser[conn.UserID]; exists {
 		delete(userConns, conn.ID)

@@ -11,6 +11,10 @@ pub struct UserInfo {
     pub role: Option<String>,
     pub avatar: Option<String>,
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub quick_share_hotkey: Option<String>,
+    #[serde(default)]
+    pub quick_share_expire_minutes: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

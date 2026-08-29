@@ -11,7 +11,7 @@ import {
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {
-  createSyncFolder, listSyncFolders, deleteSyncFolder, updateSyncFolder,
+  saveSyncFolder, getSyncFolder, deleteSyncFolder, updateSyncFolder,
   listConflicts, resolveConflict, deleteConflict,
 } from '@/api/sync/syncApi'
 import type {SyncFolder, SyncConflict} from '@/api/sync/syncTypes'
@@ -29,10 +29,14 @@ const wsMessage = ref('')
 const deviceId = ref('')
 const syncRoot = ref('')
 
-const folders = ref<SyncFolder[]>([])
+// 系统始终只保留一个同步文件夹：null = 未配置
+const folder = ref<SyncFolder | null>(null)
 const conflicts = ref<SyncConflict[]>([])
 
-// 新建表单
+// 未配置时自动展开表单；已配置时点「编辑」才展开
+const editing = ref(false)
+const formVisible = computed(() => !folder.value || editing.value)
+
 const form = ref({name: '', localPath: '', remotePath: '', direction: 'two_way'})
 const directionOptions = [
   {label: '双向同步', value: 'two_way'},
@@ -56,8 +60,8 @@ async function refreshAll() {
     const cfg = await invoke<any>('get_sync_config')
     deviceId.value = cfg.device_id ?? ''
     syncRoot.value = cfg.sync_root ?? ''
-    if (!form.value.localPath) form.value.localPath = syncRoot.value
-    folders.value = await listSyncFolders()
+    folder.value = await getSyncFolder()
+    if (!form.value.localPath) form.value.localPath = folder.value?.local_path || syncRoot.value
     conflicts.value = await listConflicts()
   } catch (e) {
     message.error(String(e))
@@ -69,15 +73,34 @@ async function pickLocal() {
   if (sel) form.value.localPath = sel
 }
 
-async function handleCreate() {
+function startEdit() {
+  if (folder.value) {
+    form.value = {
+      name: folder.value.name,
+      localPath: folder.value.local_path,
+      remotePath: folder.value.remote_path,
+      direction: folder.value.direction,
+    }
+  }
+  editing.value = true
+}
+
+function cancelEdit() {
+  editing.value = false
+  form.value.name = ''
+  form.value.remotePath = ''
+}
+
+async function handleSave() {
   const {name, localPath, remotePath, direction} = form.value
   if (!localPath || !remotePath) {
     message.warning('请填写本地目录和远端目录')
     return
   }
   try {
-    await createSyncFolder(name || localPath, localPath, remotePath, direction)
-    message.success('同步文件夹已创建')
+    await saveSyncFolder(name || localPath, localPath, remotePath, direction)
+    message.success('同步文件夹已保存')
+    editing.value = false
     form.value.name = ''
     form.value.remotePath = ''
     await refreshAll()
@@ -86,15 +109,16 @@ async function handleCreate() {
   }
 }
 
-async function handleDeleteFolder(row: SyncFolder) {
+async function handleDeleteFolder() {
+  if (!folder.value) return
   dialog.warning({
     title: '删除同步文件夹',
-    content: `确认删除「${row.name}」的同步配置？本地与远端文件不会被删除。`,
+    content: `确认删除「${folder.value.name}」的同步配置？本地与远端文件不会被删除。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        await deleteSyncFolder(row.id)
+        await deleteSyncFolder()
         message.success('已删除')
         await refreshAll()
       } catch (e) {
@@ -143,11 +167,12 @@ async function handleDeleteConflict(row: SyncConflict) {
   }
 }
 
-async function handleToggleFolder(row: SyncFolder, enabled: boolean) {
+async function handleToggleFolder(enabled: boolean) {
+  if (!folder.value) return
   try {
-    await updateSyncFolder(row.id, {enabled})
-    row.enabled = enabled
-    message.success(enabled ? `已启用「${row.name}」` : `已停用「${row.name}」`)
+    await updateSyncFolder({enabled})
+    folder.value.enabled = enabled
+    message.success(enabled ? '已启用同步' : '已停用同步')
   } catch (e) {
     message.error(String(e))
   }
@@ -155,34 +180,7 @@ async function handleToggleFolder(row: SyncFolder, enabled: boolean) {
 
 const directionTagType = (d: string): 'info' | 'success' | 'warning' =>
     d === 'two_way' ? 'info' : d === 'upload_only' ? 'success' : 'warning'
-
-const folderColumns: DataTableColumns<SyncFolder> = [
-  {title: '名称', key: 'name', ellipsis: {tooltip: true}},
-  {title: '本地目录', key: 'local_path', ellipsis: {tooltip: true}},
-  {title: '远端目录', key: 'remote_path', ellipsis: {tooltip: true}},
-  {
-    title: '方向', key: 'direction', width: 88,
-    render: (r) => h(NTag, {size: 'small', type: directionTagType(r.direction), bordered: false},
-        {default: () => directionOptions.find((o) => o.value === r.direction)?.label ?? r.direction}),
-  },
-  {
-    title: '启用', key: 'enabled', width: 70,
-    render: (r) => h(NSwitch, {
-      size: 'small',
-      value: r.enabled,
-      onUpdateValue: (v: boolean) => handleToggleFolder(r, v),
-    }),
-  },
-  {
-    title: '操作', key: 'actions', width: 80,
-    render: (r) => h(NButton, {
-      size: 'tiny',
-      type: 'error',
-      ghost: true,
-      onClick: () => handleDeleteFolder(r)
-    }, {default: () => '删除'}),
-  },
-]
+const directionLabel = (d: string) => directionOptions.find((o) => o.value === d)?.label ?? d
 
 const conflictColumns: DataTableColumns<SyncConflict> = [
   {title: '文件', key: 'file_name', ellipsis: {tooltip: true}},
@@ -246,36 +244,52 @@ onUnmounted(() => {
         </div>
       </n-card>
 
-      <n-card title="新建同步文件夹" size="small">
-        <n-space vertical>
-          <n-space align="center">
-            <span class="lbl">本地目录</span>
-            <n-input v-model:value="form.localPath" placeholder="例如默认同步根目录" style="width: 360px"/>
-            <n-button size="small" @click="pickLocal">选择目录</n-button>
-          </n-space>
-          <n-space align="center">
-            <span class="lbl">远端目录</span>
-            <n-input v-model:value="form.remotePath" placeholder="服务器允许的盘符路径，如 E:/FileSync/docs"
-                     style="width: 360px"/>
-          </n-space>
-          <n-space align="center">
-            <span class="lbl">名称/方向</span>
-            <n-input v-model:value="form.name" placeholder="可选，默认用本地目录名" style="width: 200px"/>
-            <n-select v-model:value="form.direction" :options="directionOptions" style="width: 150px"/>
-            <n-button type="primary" @click="handleCreate">创建</n-button>
-          </n-space>
-          <n-text depth="3" style="font-size: 12px">
-            提示：创建后需点「启动同步」才会开始监听。直接往目录里粘贴文件，引擎未启动或目录未注册时不会同步。
-          </n-text>
-        </n-space>
-      </n-card>
-
       <n-card title="同步文件夹" size="small">
-        <n-data-table :columns="folderColumns" :data="folders" :bordered="false" size="small" :row-key="(r:any)=>r.id">
-          <template #empty>
-            <n-empty description="还没有同步文件夹"/>
-          </template>
-        </n-data-table>
+        <template v-if="formVisible">
+          <n-space vertical>
+            <n-space align="center">
+              <span class="lbl">本地目录</span>
+              <n-input v-model:value="form.localPath" placeholder="例如默认同步根目录" style="width: 360px"/>
+              <n-button size="small" @click="pickLocal">选择目录</n-button>
+            </n-space>
+            <n-space align="center">
+              <span class="lbl">远端目录</span>
+              <n-input v-model:value="form.remotePath" placeholder="服务器允许的盘符路径，如 E:/FileSync/docs"
+                       style="width: 360px"/>
+            </n-space>
+            <n-space align="center">
+              <span class="lbl">名称/方向</span>
+              <n-input v-model:value="form.name" placeholder="可选，默认用本地目录名" style="width: 200px"/>
+              <n-select v-model:value="form.direction" :options="directionOptions" style="width: 150px"/>
+              <n-button type="primary" @click="handleSave">保存</n-button>
+              <n-button v-if="folder" quaternary @click="cancelEdit">取消</n-button>
+            </n-space>
+            <n-text depth="3" style="font-size: 12px">
+              提示：整个系统始终只保留一个同步文件夹。保存后需点「启动同步」才会开始监听。
+            </n-text>
+          </n-space>
+        </template>
+        <template v-else-if="folder">
+          <n-space vertical>
+            <div class="folder-row"><span class="lbl">名称</span>{{ folder.name || '-' }}</div>
+            <div class="folder-row"><span class="lbl">本地目录</span><code>{{ folder.local_path }}</code></div>
+            <div class="folder-row"><span class="lbl">远端目录</span><code>{{ folder.remote_path }}</code></div>
+            <div class="folder-row">
+              <span class="lbl">方向</span>
+              <n-tag size="small" :type="directionTagType(folder.direction)" :bordered="false">
+                {{ directionLabel(folder.direction) }}
+              </n-tag>
+            </div>
+            <n-space align="center">
+              <span class="lbl">启用</span>
+              <n-switch size="small" :value="folder.enabled" @update:value="handleToggleFolder"/>
+            </n-space>
+            <n-space>
+              <n-button size="small" @click="startEdit">编辑</n-button>
+              <n-button size="small" type="error" ghost @click="handleDeleteFolder">删除</n-button>
+            </n-space>
+          </n-space>
+        </template>
       </n-card>
 
       <n-card size="small">
@@ -319,5 +333,18 @@ onUnmounted(() => {
   width: 64px;
   color: #555;
   font-size: 13px;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.folder-row code {
+  background: #f5f5f5;
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 </style>

@@ -201,10 +201,10 @@ Header: Token: <jwt>   (可选，query token 为主)
 
 | 方法 | 路径 | 入参 | 返回 data |
 |---|---|---|---|
-| POST | /folders | `{name,local_path,remote_path,direction,owner_device_id}` | SyncFolder |
-| GET | /folders | — | `[SyncFolder]` |
-| PUT | /folders/:id | `{enabled?,direction?,name?,excludes?}` | nil |
-| DELETE | /folders/:id | — | nil |
+| POST | /folder | `{name,local_path,remote_path,direction,owner_device_id}` | SyncFolder（upsert，每用户唯一一条） |
+| GET | /folder | — | `SyncFolder \| null` |
+| PUT | /folder | `{enabled?,direction?,name?,excludes?}` | nil |
+| DELETE | /folder | — | nil |
 | POST | /notify | file_changed 字段 + `device_id` | nil（WS 不可用时的 HTTP 回退） |
 | POST | /scan | `{device_id,folder_id,items:[ScanItem]}` | nil |
 | GET | /tasks | `?status=&device_id=&limit=` | `[SyncTask]` |

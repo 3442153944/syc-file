@@ -197,8 +197,16 @@ fun FileSyncApp(startDestination: Any) {
     }
 
     // ========== 强制保活服务 + 同步引擎 ==========
-    LaunchedEffect(Unit) {
-        if (Request.hasToken()) {
+    // 键在 currentDestination 上而非 Unit：本 composable 首次进入组合时如果用户还没登录
+    // （新装/退出登录后的正常路径，此时页面停在 LoginDestination），Request.hasToken()
+    // 当场为 false，Unit-keyed 效果只会跑这一次，之后用户登录成功、导航切到 Home，
+    // 这个块永远不会再执行——同步引擎/保活服务/更新检查全部静默不启动。
+    // 每次目的地变化都重新看一眼 token，配合下面的 syncStarted 只让真正的启动逻辑跑一次，
+    // 保证"登录完成后才第一次拿到 token"这条路径也能正确触发。
+    var syncStarted by remember { mutableStateOf(false) }
+    LaunchedEffect(currentDestination) {
+        if (!syncStarted && Request.hasToken()) {
+            syncStarted = true
             if (AppConfig.forceKeepAliveEnabled) {
                 SyncKeepAliveService.start(context)
             }

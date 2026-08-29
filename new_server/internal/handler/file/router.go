@@ -33,4 +33,7 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	// 分享管理：仅创建者本人可查看/吊销自己的分享链接
 	f.POST("/share-link/list", HandlerFuncShareLinkList(db))
 	f.POST("/share-link/revoke", HandlerFuncShareLinkRevoke(db, redisClient))
+	// 粘贴快传：单次原始字节上传到该用户专属目录，自动生成分享链接（见 quick_share.go）
+	f.POST("/quick-share/upload", HandlerFuncQuickShareUpload(db, redisClient))
+	f.POST("/quick-share/quota", HandlerFuncQuickShareQuota(db))
 }

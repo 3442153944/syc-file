@@ -23,6 +23,13 @@ pub struct SyncConfig {
     /// 日志配置（对齐后端 log 段）
     #[serde(default)]
     pub log: LogConfig,
+    /// 粘贴快传全局唤起快捷键（Tauri accelerator 语法），本地持久化一份，重启后不用等
+    /// 一次网络往返（登录/verify）就能先用上次已知的值注册。服务端（账号级）的值以
+    /// 登录/verify 响应为准，登录成功会覆盖这里。
+    #[serde(default)]
+    pub quick_share_hotkey: Option<String>,
+    #[serde(default)]
+    pub quick_share_expire_minutes: Option<i32>,
 }
 
 /// 本地目录 ↔ 服务器目录的映射，含 server 侧 folder_id
@@ -45,6 +52,10 @@ pub struct FileConfig {
     pub sync_root: String,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub quick_share_hotkey: Option<String>,
+    #[serde(default)]
+    pub quick_share_expire_minutes: Option<i32>,
 }
 
 /// 日志配置，字段命名与后端 config.yaml 的 log 段一致。
@@ -123,6 +134,8 @@ impl Default for SyncConfig {
             debounce_ms: 800,
             sync_root: app_paths::sync_dir().to_string_lossy().to_string(),
             log: LogConfig::default(),
+            quick_share_hotkey: None,
+            quick_share_expire_minutes: None,
         }
     }
 }
@@ -151,6 +164,8 @@ impl SyncConfig {
             debounce_ms: self.debounce_ms,
             sync_root: self.sync_root.clone(),
             log: self.log.clone(),
+            quick_share_hotkey: self.quick_share_hotkey.clone(),
+            quick_share_expire_minutes: self.quick_share_expire_minutes,
         };
         if let Ok(text) = serde_yaml::to_string(&fc) {
             let _ = std::fs::write(app_paths::config_file(), text);
@@ -173,6 +188,12 @@ impl SyncConfig {
             self.sync_root = fc.sync_root;
         }
         self.log = fc.log;
+        if fc.quick_share_hotkey.is_some() {
+            self.quick_share_hotkey = fc.quick_share_hotkey;
+        }
+        if fc.quick_share_expire_minutes.is_some() {
+            self.quick_share_expire_minutes = fc.quick_share_expire_minutes;
+        }
     }
 }
 

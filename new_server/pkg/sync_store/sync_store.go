@@ -14,6 +14,7 @@ import (
 
 const (
 	queueKeyPrefix    = "sync:queue"
+	queuedSetKey      = "sync:queue:set"
 	fileLockKeyPrefix = "sync:lock:file:"
 	progressKeyPrefix = "sync:progress:"
 	pendingKeyPrefix  = "sync:pending:user:"
@@ -33,8 +34,21 @@ func New(rdb *redis.Client) *SyncStore {
 	return &SyncStore{rdb: rdb}
 }
 
+// EnqueueTask 入队去重：同一个 task_id 在被消费（DequeueTask）之前只会在队列里存在一份。
+// Reaper 每 30s 对 pending/waiting_unlock 任务无差别重新入队，若不去重，同一个任务在队列里
+// 会越攒越多——worker 出队时任务早已不是 pending 态，白做一次 SELECT 就跳过（"野任务"），
+// 且如果任务当时正合法地排在客户端下载信号量后面等轮到，服务端重复推送还会让客户端对同一个
+// 文件起两个下载任务，抢占真正在推进的下载名额。
 func (s *SyncStore) EnqueueTask(ctx context.Context, taskID uint64) error {
-	return s.rdb.LPush(ctx, queueKeyPrefix, strconv.FormatUint(taskID, 10)).Err()
+	id := strconv.FormatUint(taskID, 10)
+	added, err := s.rdb.SAdd(ctx, queuedSetKey, id).Result()
+	if err != nil {
+		return err
+	}
+	if added == 0 {
+		return nil // 已经在队列里，不重复推入
+	}
+	return s.rdb.LPush(ctx, queueKeyPrefix, id).Err()
 }
 
 func (s *SyncStore) DequeueTask(ctx context.Context, timeout time.Duration) (uint64, error) {
@@ -52,6 +66,7 @@ func (s *SyncStore) DequeueTask(ctx context.Context, timeout time.Duration) (uin
 	if err != nil {
 		return 0, err
 	}
+	s.rdb.SRem(ctx, queuedSetKey, res[1]) // 出队后摘掉"排队中"标记，允许下次重新入队
 	return id, nil
 }
 

@@ -85,6 +85,9 @@ onMounted(async () => {
         </template>
         修改密码
       </n-button>
+      <n-button @click="router.push('/person/quick-share')" block>
+        粘贴快传设置
+      </n-button>
     </n-space>
   </div>
 </template>

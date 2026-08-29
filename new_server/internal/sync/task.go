@@ -49,6 +49,14 @@ func (e *Engine) CompleteTask(taskID uint64, hash string) {
 	if isTerminalStatus(task.SyncStatus) {
 		return
 	}
+	ctx := context.Background()
+	// 必须在 Updates 之前释放锁：GORM 的 Model(&task).Updates(map) 会把 map 里的字段
+	// （含下面的 lock_token:nil）直接写回 task 这个内存结构体，释放锁又是靠 task.LockToken
+	// 找 Redis 里的令牌做 CAS 删除——顺序反了就是拿着一个已经被清空的令牌去释放，
+	// releaseTaskLock 发现令牌是空字符串直接跳过，Redis 锁永远不会被真正删掉，只能等
+	// TTL（最长 11 分钟）自然过期。此前这里是先 Updates 后释放，线上已经攒了 274 把这样
+	// 的死锁——期间同一路径的后续任务会一直抢不到锁，卡在 pending 反复重新入队。
+	e.releaseTaskLock(ctx, task)
 	updates := map[string]interface{}{
 		"sync_status":  model.SyncStatusCompleted,
 		"progress":     100,
@@ -59,9 +67,7 @@ func (e *Engine) CompleteTask(taskID uint64, hash string) {
 		updates["file_hash"] = hash
 	}
 	e.db.Model(&task).Updates(updates)
-	ctx := context.Background()
 	e.store.DecPending(ctx, task.UserID)
-	e.releaseTaskLock(ctx, task)
 	e.store.ResetProgress(ctx, taskID)
 }
 
