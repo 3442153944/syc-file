@@ -2,14 +2,12 @@ package file
 
 import (
 	"net/http"
-	"path/filepath"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"syc-file/config"
 	"syc-file/internal/model"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
@@ -99,10 +97,24 @@ func HandlerFuncShareLinkRevoke(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			return
 		}
 
-		tempPath := filepath.Join(config.Conf.Share.TempPath, link.TempName)
-		destroyShareLink(db, redisClient, link.ShareCode, tempPath, shareStatusRevoked)
+		destroyShareLink(db, redisClient, link.ShareCode, resolveShareTempPath(link), shareStatusRevoked)
 
 		logger.Logger.Info("分享链接已吊销", zap.Uint("user_id", userID), zap.String("share_code", link.ShareCode))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": nil})
 	}
+}
+
+// AdminDestroyShareLink 管理员强制清理任意用户的一条分享（不做归属校验）。目前主要给
+// 「缓存管理」页用来手动清粘贴快传缓存，不用等自动过期——复用和普通吊销同一套销毁逻辑
+// （删临时文件/内存内容 + 标记 DB + 清 Redis），对已经失效的记录是幂等的空操作。
+func AdminDestroyShareLink(db *gorm.DB, redisClient *redis.Client, shareCode string) error {
+	var link model.ShareLink
+	if err := db.Where("share_code = ?", shareCode).First(&link).Error; err != nil {
+		return err
+	}
+	if link.Status != shareStatusActive {
+		return nil
+	}
+	destroyShareLink(db, redisClient, link.ShareCode, resolveShareTempPath(link), shareStatusRevoked)
+	return nil
 }

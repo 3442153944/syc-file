@@ -14,6 +14,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"syc-file/pkg/token"
@@ -21,11 +22,12 @@ import (
 
 // APIHandler 管理域处理器。
 type APIHandler struct {
-	db *gorm.DB
+	db          *gorm.DB
+	redisClient *redis.Client
 }
 
-func NewAPIHandler(db *gorm.DB) *APIHandler {
-	return &APIHandler{db: db}
+func NewAPIHandler(db *gorm.DB, redisClient *redis.Client) *APIHandler {
+	return &APIHandler{db: db, redisClient: redisClient}
 }
 
 // pageQuery 统一的分页参数：page 从 1 开始，page_size 默认 20、上限 200。

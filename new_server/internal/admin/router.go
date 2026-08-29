@@ -2,6 +2,7 @@ package admin
 
 import (
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"syc-file/internal/monitor"
@@ -10,10 +11,10 @@ import (
 // RegisterAdminRouter 注册管理域路由。挂在 v1 认证组下，写操作各自 requireAdmin。
 //
 // 路径分两组：
-//   - /admin/*  管理员视角（用户、日志、配额、角色权限）
+//   - /admin/*  管理员视角（用户、日志、配额、角色权限、粘贴快传缓存）
 //   - 其余      当前用户视角（自己的设备、自己的配额、监控）
-func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB) {
-	h := NewAPIHandler(db)
+func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Client) {
+	h := NewAPIHandler(db, redisClient)
 
 	a := rg.Group("/admin")
 	// 用户
@@ -41,6 +42,9 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	a.GET("/permissions", h.ListPermissions)
 	a.POST("/permissions", h.CreatePermission)
 	a.DELETE("/permissions/:id", h.DeletePermission)
+	// 缓存管理：粘贴快传的内存/落盘缓存，管理员可跨用户查看、手动清理
+	a.GET("/quick-share", h.ListQuickShare)
+	a.DELETE("/quick-share/:code", h.RevokeQuickShare)
 
 	// 当前用户视角
 	rg.GET("/devices", h.ListDevices)

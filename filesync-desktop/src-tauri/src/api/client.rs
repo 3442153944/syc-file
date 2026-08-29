@@ -6,6 +6,7 @@
 use reqwest::{multipart, Client, Response};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// 统一响应信封，对应后端 {code, message, data}
 #[derive(Debug, serde::Deserialize)]
@@ -32,8 +33,17 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(server_url: &str, token: &str) -> Self {
+        // Client::new() 没有任何超时：本地 localhost 请求快到永远暴露不出来，但换成远程/
+        // 隧道地址（如 cf tunnel）一旦连接卡住半开，await 会永久挂起——没有 Err、UI 上也就
+        // 看不到任何失败提示，进度停在原地不动（表现为"静默失败"）。这里补上超时，让这种情况
+        // 至少能变成一个真实的 Err 冒泡上去。
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         ApiClient {
-            client: Client::new(),
+            client,
             base_url: format!("{}/v1", server_url.trim_end_matches('/')),
             token: token.to_string(),
         }

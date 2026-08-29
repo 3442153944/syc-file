@@ -36,6 +36,11 @@ export const router = createRouter({
                     component: () => import("../views/share/ShareManage.vue")
                 },
                 {
+                    path: "file/quick-share",
+                    name: "QuickShare",
+                    component: () => import("../views/share/QuickPaste.vue")
+                },
+                {
                     path: "clipboard",
                     name: "ClipboardSync",
                     component: () => import("../views/clipboard/ClipboardSync.vue")
@@ -49,6 +54,11 @@ export const router = createRouter({
                     path: "monitor/network",
                     name: "MonitorNetwork",
                     component: () => import("../views/monitor/Network.vue")
+                },
+                {
+                    path: "monitor/cache",
+                    name: "MonitorCacheManage",
+                    component: () => import("../views/monitor/CacheManage.vue")
                 },
                 {
                     path: "sync/watch",
@@ -84,6 +94,11 @@ export const router = createRouter({
                     path: "person/password",
                     name: "PersonPassword",
                     component: () => import("../views/person/ChangePassword.vue")
+                },
+                {
+                    path: "person/quick-share",
+                    name: "PersonQuickShareSettings",
+                    component: () => import("../views/person/QuickShareSettings.vue")
                 }
             ]
         },

@@ -12,4 +12,5 @@ func RegisterUserRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	u.POST("/login", HandlerFuncLogin(db, redisClient))
 	u.POST("/reset-password", HandlerFuncResetPassword(db, redisClient))
 	u.POST("/verify", HandlerFuncVerify(db, redisClient))
+	u.POST("/quick-share-settings", HandlerFuncSaveQuickShareSettings(db, redisClient))
 }

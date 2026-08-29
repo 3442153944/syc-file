@@ -3,6 +3,8 @@
 import {ref} from 'vue'
 import {useRouter} from 'vue-router'
 import {useLogin} from './login.ts'
+import {isTauri, invoke} from '@tauri-apps/api/core'
+import {saveWebPassword, loadWebPassword, clearWebPassword} from '@/utils/credentialStore'
 import {
   useMessage,
   NForm,
@@ -26,12 +28,29 @@ const form = ref({
 const loading = ref(false)
 const rememberMe = ref(false)
 
-const loadRememberedAccount = () => {
+// 记住密码：账号本身不敏感，继续放 localStorage；密码 Tauri 下存 OS 原生凭据管理器
+// （Windows Credential Manager / macOS Keychain / Linux Secret Service），Web 模式下
+// 用 Web Crypto 本地加密（见 utils/credentialStore.ts 顶部注释，说明了这条路径的局限）。
+const loadRememberedAccount = async () => {
   const remembered = localStorage.getItem('rememberedAccount')
-  if (remembered) {
+  if (!remembered) return
+  try {
     const account = JSON.parse(remembered)
     form.value.username = account.username
     rememberMe.value = true
+    if (isTauri()) {
+      try {
+        const pwd = await invoke<string | null>('get_remembered_credential', {username: account.username})
+        if (pwd) form.value.password = pwd
+      } catch {
+        // 取不到就当没记住，用户照常手动输入密码
+      }
+    } else {
+      const pwd = await loadWebPassword()
+      if (pwd) form.value.password = pwd
+    }
+  } catch {
+    // rememberedAccount 数据损坏，忽略即可，不影响正常登录
   }
 }
 
@@ -52,8 +71,30 @@ const handleLogin = async () => {
 
     if (rememberMe.value) {
       localStorage.setItem('rememberedAccount', JSON.stringify({username: form.value.username}))
+      if (isTauri()) {
+        try {
+          await invoke('save_remembered_credential', {username: form.value.username, password: form.value.password})
+        } catch (e) {
+          message.warning('账号已记住，但密码保存到系统凭据管理器失败：' + String(e))
+        }
+      } else {
+        try {
+          await saveWebPassword(form.value.password)
+        } catch {
+          // 加密保存失败不影响本次登录，只是下次要重新手动输入密码
+        }
+      }
     } else {
       localStorage.removeItem('rememberedAccount')
+      if (isTauri()) {
+        try {
+          await invoke('clear_remembered_credential', {username: form.value.username})
+        } catch {
+          // 忽略：本来就没记住过也会走到这里
+        }
+      } else {
+        clearWebPassword()
+      }
     }
 
     message.success('登录成功')
@@ -123,7 +164,7 @@ const handleResetPassword = () => {
 
           <n-form-item>
             <div class="login-options">
-              <n-checkbox v-model:checked="rememberMe">记住账号</n-checkbox>
+              <n-checkbox v-model:checked="rememberMe">记住账号密码</n-checkbox>
               <n-button text type="primary" size="small" @click="handleResetPassword">忘记密码?</n-button>
             </div>
           </n-form-item>

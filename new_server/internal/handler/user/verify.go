@@ -68,8 +68,10 @@ func HandlerFuncVerify(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 				"role":     u.Role,
 				"status":   u.Status,
 				// 同 userLogin：个人中心的「最后登录 / 注册时间」靠这两个字段，缺了就只能显示未知
-				"last_login": u.LastLogin,
-				"created_at": u.CreatedAt,
+				"last_login":                 u.LastLogin,
+				"created_at":                 u.CreatedAt,
+				"quick_share_hotkey":         u.QuickShareHotkey,
+				"quick_share_expire_minutes": u.QuickShareExpireMinutes,
 			},
 		})
 	}

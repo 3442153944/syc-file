@@ -38,7 +38,7 @@ async function handleSave() {
     await invoke('set_sync_config', {
       serverUrl: form.value.serverUrl.replace(/\/+$/, ''),
       wsUrl: ws,
-      token: '',
+      token: null, // 这里只改服务器地址，不该动登录态；传 null 让 Rust 侧保留已登录的 token
       uploadWorkers: null,
       downloadWorkers: null,
       debounceMs: null,

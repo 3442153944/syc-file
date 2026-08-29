@@ -2,14 +2,11 @@ package file
 
 import (
 	"archive/zip"
-	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -18,7 +15,6 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/config"
-	"syc-file/internal/model"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 )
@@ -83,7 +79,6 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			return
 		}
 
-		shareCode := uuid.NewString()
 		tempName := uuid.NewString()
 		if info.IsDir() {
 			tempName += ".zip"
@@ -120,56 +115,19 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			}
 		}
 
-		expireTime := time.Now().Add(time.Duration(req.ExpireMinutes) * time.Minute)
-		link := &model.ShareLink{
-			UserID:       userID,
-			ShareCode:    shareCode,
-			OriginalPath: fullPath,
-			FileName:     req.Name,
-			TempName:     tempName,
-			FileSize:     materializedSize,
-			ExpireTime:   expireTime,
-			Status:       shareStatusActive,
-		}
-		if err := db.Create(link).Error; err != nil {
+		_, data, err := finalizeShareLink(db, redisClient, userID, fullPath, req.Name, tempName, "disk",
+			materializedSize, req.ExpireMinutes, info.IsDir(), false)
+		if err != nil {
 			_ = os.Remove(tempPath)
 			logger.Logger.Error("写入分享链接记录失败", zap.Error(err))
 			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入分享链接记录失败", "data": nil})
 			return
 		}
 
-		meta := map[string]interface{}{
-			"share_code":    shareCode,
-			"temp_name":     tempName,
-			"original_path": fullPath,
-			"file_name":     req.Name,
-			"is_dir":        info.IsDir(),
-			"expire_time":   expireTime.Format(time.RFC3339),
-		}
-		if data, err := json.Marshal(meta); err == nil {
-			if err := redisClient.Set(context.Background(), shareLinkRedisPrefix+shareCode, data, time.Until(expireTime)).Err(); err != nil {
-				logger.Logger.Warn("分享链接写入 Redis 失败", zap.String("share_code", shareCode), zap.Error(err))
-			}
-		}
-
-		go watchShareLink(db, redisClient, shareCode, tempPath, time.Until(expireTime))
-
-		logger.Logger.Info("分享链接创建成功",
-			zap.Uint("user_id", userID), zap.String("share_code", shareCode),
-			zap.String("temp_name", tempName), zap.Bool("is_dir", info.IsDir()))
-
 		c.JSON(http.StatusOK, gin.H{
 			"code":    200,
 			"message": "ok",
-			"data": gin.H{
-				"share_code":  shareCode,
-				"temp_name":   tempName,
-				"file_name":   req.Name,
-				"file_size":   materializedSize,
-				"is_dir":      info.IsDir(),
-				"expire_time": expireTime.Format(time.RFC3339),
-				"url_path":    "/v1/file/share-link/download/" + shareCode,
-			},
+			"data":    data,
 		})
 	}
 }
@@ -215,9 +173,12 @@ func zipFolder(srcDir, dstZip string) (int64, error) {
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(w, f)
-		f.Close()
-		return err
+		_, copyErr := io.Copy(w, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
 	})
 
 	if cerr := zw.Close(); err == nil {
@@ -227,7 +188,9 @@ func zipFolder(srcDir, dstZip string) (int64, error) {
 		err = oerr
 	}
 	if err != nil {
-		os.Remove(dstZip)
+		if rmErr := os.Remove(dstZip); rmErr != nil && !os.IsNotExist(rmErr) {
+			logger.Logger.Warn("清理失败的 zip 文件失败", zap.String("path", dstZip), zap.Error(rmErr))
+		}
 		return 0, err
 	}
 
