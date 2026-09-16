@@ -40,3 +40,17 @@ Thumbs.db
 
 # 动态库（误入仓库根的）
 /*.dll
+
+# ── 运行期配置：含数据库密码 / token 密钥 / 第三方 API Key，一律不入库 ──────────
+# 后端主配置（db.password、auth.secret 等）
+new_server/config/config.yaml
+server/config/config.yaml
+
+# deploy/ 下是被后端拉起的外部服务的配置（frp auth.token、Cloudflare API Key…）。
+# 默认整目录忽略，只放行模板和说明，方便换机器时照着填。
+# 注意顺序：必须先放行目录(**/)，后面对文件的 ! 例外才会生效。
+new_server/deploy/**
+!new_server/deploy/**/
+!new_server/deploy/.gitignore
+!new_server/deploy/README.md
+!new_server/deploy/**/*.example.*

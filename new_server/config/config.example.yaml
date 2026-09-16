@@ -1,10 +1,16 @@
+# config.example.yaml — 配置模板
+#
+# 真正的 config.yaml 不进版本库（含数据库密码与 token 密钥），换机器部署时
+# 复制本文件为 config.yaml 再把尖括号占位符填上。
+# deploy/ 下第三方程序的配置同理，各有一份 *.example.*。
+
 # 数据库配置
 db:
   host: 127.0.0.1
   port: 3306
   name: syncfile
   user: syncfile
-  password: 123456
+  password: "<数据库密码>"
 
 # 缓存配置
 redis:
@@ -44,11 +50,14 @@ auth:
 #  自动刷新时间（天）
   refresh_expire: 1
 #  token密钥
-  secret: 123456
+  secret: "<随机字符串，务必改掉；泄露等于任何人都能伪造 token>"
 
 #  服务器配置
 server:
   port: 8991
+  # 节点名：随 /v1/ping 回给客户端，桌面端灾备面板上显示「当前连的是哪个入口」。
+  # 留空则用主机名。多台机器各自部署时给不同的名字。
+  name: ""
 
 # 文件存储配置
 file:
@@ -149,3 +158,41 @@ sync:
   task_timeout_seconds: 600      # 单任务执行超时（秒），超时后重试
   conflict_suffix: "conflict"    # 冲突文件保留后缀
   sync_catalogue: "F:/同步目录/"  # 执行实时同步的目录
+
+# ── 外部进程托管 ──────────────────────────────────────────────────────────────
+# 后端启动时自动拉起内网穿透与动态域名，退出时一并关闭（见 internal/supervisor）。
+#
+# 为什么归到后端：frpc 一断，两个域名就全都打不进来，而现象只是"服务好好的但访问不了"。
+# 以前靠 start.bat 甩出几个控制台窗口，失败不可见、死了不重启、没有日志。
+#
+# command 用的是各程序自己的安装路径（exe 是二进制，不进本仓库）；
+# args 里的配置文件则统一收在 deploy/ 下，相对路径按后端工作目录解析。
+supervisor:
+  enabled: true
+  # 子进程 stdout/stderr 落盘位置
+  log_dir: ./log/supervisor
+  processes:
+    # 主入口：13.193.51.91，local 443 → remote 443（ddns.sunyuanling.cn）
+    - name: frpc-ddns
+      enabled: true
+      command: "E:/内网穿透/frp/frpc.exe"
+      args: ["-c", "deploy/frp/frpc.toml"]
+      # 必须开：frpc 用同样的 proxy 名重复连同一个 frps 会被拒绝
+      # （proxy [xxx] already exists），新旧客户端谁都用不上
+      skip_if_running: true
+      restart_delay_seconds: 10
+    # 备用入口：151.242.164.110 东京，local 443 → remote 8443（jp.sunyuanling.cn:8443）
+    - name: frpc-tokyo
+      enabled: true
+      command: "E:/内网穿透/frp/frpc.exe"
+      args: ["-c", "deploy/frp/frpc_akile.toml"]
+      skip_if_running: true
+      restart_delay_seconds: 10
+    # 动态域名：只更新 ddns.sunyuanling.cn 的 AAAA（家宽 IPv6 会变）；
+    # A 记录固定指向 VPS 走 frp，不需要更新，所以配置里 ipv4.enable = false
+    - name: ddns-go
+      enabled: true
+      command: "F:/proxy/ddns/ddns-go.exe"
+      args: ["-c", "deploy/ddns/ddns_go_config.yaml"]
+      skip_if_running: true
+      restart_delay_seconds: 30

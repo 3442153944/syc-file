@@ -2,18 +2,22 @@
 // 传输状态聚合：手动上传 / 同步下载 / 同步引擎活动 三类。
 // 统一监听 Tauri 后端推送的事件，并对外暴露 startManualUpload 供 ViewCatalog 并行多文件上传。
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, reactive } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { uploadFile as apiUploadFile } from '../api/file/fileApi'
 import { listPendingTasks, listConflicts } from '../api/sync/syncApi'
 import type { SyncTask, SyncConflict } from '../api/sync/syncTypes'
+import { SpeedMeter } from '../utils/speedMeter'
 
 // ── 类型 ────────────────────────────────────────────────────────────────────
 export type UploadStatus = 'uploading' | 'done' | 'error'
+/** manual = 文件管理里的普通分片上传；quick-share = 粘贴快传（单次整包上传） */
+export type UploadKind = 'manual' | 'quick-share'
 export interface UploadEntry {
   id: string
   name: string
+  kind: UploadKind
   matchKey?: string // Tauri 模式为本地路径，用于匹配 upload-progress-byte 事件
   total: number
   sent: number
@@ -21,6 +25,10 @@ export interface UploadEntry {
   error?: string
   startedAt: number
   finishedAt?: number
+  /** 当前速度（字节/秒），上传中每秒刷新；完成后为整段平均速度 */
+  speed: number
+  /** 是否已收到过进度。没收到前处于「准备中」（本地算哈希、等 init 响应） */
+  started: boolean
 }
 
 export type DownloadStatus = 'downloading' | 'done' | 'blocked' | 'error'
@@ -58,6 +66,11 @@ export const useTransferStore = defineStore('transfer', () => {
 
   const pendingTasks = ref<SyncTask[]>([])
   const conflicts = ref<SyncConflict[]>([])
+
+  // 每个上传一个测速器。不放进响应式数据里：采样数组每次进度都在变，
+  // 做成响应式只会徒增依赖追踪开销，界面只需要算好的 speed。
+  const meters = new Map<string, SpeedMeter>()
+  let speedTimer: ReturnType<typeof setInterval> | null = null
 
   let unlisteners: UnlistenFn[] = []
   let wsUnlisten: UnlistenFn | null = null
@@ -127,10 +140,7 @@ export const useTransferStore = defineStore('transfer', () => {
         (e) => {
           const p = e.payload
           const entry = uploads.value.find((u) => u.matchKey === p.path && u.status === 'uploading')
-          if (entry) {
-            entry.sent = p.sent
-            if (p.total > 0) entry.total = p.total
-          }
+          if (entry) reportUploadProgress(entry, p.sent, p.total)
         },
       ),
       await listen<{ path: string; status: string; error?: string; taskId?: number }>(
@@ -249,6 +259,92 @@ export const useTransferStore = defineStore('transfer', () => {
     pollTimer = null
     if (clockTimer) clearInterval(clockTimer)
     clockTimer = null
+    stopSpeedTicker()
+  }
+
+  // ── 上传登记（所有上传的统一入口）─────────────────────────────────────────
+  //
+  // 普通上传和粘贴快传都从这里登记，于是传输列表、顶栏指示器、测速逻辑只有一份。
+  //
+  // 注意必须返回 reactive 代理而不是原始对象：ref 数组里存的是 raw 对象，
+  // 直接改 raw 对象的字段**不会触发任何更新**——之前 startManualUpload 就是这么写的，
+  // 结果 status 改成 done 后 activeUploads 不重算，顶栏指示器一直显示"上传中"，
+  // Web 模式的进度回调也全部白改。
+
+  /** 登记一个新上传，返回响应式条目，之后用 reportUploadProgress / finishUpload 更新。 */
+  function beginUpload(opts: { name: string; kind: UploadKind; total?: number; matchKey?: string }): UploadEntry {
+    const entry = reactive<UploadEntry>({
+      id: uid(),
+      name: opts.name,
+      kind: opts.kind,
+      matchKey: opts.matchKey,
+      total: opts.total ?? 0,
+      sent: 0,
+      status: 'uploading',
+      startedAt: Date.now(),
+      speed: 0,
+      started: false,
+    })
+    // 分片上传开头有两次簿记上报（算完哈希报 0、init 后报已有字节），不计入速度；
+    // 快传的 XHR 进度每次都是真实字节。见 SpeedMeter 构造函数注释。
+    meters.set(entry.id, new SpeedMeter(opts.kind === 'manual' ? 2 : 0))
+    uploads.value.unshift(entry)
+    if (uploads.value.length > MAX_LIST) {
+      for (const dropped of uploads.value.splice(MAX_LIST)) meters.delete(dropped.id)
+    }
+    ensureSpeedTicker()
+    return entry
+  }
+
+  function reportUploadProgress(entry: UploadEntry, sent: number, total: number) {
+    if (entry.status !== 'uploading') return
+    entry.sent = sent
+    if (total > 0) entry.total = total
+    const meter = meters.get(entry.id)
+    if (meter) {
+      meter.push(sent)
+      entry.speed = meter.rate()
+      entry.started = meter.started
+    } else {
+      entry.started = true
+    }
+  }
+
+  /** 结束一个上传。error 为空表示成功。 */
+  function finishUpload(entry: UploadEntry, error?: unknown) {
+    entry.finishedAt = Date.now()
+    if (error === undefined) {
+      entry.status = 'done'
+      entry.sent = entry.total || entry.sent
+    } else {
+      entry.status = 'error'
+      entry.error = error instanceof Error ? error.message : String(error)
+    }
+    // 完成后显示整段平均速度，比"最后一瞬间的速度"有意义
+    entry.speed = meters.get(entry.id)?.average(entry.finishedAt) ?? 0
+    meters.delete(entry.id)
+  }
+
+  // 链路卡住时不会有新进度，速度必须靠定时器自己衰减下来（见 SpeedMeter 注释）。
+  // 只在有进行中的上传时才跑，空闲不占资源。
+  function ensureSpeedTicker() {
+    if (speedTimer) return
+    speedTimer = setInterval(() => {
+      const now = Date.now()
+      let active = 0
+      for (const u of uploads.value) {
+        if (u.status !== 'uploading') continue
+        active++
+        const meter = meters.get(u.id)
+        if (meter) u.speed = meter.rate(now)
+      }
+      if (active === 0) stopSpeedTicker()
+    }, 1000)
+  }
+
+  function stopSpeedTicker() {
+    if (speedTimer) clearInterval(speedTimer)
+    speedTimer = null
   }
 
   // ── 手动上传（并行）──────────────────────────────────────────────────────
@@ -261,33 +357,20 @@ export const useTransferStore = defineStore('transfer', () => {
     remoteDir: string,
   ): Promise<void> {
     const isPath = typeof entry === 'string'
-    const name = isPath ? (entry as string).split(/[\\/]/).pop() || (entry as string) : (entry as File).name
-    const total = isPath ? 0 : (entry as File).size
-    const matchKey = isPath ? (entry as string) : undefined
-    const item: UploadEntry = {
-      id: uid(),
-      name,
-      matchKey,
-      total,
-      sent: 0,
-      status: 'uploading',
-      startedAt: Date.now(),
-    }
-    uploads.value.unshift(item)
-    if (uploads.value.length > MAX_LIST) uploads.value.length = MAX_LIST
+    const item = beginUpload({
+      name: isPath ? entry.split(/[\\/]/).pop() || entry : entry.name,
+      kind: 'manual',
+      total: isPath ? 0 : entry.size,
+      // Tauri 模式进度走 upload-progress-byte 事件，按本地路径匹配回这一条
+      matchKey: isPath ? entry : undefined,
+    })
 
     try {
-      await apiUploadFile(entry, remoteDir, (sent, t) => {
-        item.sent = sent
-        if (t > 0) item.total = t
-      })
-      item.status = 'done'
-      item.sent = item.total || item.sent
-      item.finishedAt = Date.now()
+      // Web 模式走回调；Tauri 模式这个回调不会被调用（见 fileApi.uploadFile）
+      await apiUploadFile(entry, remoteDir, (sent, t) => reportUploadProgress(item, sent, t))
+      finishUpload(item)
     } catch (e) {
-      item.status = 'error'
-      item.error = String(e)
-      item.finishedAt = Date.now()
+      finishUpload(item, e)
       throw e
     }
   }
@@ -296,6 +379,7 @@ export const useTransferStore = defineStore('transfer', () => {
   function clearFinished(list: 'uploads' | 'downloads' | 'syncEvents') {
     if (list === 'uploads') {
       uploads.value = uploads.value.filter((u) => u.status === 'uploading')
+      // 进行中的测速器保留，其余的已在 finishUpload 里删过
     } else if (list === 'downloads') {
       downloads.value = downloads.value.filter((d) => d.status === 'downloading')
     } else {
@@ -321,6 +405,9 @@ export const useTransferStore = defineStore('transfer', () => {
     dispose,
     refreshSyncData,
     startManualUpload,
+    beginUpload,
+    reportUploadProgress,
+    finishUpload,
     clearFinished,
   }
 })

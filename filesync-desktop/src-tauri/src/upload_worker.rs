@@ -4,7 +4,7 @@
 // 不在客户端先删旧文件）→ 上报 file_changed。
 // 哈希统一用 blake3（与 chunked_uploader / file_lib 一致），base_store 存 blake3 hex。
 use crate::api::{
-    client::ApiClient,
+    client::{ApiClient, NODE_SWITCHED},
     sync::{api as sync_api, params::NotifyParams},
 };
 use crate::chunked_uploader::{self, UploadOptions};
@@ -62,7 +62,7 @@ pub fn start_upload_workers(
 async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandle) {
     let path_str = task.local_path.to_string_lossy().to_string();
 
-    let (client, device_id) = {
+    let (mut client, device_id) = {
         let cfg = config.read();
         if cfg.server_url.is_empty() || cfg.token.is_empty() {
             return;
@@ -103,20 +103,36 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     let options = UploadOptions::new(device_id.clone());
     let on_progress: chunked_uploader::ProgressFn = Arc::new(|_, _| {});
 
-    let complete = match chunked_uploader::upload(
-        &client,
-        &task.local_path,
-        &task.remote_dir,
-        &options,
-        on_progress,
-    )
-    .await
-    {
-        Ok(d) => d,
-        Err(e) => {
-            crate::logger::error("upload", format!("上传失败 {}: {}", path_str, e));
-            emit_progress(app, &path_str, "error", Some(e));
-            return;
+    // 上传中途被切了节点时重来一次：那个错误是客户端自己掐的（见 net.rs 的世代号），
+    // 不是服务端的问题。两个节点打的是同一台后端，upload_id 还在，分片上传本来就带
+    // 断点续传，换成新节点的 client 重跑会从已传完的分片之后接着传，不必整文件重来。
+    let mut retried = false;
+    let complete = loop {
+        let on_progress: chunked_uploader::ProgressFn = on_progress.clone();
+        match chunked_uploader::upload(
+            &client,
+            &task.local_path,
+            &task.remote_dir,
+            &options,
+            on_progress,
+        )
+        .await
+        {
+            Ok(d) => break d,
+            Err(e) if !retried && e.contains(NODE_SWITCHED) => {
+                retried = true;
+                crate::logger::warn(
+                    "upload",
+                    format!("节点已切换，改用新节点续传: {}", path_str),
+                );
+                let cfg = config.read();
+                client = ApiClient::new(&cfg.server_url, &cfg.token);
+            }
+            Err(e) => {
+                crate::logger::error("upload", format!("上传失败 {}: {}", path_str, e));
+                emit_progress(app, &path_str, "error", Some(e));
+                return;
+            }
         }
     };
 

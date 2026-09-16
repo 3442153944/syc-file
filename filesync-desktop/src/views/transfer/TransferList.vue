@@ -7,6 +7,8 @@ import { useRouter } from 'vue-router'
 import { useTransferStore } from '@/store/useTransferStore'
 import { listSyncTasks, clearSyncTasks } from '@/api/sync/syncApi'
 import type { SyncTask } from '@/api/sync/syncTypes'
+import type { UploadEntry } from '@/store/useTransferStore'
+import { formatBytes as fmtBytes, formatSpeed, formatEta } from '@/utils/speedMeter'
 import { useMessage } from 'naive-ui'
 import { NButton, NSpace, NEmpty, NTag, NProgress, NPopconfirm, NPagination, NSelect, NSpin } from 'naive-ui'
 
@@ -85,13 +87,7 @@ onBeforeUnmount(() => {
   /* 不 dispose，store 生命周期跟随主布局，页面卸载只停刷新 */
 })
 
-const formatBytes = (n: number): string => {
-  if (!n) return '-'
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0, v = n
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(i ? 1 : 0)} ${u[i]}`
-}
+const formatBytes = (n: number): string => (n ? fmtBytes(n) : '-')
 const formatTime = (ts?: number): string => {
   if (!ts) return ''
   return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false })
@@ -100,6 +96,23 @@ const formatTime = (ts?: number): string => {
 const uploadPercent = (u: { sent: number; total: number }): number => {
   if (!u.total) return 0
   return Math.min(100, Math.round((u.sent / u.total) * 100))
+}
+
+/**
+ * 上传行右侧的速度/状态文字。
+ * - 还没收到进度：本地在算哈希、等 init 响应，此时显示速度 0 会被误以为卡死
+ * - 字节发完但还没完成：服务端在合并分片 / 落盘，同理不能显示 0 速
+ * - 完成：整段平均速度（秒传或耗时不足 1 秒时为 0，不显示）
+ */
+const uploadSpeedText = (u: UploadEntry): string => {
+  if (u.status === 'uploading') {
+    if (!u.started) return '准备中…'
+    if (u.total > 0 && u.sent >= u.total) return '服务器处理中…'
+    const eta = formatEta(u.total - u.sent, u.speed)
+    return `${formatSpeed(u.speed)}${eta ? ` · 剩余 ${eta}` : ''}`
+  }
+  if (u.status === 'done' && u.speed > 0) return `平均 ${formatSpeed(u.speed)}`
+  return ''
 }
 
 const uploadList = computed(() => store.uploads)
@@ -130,7 +143,10 @@ const goBack = () => router.back()
         <div v-else class="rows">
           <div v-for="u in uploadList" :key="u.id" class="row">
             <div class="row-main">
-              <div class="row-name" :title="u.name">{{ u.name }}</div>
+              <div class="row-name" :title="u.name">
+                <n-tag v-if="u.kind === 'quick-share'" size="tiny" :bordered="false" class="kind-tag">快传</n-tag>
+                {{ u.name }}
+              </div>
               <n-progress
                 v-if="u.status === 'uploading'"
                 :percentage="uploadPercent(u)"
@@ -139,7 +155,11 @@ const goBack = () => router.back()
                 status="default"
               />
               <div class="row-meta">
-                <span>{{ formatBytes(u.sent) }} / {{ u.total ? formatBytes(u.total) : '…' }}</span>
+                <span>
+                  {{ formatBytes(u.sent) }} / {{ u.total ? formatBytes(u.total) : '…' }}
+                  <template v-if="u.status === 'uploading' && u.total"> · {{ uploadPercent(u) }}%</template>
+                </span>
+                <span class="speed">{{ uploadSpeedText(u) }}</span>
                 <span>{{ formatTime(u.startedAt) }}</span>
               </div>
               <div v-if="u.error" class="row-err">{{ u.error }}</div>
@@ -368,11 +388,14 @@ const goBack = () => router.back()
 .row-meta {
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   font-size: 11px;
   color: #999;
   margin-top: 4px;
 }
 .row-err { font-size: 11px; color: #f56c6c; margin-top: 2px; }
+.speed { color: #409eff; font-variant-numeric: tabular-nums; }
+.kind-tag { margin-right: 4px; vertical-align: 1px; }
 .sync-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .conflict-block { margin-bottom: 16px; }
 .block-title { font-size: 13px; font-weight: 600; color: #606266; margin: 12px 0 8px; }

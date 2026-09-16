@@ -8,8 +8,10 @@ import (
 	"go.uber.org/zap"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"syc-file/config"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
@@ -17,6 +19,7 @@ import (
 	"syc-file/internal/middleware"
 	"syc-file/internal/model"
 	"syc-file/internal/monitor"
+	"syc-file/internal/supervisor"
 	"syc-file/internal/sync"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
@@ -157,11 +160,41 @@ func main() {
 
 	handler.RegisterRouters(r, db, redisClient, syncEngine)
 
-	// 5. 启动服务
-	addr := fmt.Sprintf(":%d", config.Conf.Server.Port)
-	logger.Logger.Info("服务器准备启动", zap.String("addr", addr))
+	// 5. 托管外部进程（内网穿透 frpc × 2 + 动态域名 ddns-go）
+	//
+	// 这条链路是外网访问的唯一入口：frpc 一断，两个域名就全都打不进来，
+	// 而现象只是"服务好好的但访问不了"。以前靠 start.bat 手动拉起、死了没人管，
+	// 现在跟着后端一起起、一起停，并且死了会自动重启（见 internal/supervisor）。
+	sv := supervisor.New(config.Conf.Supervisor, logger.Logger)
+	sv.Start()
 
-	if err := r.Run(addr); err != nil {
-		logger.Logger.Fatal("服务器启动失败", zap.Error(err))
+	// 6. 启动服务
+	//
+	// 用 http.Server + Shutdown 而不是 r.Run()：必须能接住 Ctrl+C / 服务停止信号，
+	// 否则托管的子进程会变成孤儿，下次启动 frpc 就会撞上 frps 的 proxy 名冲突
+	// （`proxy [xxx] already exists`），新旧客户端谁都用不上。
+	addr := fmt.Sprintf(":%d", config.Conf.Server.Port)
+	srv := &http.Server{Addr: addr, Handler: r}
+
+	go func() {
+		logger.Logger.Info("服务器准备启动", zap.String("addr", addr))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Logger.Fatal("服务器启动失败", zap.Error(err))
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+	logger.Logger.Info("收到退出信号，正在关闭…")
+
+	// 先停 HTTP（不再接新请求），再停子进程：反过来的话，正在处理的请求
+	// 可能因为隧道被掐断而失败。
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Logger.Warn("HTTP 服务关闭超时", zap.Error(err))
 	}
+	sv.Stop(10 * time.Second)
+	logger.Logger.Info("已退出")
 }

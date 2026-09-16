@@ -5,6 +5,7 @@ import {useRouter} from 'vue-router'
 import {useLogin} from './login.ts'
 import {isTauri, invoke} from '@tauri-apps/api/core'
 import {saveWebPassword, loadWebPassword, clearWebPassword} from '@/utils/credentialStore'
+import NodeSwitcher from '@/components/NodeSwitcher.vue'
 import {
   useMessage,
   NForm,
@@ -107,6 +108,9 @@ const handleLogin = async () => {
 
     await router.push({name: 'Home'})
   } catch (error) {
+    // 后端错误形如 "[400] 密码错误"，给用户看时去掉码前缀
+    const text = (error instanceof Error ? error.message : String(error)).replace(/^\[\d+]\s*/, '')
+    message.error(`登录失败：${text || '未知错误'}`)
     console.error('登录失败', error)
   } finally {
     loading.value = false
@@ -131,6 +135,10 @@ const handleResetPassword = () => {
 
 <template>
   <div class="login" @keydown="handleKeydown">
+    <!-- 节点切换要在登录之前就能用：服务器连不上时，用户得先换条路才登得上来 -->
+    <div class="login-node">
+      <NodeSwitcher/>
+    </div>
     <div class="login-container">
       <div class="login-header">
         <h1>私有云系统</h1>
@@ -224,6 +232,16 @@ const handleResetPassword = () => {
   100% {
     transform: translate(50px, 50px);
   }
+}
+
+.login-node {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
 }
 
 .login-container {

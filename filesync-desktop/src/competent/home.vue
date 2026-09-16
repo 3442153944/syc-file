@@ -3,15 +3,22 @@ import {onMounted, onBeforeUnmount, ref, computed} from "vue"
 import {useRouter, useRoute} from "vue-router"
 import {useLogin} from "./login/login.ts"
 import {useMenuConfig} from "./composeables/menu-config.ts"
-import {NMenu, NBadge, NDropdown, NAvatar} from "naive-ui"
+import {NMenu, NBadge, NDropdown, NAvatar, NIcon} from "naive-ui"
 import type {MenuOption, DropdownOption} from "naive-ui"
 import {logo} from "@syl/icon"
 import {useTransferStore} from "@/store/useTransferStore"
 import {avatarUrl} from "@/api/platform"
 import {setServerUrl} from "@/api/platform"
 import {isTauri} from "@tauri-apps/api/core"
-import {User as UserIcon, Cog as CogIcon} from '@vicons/fa'
-import ServerSettings from '@/views/person/ServerSettings.vue'
+import {
+  User as UserIcon,
+  Cog as CogIcon,
+  CircleNotch as SyncingIcon,
+  Upload as UploadIcon,
+  Download as DownloadIcon,
+  Copy as FilesIcon,
+} from '@vicons/fa'
+import NodeSwitcher from '@/components/NodeSwitcher.vue'
 
 const router = useRouter()
 const route = useRoute() // 引入 route 用于菜单高亮
@@ -21,7 +28,8 @@ const transferStore = useTransferStore()
 
 const userInfo = ref<any>(null)
 const userAvatar = computed(() => avatarUrl(userInfo.value?.avatar))
-const showSettings = ref(false)
+// 节点面板挂在 NodeSwitcher 内部（登录页也要用），齿轮图标通过 ref 复用它
+const nodeSwitcher = ref<InstanceType<typeof NodeSwitcher> | null>(null)
 
 // 2. 数据转换：将你的 menuConfig 转为 Naive UI 要求的 MenuOption 格式
 const mapMenus = (menus: any[]): MenuOption[] => {
@@ -53,10 +61,11 @@ onMounted(async () => {
     // 同步服务器地址（头像 URL 拼接用）
     if (isTauri()) {
       try {
-        const { invoke } = await import('@tauri-apps/api/core')
+        const {invoke} = await import('@tauri-apps/api/core')
         const cfg = await invoke<any>('get_sync_config')
         if (cfg?.server_url) setServerUrl(cfg.server_url)
-      } catch { /* ignore */ }
+      } catch { /* ignore */
+      }
     }
   } catch {
     localStorage.removeItem("token")
@@ -115,40 +124,44 @@ const handleMenuClick = (key: string) => {
       </div>
 
       <div class="header-right">
+        <!-- 网络节点指示器：小圆点显示当前节点通不通，点开可直接切换 -->
+        <NodeSwitcher ref="nodeSwitcher"/>
         <div class="transfer-indicator" @click="goTransfers" title="传输列表">
           <n-badge :value="ind.count" :max="99" :show="ind.count > 0" type="error">
             <!-- 同步中：转圈 -->
-            <el-icon v-if="ind.type === 'sync'" class="spin ind-sync">
-              <Loading/>
-            </el-icon>
+            <n-icon v-if="ind.type === 'sync'" :size="18" class="spin ind-sync">
+              <SyncingIcon/>
+            </n-icon>
             <!-- 上传中：箭头向上 -->
-            <el-icon v-else-if="ind.type === 'upload'" class="ind-upload">
-              <Upload/>
-            </el-icon>
+            <n-icon v-else-if="ind.type === 'upload'" :size="18" class="ind-upload">
+              <UploadIcon/>
+            </n-icon>
             <!-- 下载中：箭头向下 -->
-            <el-icon v-else-if="ind.type === 'download'" class="ind-download">
-              <Download/>
-            </el-icon>
+            <n-icon v-else-if="ind.type === 'download'" :size="18" class="ind-download">
+              <DownloadIcon/>
+            </n-icon>
             <!-- 空闲 -->
-            <el-icon v-else class="ind-idle">
-              <Files/>
-            </el-icon>
+            <n-icon v-else :size="18" class="ind-idle">
+              <FilesIcon/>
+            </n-icon>
           </n-badge>
         </div>
         <n-dropdown trigger="click" :options="userDropdownOptions" @select="handleUserDropdown">
           <div class="user-area">
             <n-avatar :size="28" round :src="userAvatar" v-if="userInfo">
               <template #fallback>
-                <el-icon style="font-size:16px">
+                <n-icon :size="16">
                   <UserIcon/>
-                </el-icon>
+                </n-icon>
               </template>
             </n-avatar>
             <span v-if="userInfo" class="username">{{ userInfo.username }}</span>
           </div>
         </n-dropdown>
-        <div class="settings-icon" v-if="isTauri()" @click="showSettings = true" title="服务器设置">
-          <el-icon style="font-size:18px;cursor:pointer;color:#666"><CogIcon /></el-icon>
+        <div class="settings-icon" v-if="isTauri()" @click="nodeSwitcher?.open()" title="网络节点设置">
+          <n-icon :size="18" color="#666" style="cursor:pointer">
+            <CogIcon/>
+          </n-icon>
         </div>
       </div>
     </div>
@@ -157,7 +170,6 @@ const handleMenuClick = (key: string) => {
       <router-view/>
     </div>
   </div>
-  <ServerSettings :show="showSettings" @close="showSettings = false" />
 </template>
 
 <style scoped>
@@ -220,10 +232,6 @@ const handleMenuClick = (key: string) => {
 
 .transfer-indicator:hover {
   background-color: #f0f2f5;
-}
-
-.transfer-indicator .el-icon {
-  font-size: 18px;
 }
 
 .ind-idle {

@@ -4,7 +4,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
-	"net/http"
 	"syc-file/internal/admin"
 	"syc-file/internal/clipboard"
 	"syc-file/internal/handler/file"
@@ -20,9 +19,10 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	// 统一认证中间件：是否需要登录由配置文件 whitelist 决定，无需再手动区分路由组
 	v1.Use(middleware.Auth())
 
-	v1.POST("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"message": "pong"})
-	})
+	// 健康探测：GET/POST 都挂，客户端（桌面端灾备选路）用 GET，老客户端用 POST。
+	// 在白名单里，未登录也能打——登录页切换节点时也要能探测。
+	v1.GET("/ping", HandlerPing())
+	v1.POST("/ping", HandlerPing())
 
 	// 所有业务路由统一注册，白名单外的路由默认需要登录
 	user.RegisterUserRouter(v1, db, redisClient)

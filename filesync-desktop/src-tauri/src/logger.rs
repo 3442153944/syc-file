@@ -3,14 +3,21 @@
 //   1) 通过 Tauri 事件 `app-log` 推给所有窗口（日志窗口实时显示）；
 //   2) 追加写入 base/log/filesync.log（按大小轮转，对齐后端 lumberjack 策略）；
 //   3) 可选输出到 stderr（开发期，默认关）。
+//   4) 留在内存环形缓冲里（最近 RECENT_CAPACITY 条），日志窗口打开时补齐之前的日志 ——
+//      否则窗口打开前发生的事（尤其是启动阶段）一条都看不到。
+//
+// 前端的 console.* 也经 `log_from_frontend` 命令汇入这里（见前端 utils/consoleBridge.ts），
+// 所以日志窗口和日志文件里看到的是前后端合在一起的完整时间线。
 //
 // 级别过滤：低于 `current_level` 的日志直接丢弃。
 // 轮转策略：filesync.log 达到 max_size MB → filesync.log.1 ← 旧的 .1 ← .2 … 删除第 max_backup+1 个。
 //   与后端 lumberjack 一致（按大小而非按日期）。
 use crate::app_paths;
 use crate::config::LogConfig;
+use chrono::TimeZone;
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,6 +33,12 @@ static WRITE_FILE: AtomicU8 = AtomicU8::new(1);
 static WRITE_CONSOLE: AtomicU8 = AtomicU8::new(0);
 static MAX_BACKUP: AtomicU8 = AtomicU8::new(3);
 static MAX_SIZE_BYTES: AtomicU64 = AtomicU64::new(100 * 1024 * 1024);
+/// 递增序号：日志窗口补齐历史时，用它和实时事件去重、排序
+static SEQ: AtomicU64 = AtomicU64::new(0);
+static RECENT: OnceLock<Mutex<VecDeque<LogLine>>> = OnceLock::new();
+
+/// 内存里保留的最近日志条数。和日志窗口的 MAX_LINES 同一量级即可。
+const RECENT_CAPACITY: usize = 2000;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -68,11 +81,24 @@ impl Level {
 /// 推给前端的结构化日志行（camelCase 供 JS 直接用）。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct LogLine {
+pub struct LogLine {
+    seq: u64,
     ts: i64,
     level: String,
     source: String,
     message: String,
+}
+
+/// 前端 console 转发过来的一条日志。
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontendLog {
+    /// 前端产生日志的时刻（毫秒）。前端是批量发送的，不能用 Rust 收到时的时间，
+    /// 否则和 Rust 自己的日志交错时顺序会乱。
+    pub ts: i64,
+    pub level: String,
+    pub source: String,
+    pub message: String,
 }
 
 /// 在应用 setup 阶段调用：绑定 AppHandle、应用配置、打开/创建主日志文件。
@@ -103,13 +129,20 @@ pub fn init(app: AppHandle, cfg: &LogConfig) {
 }
 
 fn log(level: Level, source: &str, message: &str) {
+    log_at(level, source, message, None);
+}
+
+/// `ts_ms` 为 None 时取当前时间；前端转发的日志带着它自己的产生时刻。
+fn log_at(level: Level, source: &str, message: &str, ts_ms: Option<i64>) {
     // 级别过滤
     let current = Level::from_u8(CURRENT_LEVEL.load(Ordering::Relaxed));
     if (level as u8) < (current as u8) {
         return;
     }
 
-    let now = chrono::Local::now();
+    let now = ts_ms
+        .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
+        .unwrap_or_else(chrono::Local::now);
     let ts_ms = now.timestamp_millis();
     let level_str = level.as_str();
     let line = format!(
@@ -151,18 +184,43 @@ fn log(level: Level, source: &str, message: &str) {
         eprint!("{}", line);
     }
 
-    // 3) 推事件（日志窗口监听 app-log）
-    if let Some(app) = APP.get() {
-        let _ = app.emit(
-            "app-log",
-            LogLine {
-                ts: ts_ms,
-                level: level_str.into(),
-                source: source.into(),
-                message: message.into(),
-            },
-        );
+    let entry = LogLine {
+        seq: SEQ.fetch_add(1, Ordering::Relaxed) + 1,
+        ts: ts_ms,
+        level: level_str.into(),
+        source: source.into(),
+        message: message.into(),
+    };
+
+    // 3) 进环形缓冲，供日志窗口打开时补齐
+    {
+        let mut recent = RECENT
+            .get_or_init(|| Mutex::new(VecDeque::with_capacity(RECENT_CAPACITY)))
+            .lock();
+        if recent.len() >= RECENT_CAPACITY {
+            recent.pop_front();
+        }
+        recent.push_back(entry.clone());
     }
+
+    // 4) 推事件（日志窗口监听 app-log）
+    if let Some(app) = APP.get() {
+        let _ = app.emit("app-log", entry);
+    }
+}
+
+/// 最近的日志（按序号升序），日志窗口打开时调用一次补齐历史。
+pub fn recent() -> Vec<LogLine> {
+    RECENT
+        .get()
+        .map(|r| r.lock().iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// 写入一条前端转发来的日志。未知级别按 INFO 处理。
+pub fn frontend(entry: FrontendLog) {
+    let level = Level::from_str(&entry.level).unwrap_or(Level::Info);
+    log_at(level, &entry.source, &entry.message, Some(entry.ts));
 }
 
 /// 轮转：调用前必须已 drop 旧文件句柄。filesync.log → .1, .1 → .2, … 删除第 max_backup+1 个。

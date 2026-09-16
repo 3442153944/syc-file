@@ -2,9 +2,10 @@
 // 网络监控：实时上/下行速率 + 累计流量 + 网卡明细 + WS 连接概况。数据经 WS 推送。
 import { computed, ref, watch } from 'vue'
 import {
-  NCard, NGrid, NGi, NStatistic, NSpace, NText, NTag, NDataTable, NEmpty,
+  NCard, NGrid, NGi, NStatistic, NSpace, NText, NTag, NDataTable, NEmpty, NButton, useMessage,
 } from 'naive-ui'
 import { useMonitor, fmtBytes, fmtRate } from '@/api/monitor/useMonitor'
+import { netState, probeAll, switchNode, healthOf } from '@/api/net'
 
 const { network, connected } = useMonitor(2)
 
@@ -36,6 +37,47 @@ function sparkline(data: number[]): string {
 }
 
 const interfaces = computed(() => network.value?.interfaces ?? [])
+
+// ── 节点灾备概览 ────────────────────────────────────────────────────────────
+// 客户端自己的出网链路状态（和上面那些服务端指标是两回事）：当前走哪个节点、
+// 各节点最近一次探测的延迟。默认 15 分钟巡检一次，这里可以手动立刻测一遍。
+const message = useMessage()
+const probing = ref(false)
+
+const nodeRows = computed(() =>
+  netState.nodes.map((n) => {
+    const h = healthOf(n.id)
+    return {
+      id: n.id,
+      name: n.name,
+      url: n.server_url,
+      active: n.id === netState.activeId,
+      reachable: h?.reachable ?? null,
+      latency: h?.reachable ? `${h.latencyMs} ms` : h ? (h.message || '不可达') : '未检测',
+      checkedAt: h?.checkedAt ? new Date(h.checkedAt).toLocaleTimeString() : '—',
+    }
+  }),
+)
+
+async function handleProbe() {
+  probing.value = true
+  try {
+    await probeAll()
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    probing.value = false
+  }
+}
+
+async function handleSwitch(id: string) {
+  try {
+    await switchNode(id)
+    message.success(`已切换到 ${netState.activeName}`)
+  } catch (e) {
+    message.error(String(e))
+  }
+}
 
 const nicColumns = [
   { title: '网卡', key: 'name' },
@@ -69,6 +111,36 @@ const nicColumns = [
         <NCard size="small"><NStatistic label="活动连接" :value="String(network?.active_connections ?? 0)" /></NCard>
       </NGi>
     </NGrid>
+
+    <NCard size="small" style="margin-top: 12px">
+      <template #header>
+        <NSpace align="center" :size="8">
+          <span>节点灾备</span>
+          <NTag size="small" :type="netState.offline ? 'error' : 'success'" :bordered="false" round>
+            {{ netState.offline ? '全部不可达' : netState.activeName || '未选择' }}
+          </NTag>
+          <NText depth="3" style="font-size: 12px">
+            自动切换{{ netState.autoFailover ? '已开启' : '已关闭' }} · 每 {{ netState.intervalMinutes }} 分钟巡检
+          </NText>
+        </NSpace>
+      </template>
+      <template #header-extra>
+        <NButton size="tiny" :loading="probing" @click="handleProbe">立即检测</NButton>
+      </template>
+      <NEmpty v-if="!nodeRows.length" description="尚未加载节点列表" size="small" />
+      <div v-else class="node-grid">
+        <div v-for="row in nodeRows" :key="row.id" class="node-item" :class="{ active: row.active }">
+          <div class="node-head">
+            <span class="node-dot" :class="row.reachable === null ? 'unknown' : row.reachable ? 'ok' : 'bad'" />
+            <span class="node-name">{{ row.name }}</span>
+            <NTag v-if="row.active" size="tiny" type="info" :bordered="false">当前</NTag>
+          </div>
+          <div class="node-meta">{{ row.url }}</div>
+          <div class="node-meta">{{ row.latency }} · {{ row.checkedAt }}</div>
+          <NButton v-if="!row.active" size="tiny" quaternary @click="handleSwitch(row.id)">切换到此节点</NButton>
+        </div>
+      </div>
+    </NCard>
 
     <NCard size="small" title="速率曲线" style="margin-top: 12px">
       <div class="chart">
@@ -119,5 +191,48 @@ const nicColumns = [
 }
 .dot.send {
   background: #f0a020;
+}
+.node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.node-item {
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.node-item.active {
+  border-color: #409eff;
+  background: rgba(64, 158, 255, 0.06);
+}
+.node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.node-name {
+  font-size: 13px;
+}
+.node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c0c4cc;
+  flex-shrink: 0;
+}
+.node-dot.ok {
+  background: #67c23a;
+}
+.node-dot.bad {
+  background: #f56c6c;
+}
+.node-meta {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

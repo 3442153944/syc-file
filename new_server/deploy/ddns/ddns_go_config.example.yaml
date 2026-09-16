@@ -1,0 +1,42 @@
+# ddns-go 配置模板 —— 复制为 ddns_go_config.yaml 后填入真实值。
+# 真实文件不进版本库（dns.id / dns.secret 是 Cloudflare API 凭证，
+# user.username / user.password 是 web 面板 :9876 的登录口令）。
+#
+# ipv4.enable = false 是故意的：A 记录固定指向 VPS 走 frp 隧道，不需要动态更新；
+# 只有家宽 IPv6 前缀会变，所以只更新 AAAA。
+
+dnsconf:
+    - name: ""
+      ipv4:
+        enable: false
+        gettype: url
+        url: https://ddns.oray.com/checkip, https://ip.3322.net, https://4.ipw.cn, https://v4.yinghualuo.cn/bejson, https://myip.ipip.net
+        netinterface: 以太网
+        cmd: ""
+        domains:
+            - ddns.sunyuanling.cn
+      ipv6:
+        enable: true
+        gettype: netInterface
+        url: https://speed.neu6.edu.cn/getIP.php, https://v6.ident.me, https://6.ipw.cn, https://v6.yinghualuo.cn/bejson
+        netinterface: 以太网
+        cmd: ""
+        ipv6reg: ""
+        domains:
+            - ddns.sunyuanling.cn
+      dns:
+        name: cloudflare
+        id: "<id>"
+        secret: "<secret>"
+        extparam: ""
+      ttl: ""
+      httpinterface: ""
+user:
+    username: "<username>"
+    password: "<password>"
+webhook:
+    webhookurl: ""
+    webhookrequestbody: ""
+    webhookheaders: ""
+notallowwanaccess: false
+lang: en
