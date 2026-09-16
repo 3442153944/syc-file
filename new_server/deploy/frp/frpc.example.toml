@@ -1,0 +1,30 @@
+# frpc 配置模板 —— 复制为 frpc.toml / frpc_akile.toml 后填入真实值。
+# 真实文件不进版本库（auth.token 是 frps 的接入凭证，泄露等于别人能往你的 frps 挂隧道）。
+
+serverAddr = "<frps 服务器 IP>"
+serverPort = 7000
+auth.method = "token"
+auth.token = "<与 frps.toml 里一致的 token>"
+
+# 建议打开日志：进程被托管在后端里，出问题时这是唯一线索
+# （supervisor 只收 stdout/stderr，frpc 自己写的日志更完整）
+# log.to = "./frpc.log"
+# log.level = "info"
+# log.maxDays = 7
+
+# 本机 nginx 的 80/443 暴露到 VPS 上。remotePort 是 VPS 侧对外端口：
+# 主入口用 443（ddns.sunyuanling.cn），东京那条 443 被占用所以走 8443
+# （因此客户端地址必须写 jp.sunyuanling.cn:8443）。
+[[proxies]]
+name = "<唯一的 proxy 名，同一个 frps 上不能重复>"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 80
+remotePort = 18080
+
+[[proxies]]
+name = "<唯一的 proxy 名>"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 443
+remotePort = 443

@@ -8,6 +8,7 @@ mod config;
 mod device;
 mod hotkey_codec;
 mod logger;
+mod net;
 mod sync_engine;
 mod upload_worker;
 mod watcher;
@@ -17,7 +18,7 @@ use api::client::ApiClient;
 use api::file::{api as file_api, params::*, response::*};
 use api::sync::{api as sync_api, params::*, response::*};
 use api::user::{api as user_api, params::*, response::*};
-use config::{init_sync_config, FolderMapping, SharedSyncConfig, SyncConfig};
+use config::{init_sync_config, FolderMapping, ServerNode, SharedSyncConfig, SyncConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -105,8 +106,15 @@ fn set_sync_config(
     config: State<SharedSyncConfig>,
 ) {
     let mut cfg = config.write();
-    cfg.server_url = server_url;
-    cfg.ws_url = ws_url;
+    // 服务器地址统一走节点体系：地址属于已知节点就激活它，否则收编成一条自定义节点。
+    // 这样「改地址」和「切节点」是同一件事，灾备模块永远知道当前在哪个节点上。
+    let switched = if server_url.trim().is_empty() {
+        false
+    } else {
+        let before = cfg.server_url.clone();
+        cfg.use_server_url(&server_url, &ws_url);
+        before != cfg.server_url
+    };
     // 只有明确传了非空 token 才覆盖：ServerSettings.vue 只是改服务器地址，不该动登录态；
     // 之前这里无条件用调用方传来的空字符串覆盖，导致每次改地址都把已登录的 token 清空。
     if let Some(t) = token {
@@ -131,6 +139,86 @@ fn set_sync_config(
         "config",
         format!("同步配置已更新并保存（日志级别: {}）", cfg.log.level),
     );
+    drop(cfg); // net::on_nodes_changed 还要拿写锁，parking_lot 的锁不可重入
+    net::on_nodes_changed(switched);
+}
+
+// ── 顶部原生菜单栏 ───────────────────────────────────────────────────────────
+//
+// 菜单栏是唯一「任何界面都在」的入口——包括还没登录的登录页，所以节点切换放在这里：
+// 打不开服务器的时候用户照样能换个节点再登录。
+// 节点表会变（增删改、自动灾备切过去），所以菜单是每次重建的，不是建一次就完事。
+
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let open_logs = MenuItemBuilder::with_id("open_logs", "打开日志窗口")
+        .accelerator("CmdOrCtrl+Alt+T")
+        .build(app)?;
+    let tools = SubmenuBuilder::new(app, "工具").item(&open_logs).build()?;
+
+    let status = net::status();
+    let mut network = SubmenuBuilder::new(app, "网络");
+    for node in &status.nodes {
+        // 标题带上最近一次探测结果，用户不点进设置也知道哪条路通
+        let suffix = match status.health.iter().find(|h| h.id == node.id) {
+            Some(h) if h.reachable => format!("（{} ms）", h.latency_ms),
+            Some(h) if h.message.is_empty() => "（不可达）".to_string(),
+            Some(h) => format!("（{}）", h.message),
+            None => "（未检测）".to_string(),
+        };
+        let item = CheckMenuItemBuilder::with_id(
+            format!("node:{}", node.id),
+            format!("{} {}", node.name, suffix),
+        )
+        .checked(node.id == status.active_id)
+        .build(app)?;
+        network = network.item(&item);
+    }
+    let auto = CheckMenuItemBuilder::with_id("net_auto", "自动灾备切换")
+        .checked(status.auto_failover)
+        .build(app)?;
+    let probe = MenuItemBuilder::with_id("net_probe", "立即检测所有节点").build(app)?;
+    let settings = MenuItemBuilder::with_id("net_settings", "网络节点设置…").build(app)?;
+    let network = network
+        .separator()
+        .item(&auto)
+        .item(&probe)
+        .separator()
+        .item(&settings)
+        .build()?;
+
+    MenuBuilder::new(app).item(&tools).item(&network).build()
+}
+
+/// 节点表/健康状态变了之后重建菜单（勾选项、延迟数字都要跟着变）。
+///
+/// 菜单是原生控件，Windows 上必须在主线程上建和改，而调用方多半是 Tauri 命令或
+/// 后台探测任务（都在别的线程），所以统一丢回主线程执行。
+/// 失败只记日志：菜单没刷新不影响功能，不值得把命令整体报错。
+fn refresh_app_menu(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    let post = app.run_on_main_thread(move || match build_app_menu(&handle) {
+        Ok(menu) => {
+            if let Err(e) = handle.set_menu(menu) {
+                logger::warn("menu", format!("刷新菜单失败: {}", e));
+            }
+        }
+        Err(e) => logger::warn("menu", format!("构建菜单失败: {}", e)),
+    });
+    if let Err(e) = post {
+        logger::warn("menu", format!("刷新菜单调度失败: {}", e));
+    }
+}
+
+/// 菜单里点「网络节点设置…」：把主窗口叫出来并让前端弹出设置面板。
+fn open_network_settings(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        let _ = w.emit("open-network-settings", ());
+    }
 }
 
 // ── 日志窗口 ─────────────────────────────────────────────────────────────────
@@ -154,6 +242,20 @@ fn open_log_window(app: &tauri::AppHandle) {
 #[tauri::command]
 fn open_log_window_cmd(app: tauri::AppHandle) {
     open_log_window(&app);
+}
+
+/// 前端 console.* 批量转发进统一日志（写文件 + 推日志窗口）。见前端 utils/consoleBridge.ts。
+#[tauri::command]
+fn log_from_frontend(entries: Vec<logger::FrontendLog>) {
+    for e in entries {
+        logger::frontend(e);
+    }
+}
+
+/// 日志窗口打开时调用：取内存里最近的日志补齐，否则窗口打开前的日志一条都看不到。
+#[tauri::command]
+fn get_recent_logs() -> Vec<logger::LogLine> {
+    logger::recent()
 }
 
 // ── 粘贴快传：悬浮窗 + 全局快捷键 ──────────────────────────────────────────────
@@ -427,6 +529,26 @@ async fn login(
     config.write().token = data.token.clone();
     apply_quick_share_user_settings(&app, &config, &data.user);
     Ok(data)
+}
+
+/// 把前端持有的 token 交还给 Rust（仅当 Rust 侧还没有 token 时）。
+///
+/// 为什么需要：token 刻意不写进 config.yml（避免明文凭证），应用一重启 Rust 侧就是空的，
+/// verify 必然失败 —— 于是即使 token 还在有效期内，桌面端每次启动都得重新登录，
+/// 而 Web 端 token 有效就直接进去了。前端 localStorage 里本来就一直存着这个 token，
+/// 启动时交还给 Rust 再走 verify，就和 Web 端行为一致：有效就进，无效就去登录页。
+///
+/// 只在 Rust 侧为空时才写入：已登录状态下不该被前端的值覆盖（比如刚切换了账号）。
+#[tauri::command]
+fn restore_token(token: String, config: State<SharedSyncConfig>) {
+    let token = token.trim();
+    if token.is_empty() {
+        return;
+    }
+    let mut cfg = config.write();
+    if cfg.token.is_empty() {
+        cfg.token = token.to_string();
+    }
 }
 
 /// 用当前 config 里的 token 验证登录态，同步把账号里的粘贴快传设置应用到本地。
@@ -962,6 +1084,156 @@ async fn api_request(
     Ok(resp.data.unwrap_or(serde_json::Value::Null))
 }
 
+// ── 网络节点 / 自动灾备 ───────────────────────────────────────────────────────
+//
+// 桌面端所有出网请求（HTTP + WS）都走 net.rs 管的「当前激活节点」，这里只是把
+// 节点表的增删改查和探测暴露给前端与原生菜单栏。切换是瞬时的：在途请求会被
+// 世代号作废，不必等它们跑完（见 net.rs 顶部注释）。
+
+/// 当前网络状态：节点列表 + 各节点最近一次探测结果 + 激活节点 + 灾备设置。
+#[tauri::command]
+fn get_network_status() -> net::NetStatus {
+    net::status()
+}
+
+/// 立即探测所有节点（「立即检测」按钮 / 菜单项）。
+#[tauri::command]
+async fn probe_server_nodes() -> Result<net::NetStatus, String> {
+    net::probe_all().await;
+    Ok(net::status())
+}
+
+/// 手动切到指定节点。
+#[tauri::command]
+fn switch_server_node(node_id: String) -> Result<net::NetStatus, String> {
+    net::switch_to(&node_id, "用户手动切换")?;
+    Ok(net::status())
+}
+
+/// 新增或修改节点。`id` 为空表示新增；`activate` 为 true 时保存完顺手切过去。
+#[tauri::command]
+fn save_server_node(
+    id: Option<String>,
+    name: String,
+    server_url: String,
+    ws_url: Option<String>,
+    activate: Option<bool>,
+    config: State<SharedSyncConfig>,
+) -> Result<net::NetStatus, String> {
+    let server_url = server_url.trim().trim_end_matches('/').to_string();
+    if server_url.is_empty() {
+        return Err("服务器地址不能为空".into());
+    }
+    if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
+        return Err("服务器地址需以 http:// 或 https:// 开头".into());
+    }
+    let ws = match ws_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(w) => w.trim_end_matches('/').to_string(),
+        None => ServerNode::derive_ws_url(&server_url),
+    };
+    let name = if name.trim().is_empty() {
+        server_url.clone()
+    } else {
+        name.trim().to_string()
+    };
+
+    // touched_active：改的是当前正在用的节点 → 地址变了就得掐断在途连接，
+    // 否则 WS 会一直挂在老地址上直到它自己断开
+    let (node_id, touched_active) = {
+        let mut cfg = config.write();
+        match id {
+            Some(id) => {
+                let is_active = cfg.active_node_id == id;
+                let node = cfg
+                    .nodes
+                    .iter_mut()
+                    .find(|n| n.id == id)
+                    .ok_or_else(|| format!("节点不存在: {}", id))?;
+                let addr_changed = node.server_url != server_url || node.ws_url != ws;
+                node.name = name;
+                node.server_url = server_url.clone();
+                node.ws_url = ws.clone();
+                if is_active {
+                    cfg.server_url = server_url.clone();
+                    cfg.ws_url = ws.clone();
+                }
+                (id, is_active && addr_changed)
+            }
+            None => {
+                let new_id = format!("custom-{}", uuid::Uuid::new_v4());
+                cfg.nodes.push(ServerNode {
+                    id: new_id.clone(),
+                    name,
+                    server_url,
+                    ws_url: ws,
+                    builtin: false,
+                });
+                (new_id, false)
+            }
+        }
+    };
+    net::on_nodes_changed(touched_active);
+    if activate.unwrap_or(false) {
+        net::switch_to(&node_id, "用户手动切换")?;
+    }
+    Ok(net::status())
+}
+
+/// 删除自定义节点。内置节点不给删（灾备总得有备胎），只能改地址。
+#[tauri::command]
+fn remove_server_node(
+    node_id: String,
+    config: State<SharedSyncConfig>,
+) -> Result<net::NetStatus, String> {
+    let fallback = {
+        let mut cfg = config.write();
+        let node = cfg
+            .nodes
+            .iter()
+            .find(|n| n.id == node_id)
+            .cloned()
+            .ok_or_else(|| format!("节点不存在: {}", node_id))?;
+        if node.builtin {
+            return Err("内置节点不能删除，可以修改它的地址".into());
+        }
+        if cfg.nodes.len() <= 1 {
+            return Err("至少要保留一个节点".into());
+        }
+        cfg.nodes.retain(|n| n.id != node_id);
+        if cfg.active_node_id == node_id {
+            cfg.nodes.first().map(|n| n.id.clone())
+        } else {
+            None
+        }
+    };
+    net::on_nodes_changed(false);
+    // 删掉的正是当前节点：立刻顶上第一个，别让 server_url 悬空
+    if let Some(next) = fallback {
+        net::switch_to(&next, "当前节点已被删除")?;
+    }
+    Ok(net::status())
+}
+
+/// 灾备开关与巡检间隔。间隔单位分钟，默认 15。
+#[tauri::command]
+fn set_failover_settings(
+    auto_failover: Option<bool>,
+    interval_minutes: Option<u64>,
+    config: State<SharedSyncConfig>,
+) -> net::NetStatus {
+    {
+        let mut cfg = config.write();
+        if let Some(v) = auto_failover {
+            cfg.auto_failover = v;
+        }
+        if let Some(m) = interval_minutes {
+            cfg.health_interval_minutes = m.clamp(1, 24 * 60);
+        }
+    }
+    net::on_nodes_changed(false);
+    net::status()
+}
+
 // ── 剪贴板同步 ───────────────────────────────────────────────────────────────
 
 /// 当前剪贴板同步开关状态。
@@ -1118,13 +1390,13 @@ pub fn run() {
                 ),
             );
 
-            // 顶部菜单栏：一级菜单「工具」→「打开日志窗口」(Ctrl+Alt+T)
-            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-            let open_logs = MenuItemBuilder::with_id("open_logs", "打开日志窗口")
-                .accelerator("CmdOrCtrl+Alt+T")
-                .build(app)?;
-            let tools = SubmenuBuilder::new(app, "工具").item(&open_logs).build()?;
-            let menu = MenuBuilder::new(app).item(&tools).build()?;
+            // 网络灾备：注册节点表 + 起低频巡检（默认 15 分钟确认一次链路存活）。
+            // 必须在菜单之前——菜单要读节点列表来画切换项。
+            net::init(app.handle().clone(), shared_config.clone());
+            net::start_health_loop();
+
+            // 顶部菜单栏：「工具」→ 日志窗口；「网络」→ 节点切换 / 检测 / 设置
+            let menu = build_app_menu(app.handle())?;
             app.set_menu(menu)?;
 
             // 粘贴快传：本地已经知道快捷键（上次登录/verify 写回过）就直接注册，
@@ -1161,8 +1433,43 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "open_logs" {
-                open_log_window(app);
+            let id = event.id().as_ref().to_string();
+            match id.as_str() {
+                "open_logs" => open_log_window(app),
+                "net_settings" => open_network_settings(app),
+                "net_probe" => {
+                    tauri::async_runtime::spawn(async {
+                        net::probe_all().await;
+                    });
+                }
+                "net_auto" => {
+                    // 勾选项由用户点击翻转，这里把翻转后的值写回配置（重建菜单会按配置重新勾）
+                    let cfg = app.state::<SharedSyncConfig>();
+                    let next = {
+                        let mut c = cfg.write();
+                        c.auto_failover = !c.auto_failover;
+                        c.auto_failover
+                    };
+                    net::on_nodes_changed(false);
+                    logger::info(
+                        "net",
+                        format!("自动灾备切换已{}", if next { "开启" } else { "关闭" }),
+                    );
+                }
+                _ => {
+                    if let Some(node_id) = id.strip_prefix("node:") {
+                        let node_id = node_id.to_string();
+                        // 切换本身是同步的，但切完要重新探测一次新节点，所以扔到后台
+                        tauri::async_runtime::spawn(async move {
+                            match net::switch_to(&node_id, "菜单栏手动切换") {
+                                Ok(_) => {
+                                    net::check_active_and_failover("手动切换后确认").await;
+                                }
+                                Err(e) => logger::error("net", format!("切换节点失败: {}", e)),
+                            }
+                        });
+                    }
+                }
             }
         })
         .on_window_event(|window, event| {
@@ -1186,6 +1493,8 @@ pub fn run() {
             get_device_id,
             // 日志
             open_log_window_cmd,
+            log_from_frontend,
+            get_recent_logs,
             // 粘贴快传
             set_quick_paste_hotkey,
             // 记住密码
@@ -1201,6 +1510,13 @@ pub fn run() {
             is_ws_connected,
             // 通用 API 代理（管理域等新接口统一走它）
             api_request,
+            // 网络节点 / 自动灾备
+            get_network_status,
+            probe_server_nodes,
+            switch_server_node,
+            save_server_node,
+            remove_server_node,
+            set_failover_settings,
             // 剪贴板同步
             get_clipboard_settings,
             set_clipboard_settings,
@@ -1211,6 +1527,7 @@ pub fn run() {
             unsubscribe_monitor,
             // 用户域
             login,
+            restore_token,
             verify,
             register,
             reset_password,

@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import {ref, onMounted, onUnmounted, nextTick} from 'vue'
+import {ref, computed, onMounted, onUnmounted, nextTick} from 'vue'
 import {isTauri} from '@tauri-apps/api/core'
 import {getCurrentWindow} from '@tauri-apps/api/window'
-import {NSpin, useMessage} from 'naive-ui'
+import {NProgress, useMessage} from 'naive-ui'
 import {useQuickPaste} from '@/composables/useQuickPaste'
+import {formatBytes, formatSpeed, formatEta} from '@/utils/speedMeter'
 
 const message = useMessage()
 
@@ -19,14 +20,12 @@ if (isTauri()) {
   }
 }
 
-const resultUrl = ref('')
-const errorMsg = ref('')
 const containerRef = ref<HTMLElement | null>(null)
 
-const {uploading, handlePasteEvent} = useQuickPaste((result, err) => {
+// 进度、结果、错误都取自共享的 currentTask：粘贴无论被这个页面还是全局监听接住，
+// 这里都能显示（见 useQuickPaste 顶部注释）。回调只负责本页发起时的提示和悬浮窗自动关闭。
+const {handlePasteEvent, currentTask, currentUrl} = useQuickPaste((result, err) => {
   if (result) {
-    resultUrl.value = result.url
-    errorMsg.value = ''
     message.success('已上传，链接已复制到剪贴板')
     if (isFloating.value) {
       setTimeout(() => {
@@ -38,9 +37,28 @@ const {uploading, handlePasteEvent} = useQuickPaste((result, err) => {
       }, 2500)
     }
   } else {
-    errorMsg.value = err instanceof Error ? err.message : String(err)
-    message.error(errorMsg.value)
+    message.error(err instanceof Error ? err.message : String(err))
   }
+})
+
+const task = computed(() => currentTask.value)
+const uploading = computed(() => task.value?.status === 'uploading')
+
+const percent = computed(() => {
+  const t = task.value
+  if (!t || !t.total) return 0
+  return Math.min(100, Math.floor((t.sent / t.total) * 100))
+})
+
+/** 进度条下方的状态文字：准备中 / 传输中（速度+剩余）/ 服务器处理中 */
+const phaseText = computed(() => {
+  const t = task.value
+  if (!t) return ''
+  if (!t.started) return '准备中…'
+  // 字节发完 ≠ 完成：服务端还要落盘、生成分享链接
+  if (t.total > 0 && t.sent >= t.total) return '已发送，服务器处理中…'
+  const eta = formatEta(t.total - t.sent, t.speed)
+  return `${formatSpeed(t.speed)}${eta ? ` · 剩余 ${eta}` : ''}`
 })
 
 // 悬浮窗用的是带原生标题栏的普通窗口，关闭/最小化/拖动都是操作系统自己处理的原生行为，
@@ -76,22 +94,47 @@ onUnmounted(() => {
       tabindex="0"
       @paste="handlePasteEvent"
   >
-    <n-spin :show="uploading">
-      <div class="paste-target">
-        <div class="icon">📋</div>
-        <template v-if="resultUrl">
-          <div class="hint">已上传，链接已复制到剪贴板</div>
-          <div class="url">{{ resultUrl }}</div>
-        </template>
-        <template v-else-if="errorMsg">
-          <div class="hint error">{{ errorMsg }}</div>
-        </template>
-        <template v-else>
-          <div class="hint">按 Ctrl+V 粘贴文件</div>
-          <div class="sub">立即上传并生成分享链接{{ isFloating ? '，Esc 取消' : '' }}</div>
-        </template>
-      </div>
-    </n-spin>
+    <div class="paste-target">
+      <div class="icon">📋</div>
+
+      <!-- 上传中：进度 + 速度 -->
+      <template v-if="task && uploading">
+        <div class="hint name" :title="task.name">{{ task.name }}</div>
+        <n-progress
+            class="bar"
+            type="line"
+            :percentage="percent"
+            :height="10"
+            :border-radius="5"
+            :processing="true"
+            indicator-placement="inside"
+        />
+        <div class="stats">
+          <span>{{ formatBytes(task.sent) }} / {{ formatBytes(task.total) }}</span>
+          <span>{{ phaseText }}</span>
+        </div>
+      </template>
+
+      <template v-else-if="task && task.status === 'done'">
+        <div class="hint">已上传，链接已复制到剪贴板</div>
+        <div v-if="currentUrl" class="url">{{ currentUrl }}</div>
+        <div class="sub">
+          {{ formatBytes(task.total) }}
+          <template v-if="task.speed > 0"> · 平均 {{ formatSpeed(task.speed) }}</template>
+        </div>
+        <div class="sub">继续按 Ctrl+V 粘贴下一个</div>
+      </template>
+
+      <template v-else-if="task && task.status === 'error'">
+        <div class="hint error">{{ task.error }}</div>
+        <div class="sub">再次按 Ctrl+V 重试</div>
+      </template>
+
+      <template v-else>
+        <div class="hint">按 Ctrl+V 粘贴文件</div>
+        <div class="sub">立即上传并生成分享链接{{ isFloating ? '，Esc 取消' : '' }}</div>
+      </template>
+    </div>
   </div>
 </template>
 
@@ -109,23 +152,59 @@ onUnmounted(() => {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
   outline: none;
 }
-.quick-paste-container.floating {
-  min-height: 100vh;
-  border-radius: 0;
-  box-shadow: none;
-  padding: 16px;
-}
+
 .paste-target {
   text-align: center;
   border: 2px dashed #d0d5db;
   border-radius: 8px;
   padding: 32px 24px;
   min-width: 280px;
+  width: min(440px, 100%);
 }
-.icon { font-size: 32px; margin-bottom: 8px; }
-.hint { font-size: 15px; color: #303133; }
-.hint.error { color: #d03050; word-break: break-all; }
-.sub { font-size: 13px; color: #909399; margin-top: 4px; }
+
+.icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.hint {
+  font-size: 15px;
+  color: #303133;
+}
+
+.hint.error {
+  color: #d03050;
+  word-break: break-all;
+}
+
+.sub {
+  font-size: 13px;
+  color: #909399;
+  margin-top: 4px;
+}
+
+.name {
+  max-width: 360px;
+  margin: 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar {
+  margin-top: 14px;
+}
+
+.stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909399;
+  font-variant-numeric: tabular-nums;
+}
+
 .url {
   margin-top: 10px;
   font-size: 12px;

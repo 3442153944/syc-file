@@ -16,7 +16,7 @@ android {
         minSdk = 26 // POI 5.x / log4j-api 用 invoke-polymorphic（MethodHandle），Android dex 仅在 API≥26 支持
         targetSdk = 37
         versionCode = 1
-        versionName = "1.1.1"
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -8,6 +8,7 @@
  */
 
 import {isTauri} from '@tauri-apps/api/core'
+import {baseUrl} from './net'
 
 const KEY_SERVER = 'filesync_server_url'
 const KEY_TOKEN = 'filesync_token'
@@ -16,20 +17,16 @@ const KEY_DEVICE = 'filesync_device_id'
 // ── server URL ────────────────────────────────────────────────────────────────
 
 export function getServerUrl(): string {
-    const savedUrl = localStorage.getItem(KEY_SERVER)
-    if (savedUrl) return savedUrl
-
-    // 1. Tauri 客户端模式：继续走本地 8991 绝对路径
-    if (isTauri()) {
-        return 'http://localhost:8991'
-    }
-
-    // 2. 网页/Web 模式：直接返回相对路径 "/file"
-    // 这样浏览器发请求就会变成: 当前域名/file/api/login
-    // 完美触发你 Nginx 的 location /file/ 代理
-    return '/file'
+    // 地址由 net.ts 的「当前激活节点」决定（Tauri 下与 Rust 侧是同一个节点，
+    // Web 下默认相对路径 /file 交给 nginx 反代）。节点切换后这里自动跟着变，
+    // 所以每次用都要现取，别缓存到模块变量里。
+    return baseUrl()
 }
 
+/**
+ * 写入服务器地址。真正的节点切换请用 net.ts 的 switchNode/saveNode；这里只更新
+ * 兜底值（net.ts 初始化完成前、以及 Rust 回传配置时用来对齐 localStorage）。
+ */
 export function setServerUrl(url: string): void {
     localStorage.setItem(KEY_SERVER, url.trimEnd().replace(/\/$/, ''))
 }

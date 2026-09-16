@@ -6,10 +6,14 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+	"syc-file/internal/supervisor"
 )
 
 // Conf 全局配置实例
 var Conf = new(Config)
+
+// Version 服务端版本号，随 /v1/ping 回给客户端，用于客户端比对各节点版本是否一致。
+const Version = "1.0.0"
 
 // Config 根节点配置，完全对齐你的 YAML
 type Config struct {
@@ -24,6 +28,7 @@ type Config struct {
 	Share      ShareConfig      `mapstructure:"share"`
 	QuickShare QuickShareConfig `mapstructure:"quick_share"`
 	Sync       SyncConfig       `mapstructure:"sync"`
+	Supervisor supervisor.Config `mapstructure:"supervisor"`
 }
 
 // DBConfig 数据库配置 (注意：这里将 uri 拆分为 host 和 port 以适配 GORM)
@@ -65,6 +70,9 @@ type AuthConfig struct {
 // ServerConfig 服务器配置
 type ServerConfig struct {
 	Port int `mapstructure:"port"`
+	// Name 节点名，会在 /v1/ping 里回给客户端。桌面端多节点灾备靠它显示
+	// 「当前连的是哪个入口」；留空则退回主机名。
+	Name string `mapstructure:"name"`
 }
 
 // FileConfig 文件存储配置

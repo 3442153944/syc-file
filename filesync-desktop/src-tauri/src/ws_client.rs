@@ -151,6 +151,10 @@ async fn run_ws_loop(
             ws_url.trim_end_matches('/'), token, device_id, urlenc(&device_name)
         );
 
+        // 记下本次会话建立时的节点世代号：切节点时 handle_session 会立刻返回，
+        // 不用等这条挂在旧地址上的连接自己超时断开（见 net.rs）。
+        let epoch = crate::net::epoch();
+
         match connect_async(&url).await {
             Ok((ws_stream, _)) => {
                 logger::info("ws", "已连接到服务器");
@@ -158,7 +162,7 @@ async fn run_ws_loop(
                 // 装上本会话的出站通道，供前端命令（订阅监控等）往 WS 发消息
                 let (out_tx, out_rx) = mpsc::unbounded_channel::<Message>();
                 *ws_outbound().lock() = Some(out_tx);
-                handle_session(ws_stream, out_rx, &config, &upload_tx, &app).await;
+                handle_session(ws_stream, out_rx, &config, &upload_tx, &app, epoch).await;
                 // 会话结束：清掉出站通道，之后的 ws_send_text 会返回 false
                 *ws_outbound().lock() = None;
                 logger::warn("ws", "连接断开，正在重连…");
@@ -167,9 +171,15 @@ async fn run_ws_loop(
             Err(e) => {
                 logger::error("ws", format!("连接失败: {}", e));
                 emit_ws_status(&app, false, &format!("连接失败: {}", e));
+                // 连不上有可能是这个节点挂了，交给灾备模块去探测决定要不要换节点
+                crate::net::report_transport_failure(&format!("WS 连接失败: {}", e));
             }
         }
 
+        // 刚切过节点就别等这 3 秒了，用户正盯着「连接中」看
+        if crate::net::epoch() != epoch {
+            continue;
+        }
         sleep(RECONNECT_INTERVAL).await;
     }
 }
@@ -182,6 +192,7 @@ async fn handle_session(
     config: &SharedSyncConfig,
     upload_tx: &mpsc::Sender<UploadTask>,
     app: &AppHandle,
+    epoch: u64,
 ) {
     catch_up::catch_up_all_folders(config, upload_tx, app).await;
     // 断线重连后 connID 变了，服务端旧订阅已失效——重新补发一次监控订阅
@@ -203,6 +214,12 @@ async fn handle_session(
                     Some(frame) => { ws.send(frame).await.ok(); }
                     None => {} // 发送端全部 drop，理论上不会发生（静态持有）
                 }
+            }
+            // 节点被切走：这条连接打在旧地址上，继续留着只会让同步消息进错入口
+            _ = crate::net::wait_switch(epoch) => {
+                logger::info("ws", "节点已切换，断开旧连接并用新地址重连");
+                ws.send(Message::Close(None)).await.ok();
+                break;
             }
         }
     }

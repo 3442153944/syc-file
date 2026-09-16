@@ -18,6 +18,12 @@ export async function login(username: string, password: string): Promise<LoginDa
 
 export async function verify(): Promise<VerifyData> {
   if (isTauri()) {
+    // Rust 侧 token 不落盘，应用重启后是空的；把前端一直持有的 token 交还过去再校验，
+    // 这样和 Web 端一致：token 有效就直接进入，无效才回登录页。
+    // 用 'token' 而不是 platform 的 filesync_token：路由守卫、退出登录都以 'token' 为准，
+    // 退出后它被清掉，就不会被恢复回去。
+    const token = localStorage.getItem('token')
+    if (token) await invoke('restore_token', { token })
     return invoke<VerifyData>('verify')
   }
   return httpPost<VerifyData>('/user/verify')

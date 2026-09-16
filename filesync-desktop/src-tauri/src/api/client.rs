@@ -3,7 +3,8 @@
 // 对标 Android 的 Request.kt 单例：token 由调用方传入，不持有状态。
 // 所有方法自动拼 /v1 前缀；路由常量来自 api::routes。
 
-use reqwest::{multipart, Client, Response};
+use crate::net;
+use reqwest::{multipart, Client, RequestBuilder, Response};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -29,7 +30,14 @@ pub struct ApiClient {
     client: Client,
     base_url: String,
     token: String,
+    /// 构造这个 client 时的节点世代号。切节点会让它作废：在途请求立刻返回
+    /// NODE_SWITCHED，不用干等 TCP 超时（见 net.rs 顶部注释）。
+    epoch: u64,
 }
+
+/// 节点切换导致请求被主动放弃时的错误文案。调用方（尤其是重试逻辑）可以据此
+/// 判断「这不是服务端的错，是我们自己换路了」，直接重来一次即可。
+pub const NODE_SWITCHED: &str = "节点已切换，本次请求已取消";
 
 impl ApiClient {
     pub fn new(server_url: &str, token: &str) -> Self {
@@ -46,6 +54,27 @@ impl ApiClient {
             client,
             base_url: format!("{}/v1", server_url.trim_end_matches('/')),
             token: token.to_string(),
+            epoch: net::epoch(),
+        }
+    }
+
+    /// 统一出口：所有请求都从这里走，好让「切节点」能一刀切断在途请求，
+    /// 并把传输层失败上报给灾备模块去触发探测。
+    async fn exec<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<ApiResponse<T>, String> {
+        tokio::select! {
+            biased;
+            // 先看有没有切节点：切了就没必要再等这条注定打在旧地址上的请求
+            _ = net::wait_switch(self.epoch) => Err(NODE_SWITCHED.to_string()),
+            sent = req.send() => {
+                if let Err(e) = &sent {
+                    // 只有连不上/超时/TLS 这类传输层错误才值得怀疑节点；
+                    // HTTP 5xx 说明链路是通的，换节点解决不了问题
+                    if e.is_connect() || e.is_timeout() || e.is_request() {
+                        net::report_transport_failure(&e.to_string());
+                    }
+                }
+                send_and_parse(sent).await
+            }
         }
     }
 
@@ -63,7 +92,7 @@ impl ApiClient {
         if let Some(p) = params {
             req = req.query(p);
         }
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// POST JSON 请求
@@ -77,7 +106,7 @@ impl ApiClient {
             .post(self.url(path))
             .header("Token", &self.token)
             .json(body);
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// POST 无 body
@@ -89,7 +118,7 @@ impl ApiClient {
             .client
             .post(self.url(path))
             .header("Token", &self.token);
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// PUT JSON 请求
@@ -103,7 +132,7 @@ impl ApiClient {
             .put(self.url(path))
             .header("Token", &self.token)
             .json(body);
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// DELETE 请求
@@ -112,7 +141,7 @@ impl ApiClient {
             .client
             .delete(self.url(path))
             .header("Token", &self.token);
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// POST multipart 请求（文件上传专用）
@@ -126,7 +155,7 @@ impl ApiClient {
             .post(self.url(path))
             .header("Token", &self.token)
             .multipart(form);
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// POST 裸字节 body + query string（分片上传专用：upload_id/index 走 query，
@@ -147,7 +176,7 @@ impl ApiClient {
         for (k, v) in params {
             req = req.query(&[(*k, *v)]);
         }
-        send_and_parse(req.send().await).await
+        self.exec(req).await
     }
 
     /// 构建带 token 的完整 GET URL（用于下载、WS 等 token 需放 query string 的场景）
