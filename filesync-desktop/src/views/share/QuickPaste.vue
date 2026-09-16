@@ -152,12 +152,7 @@ onUnmounted(() => {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
   outline: none;
 }
-.quick-paste-container.floating {
-  min-height: 100vh;
-  border-radius: 0;
-  box-shadow: none;
-  padding: 16px;
-}
+
 .paste-target {
   text-align: center;
   border: 2px dashed #d0d5db;
@@ -166,10 +161,28 @@ onUnmounted(() => {
   min-width: 280px;
   width: min(440px, 100%);
 }
-.icon { font-size: 32px; margin-bottom: 8px; }
-.hint { font-size: 15px; color: #303133; }
-.hint.error { color: #d03050; word-break: break-all; }
-.sub { font-size: 13px; color: #909399; margin-top: 4px; }
+
+.icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.hint {
+  font-size: 15px;
+  color: #303133;
+}
+
+.hint.error {
+  color: #d03050;
+  word-break: break-all;
+}
+
+.sub {
+  font-size: 13px;
+  color: #909399;
+  margin-top: 4px;
+}
+
 .name {
   max-width: 360px;
   margin: 0 auto;
@@ -177,7 +190,11 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.bar { margin-top: 14px; }
+
+.bar {
+  margin-top: 14px;
+}
+
 .stats {
   display: flex;
   justify-content: space-between;
@@ -187,6 +204,7 @@ onUnmounted(() => {
   color: #909399;
   font-variant-numeric: tabular-nums;
 }
+
 .url {
   margin-top: 10px;
   font-size: 12px;

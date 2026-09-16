@@ -102,9 +102,10 @@ const handleLogin = async () => {
 
     // 登录成功后自动启动同步引擎
     try {
-      const { invoke } = await import('@tauri-apps/api/core')
+      const {invoke} = await import('@tauri-apps/api/core')
       await invoke('start_sync')
-    } catch { /* 未配置同步文件夹等正常情况 */ }
+    } catch { /* 未配置同步文件夹等正常情况 */
+    }
 
     await router.push({name: 'Home'})
   } catch (error) {
@@ -299,9 +300,5 @@ const handleResetPassword = () => {
   font-size: 12px;
   color: #999;
   margin: 0;
-}
-
-:deep(.n-input) {
-  border-radius: 8px !important;
 }
 </style>
