@@ -24,7 +24,7 @@ pub async fn poll_pending_tasks(config: &SharedSyncConfig) {
     if server_url.is_empty() || token.is_empty() {
         return;
     }
-    let client = ApiClient::new(&server_url, &token);
+    let client = ApiClient::new(&server_url, &token, &device_id);
     let tasks = match sync_api::list_pending_tasks(&client, &device_id).await {
         Ok(resp) if resp.is_ok() => resp.data.unwrap_or_default(),
         Ok(resp) => {

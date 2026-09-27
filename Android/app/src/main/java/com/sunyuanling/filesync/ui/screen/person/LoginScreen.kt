@@ -151,7 +151,8 @@ fun LoginScreen(
 
                             val result = UserApi.login(LoginParams(
                                 username = username,
-                                password = password
+                                password = password,
+                                deviceId = Request.deviceId()
                             ))
 
                             result.onSuccess { response ->

@@ -302,7 +302,10 @@ private suspend fun uploadUserInfo(
 
         val request = okhttp3.Request.Builder()
             .url("${Request.baseUrl}/user/update-info")
-            .apply { token?.let { header("Token", it) } }
+            .apply {
+                token?.let { header("Token", it) }
+                header("Device-Id", Request.deviceId())
+            }
             .post(multipartBuilder.build())
             .build()
 

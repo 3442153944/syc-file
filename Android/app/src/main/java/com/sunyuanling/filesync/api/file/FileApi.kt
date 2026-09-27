@@ -120,6 +120,7 @@ object FileApi {
                 val body = data.toRequestBody("application/octet-stream".toMediaType())
                 val builder = OkRequest.Builder().url(url).post(body)
                 token?.let { builder.header("Token", it) }
+                builder.header("Device-Id", Request.deviceId())
 
                 Request.client.newCall(builder.build()).execute().use { resp ->
                     val text = resp.body?.string().orEmpty()

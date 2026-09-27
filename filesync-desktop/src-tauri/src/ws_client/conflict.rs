@@ -57,11 +57,11 @@ pub async fn on_conflict(cf: ConflictContent, config: &SharedSyncConfig, app: &A
 
     // 2) 主目录收敛到服务端版本
     let remote_dir = build_remote_dir(config, cf.folder_id, &cf.relative_path);
-    let (server_url, token) = {
+    let (server_url, token, device_id) = {
         let c = config.read();
-        (c.server_url.clone(), c.token.clone())
+        (c.server_url.clone(), c.token.clone(), c.device_id.clone())
     };
-    let client = ApiClient::new(&server_url, &token);
+    let client = ApiClient::new(&server_url, &token, &device_id);
     match download_and_publish(
         &client,
         remote_dir.clone(),
@@ -156,7 +156,7 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         let c = config.read();
         (c.server_url.clone(), c.token.clone(), c.device_id.clone())
     };
-    let client = ApiClient::new(&server_url, &token);
+    let client = ApiClient::new(&server_url, &token, &device_id);
 
     // 隔离副本必须存在
     if !pc.quarantine.exists() {

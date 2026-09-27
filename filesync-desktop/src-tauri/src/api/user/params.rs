@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct LoginParams {
     pub username: String,
     pub password: String,
+    pub device_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -59,7 +59,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
             return;
         }
         (
-            ApiClient::new(&cfg.server_url, &cfg.token),
+            ApiClient::new(&cfg.server_url, &cfg.token, &cfg.device_id),
             cfg.device_id.clone(),
         )
     };
@@ -117,7 +117,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
                     format!("节点已切换，改用新节点续传: {}", path_str),
                 );
                 let cfg = config.read();
-                client = ApiClient::new(&cfg.server_url, &cfg.token);
+                client = ApiClient::new(&cfg.server_url, &cfg.token, &cfg.device_id);
             }
             Err(e) => {
                 crate::logger::error("upload", format!("上传失败 {}: {}", path_str, e));

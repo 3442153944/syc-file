@@ -210,7 +210,7 @@ async fn report_delete(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let client = ApiClient::new(&server_url, &token);
+    let client = ApiClient::new(&server_url, &token, &device_id);
 
     sync_api::notify(
         &client,

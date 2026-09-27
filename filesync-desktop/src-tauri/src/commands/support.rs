@@ -8,7 +8,7 @@ pub fn make_client(cfg: &SyncConfig) -> Result<api::client::ApiClient, String> {
     if cfg.server_url.is_empty() {
         return Err("服务器地址未配置，请先在设置页面填写服务器地址".into());
     }
-    Ok(api::client::ApiClient::new(&cfg.server_url, &cfg.token))
+    Ok(api::client::ApiClient::new(&cfg.server_url, &cfg.token, &cfg.device_id))
 }
 
 // 业务失败统一格式化为 "[code] message"，把后端信封 code 带给前端（前端 String(e) 即可看到码 + 信息）。

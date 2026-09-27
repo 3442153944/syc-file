@@ -111,6 +111,14 @@ pub fn show_main_window(app: &tauri::AppHandle) -> Option<(tauri::WebviewWindow,
     match builder.build() {
         Ok(w) => {
             let _ = w.set_focus();
+            // 原生菜单栏偶发不渲染/延迟渲染：WebviewWindowBuilder::build() 会在窗口刚创建、
+            // 拿到裸 HWND 的那一刻就调一次 muda 的 init_for_hwnd 挂菜单（tauri 的
+            // prepare_window_menu_creation_handler），这个时机早于 webview 初始化和窗口
+            // 首次绘制，在部分机器/时序下这次 SetMenu+DrawMenuBar 没能生效。这里重建后
+            // 再显式调一次 App::set_menu：它会对"当前持有应用级菜单"的窗口（刚建出来的
+            // 这个正是）逐个再调一遍 Window::set_menu，此时窗口已完全建好、即将进入正常
+            // 消息循环，是更稳的挂载时机。两次都挂同一份菜单，多余但无害。
+            crate::app_shell::menu::refresh_app_menu(app);
             logger::info("app", "主窗口已重建");
             Some((w, true))
         }

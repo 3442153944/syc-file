@@ -30,6 +30,9 @@ pub struct ApiClient {
     client: Client,
     base_url: String,
     token: String,
+    /// 登录时绑定的设备 id，随每个请求一起带上（Device-Id 头）。服务端用它核对
+    /// token 签发时绑定的设备是否一致，token 被拷到别的设备上重放会直接被拒。
+    device_id: String,
     /// 构造这个 client 时的节点世代号。切节点会让它作废：在途请求立刻返回
     /// NODE_SWITCHED，不用干等 TCP 超时（见 net.rs 顶部注释）。
     epoch: u64,
@@ -40,7 +43,7 @@ pub struct ApiClient {
 pub const NODE_SWITCHED: &str = "节点已切换，本次请求已取消";
 
 impl ApiClient {
-    pub fn new(server_url: &str, token: &str) -> Self {
+    pub fn new(server_url: &str, token: &str, device_id: &str) -> Self {
         // Client::new() 没有任何超时：本地 localhost 请求快到永远暴露不出来，但换成远程/
         // 隧道地址（如 cf tunnel）一旦连接卡住半开，await 会永久挂起——没有 Err、UI 上也就
         // 看不到任何失败提示，进度停在原地不动（表现为"静默失败"）。这里补上超时，让这种情况
@@ -54,6 +57,7 @@ impl ApiClient {
             client,
             base_url: format!("{}/v1", server_url.trim_end_matches('/')),
             token: token.to_string(),
+            device_id: device_id.to_string(),
             epoch: net::epoch(),
         }
     }
@@ -88,7 +92,11 @@ impl ApiClient {
         path: &str,
         params: Option<&HashMap<&str, String>>,
     ) -> Result<ApiResponse<T>, String> {
-        let mut req = self.client.get(self.url(path)).header("Token", &self.token);
+        let mut req = self
+            .client
+            .get(self.url(path))
+            .header("Token", &self.token)
+            .header("Device-Id", &self.device_id);
         if let Some(p) = params {
             req = req.query(p);
         }
@@ -105,6 +113,7 @@ impl ApiClient {
             .client
             .post(self.url(path))
             .header("Token", &self.token)
+            .header("Device-Id", &self.device_id)
             .json(body);
         self.exec(req).await
     }
@@ -117,7 +126,8 @@ impl ApiClient {
         let req = self
             .client
             .post(self.url(path))
-            .header("Token", &self.token);
+            .header("Token", &self.token)
+            .header("Device-Id", &self.device_id);
         self.exec(req).await
     }
 
@@ -131,6 +141,7 @@ impl ApiClient {
             .client
             .put(self.url(path))
             .header("Token", &self.token)
+            .header("Device-Id", &self.device_id)
             .json(body);
         self.exec(req).await
     }
@@ -140,7 +151,8 @@ impl ApiClient {
         let req = self
             .client
             .delete(self.url(path))
-            .header("Token", &self.token);
+            .header("Token", &self.token)
+            .header("Device-Id", &self.device_id);
         self.exec(req).await
     }
 
@@ -154,6 +166,7 @@ impl ApiClient {
             .client
             .post(self.url(path))
             .header("Token", &self.token)
+            .header("Device-Id", &self.device_id)
             .multipart(form);
         self.exec(req).await
     }
@@ -171,6 +184,7 @@ impl ApiClient {
             .client
             .post(self.url(path))
             .header("Token", &self.token)
+            .header("Device-Id", &self.device_id)
             .header("Content-Type", "application/octet-stream")
             .body(body);
         for (k, v) in params {
@@ -182,6 +196,9 @@ impl ApiClient {
     /// 构建带 token 的完整 GET URL（用于下载、WS 等 token 需放 query string 的场景）
     pub fn build_url_with_token(&self, path: &str, mut params: HashMap<&str, String>) -> String {
         params.insert("token", self.token.clone());
+        // 服务端设备绑定校验也认这个 query key；和业务层可能已塞入的同名 device_id
+        // 值是一回事（都是本机设备 id），这里补上是为了没传的调用点也能通过校验
+        params.insert("device_id", self.device_id.clone());
         let query: String = params
             .iter()
             .map(|(k, v)| format!("{}={}", k, urlenc(v)))

@@ -16,7 +16,7 @@ func CORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Token")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Token, Device-Id")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -49,9 +49,23 @@ func Auth() gin.HandlerFunc {
 		if tokenStr == "" {
 			tokenStr = c.Query("token")
 		}
+		// 设备绑定：REST 走 Device-Id 头，WS 握手（/v1/ws/connect）没法带自定义头，
+		// 走它已有的 device_id query 参数
+		deviceID := c.GetHeader("Device-Id")
+		if deviceID == "" {
+			deviceID = c.Query("device_id")
+		}
 		if tokenStr != "" {
 			if claims, err := token.ParseToken(tokenStr); err != nil {
 				logger.Logger.Warn("Token验证失败", zap.Error(err))
+			} else if claims.DeviceID == "" || claims.DeviceID != deviceID {
+				// 旧版签发（无 device_id）或者换了设备重放，一律当未登录处理，
+				// 逼一次重新登录来补上绑定关系
+				logger.Logger.Warn("Token设备不匹配，拒绝",
+					zap.Int64("user_id", claims.UserID),
+					zap.String("bound_device", claims.DeviceID),
+					zap.String("request_device", deviceID),
+				)
 			} else {
 				// 检查剩余有效期，不足 refresh_expire 天则自动刷新
 				remaining := time.Until(claims.ExpiresAt.Time)
@@ -62,6 +76,7 @@ func Auth() gin.HandlerFunc {
 						claims.Username,
 						claims.Email,
 						claims.Roles,
+						claims.DeviceID,
 						config.Conf.Auth.TokenExpire,
 					)
 					if err != nil {

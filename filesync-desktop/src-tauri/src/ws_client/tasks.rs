@@ -56,11 +56,11 @@ pub async fn on_task_created(tc: TaskCreatedContent, config: &SharedSyncConfig) 
         logger::debug("task", format!("任务 {} 正在处理，忽略重复下发", tc.task_id));
         return;
     };
-    let (server_url, token) = {
+    let (server_url, token, device_id) = {
         let cfg = config.read();
-        (cfg.server_url.clone(), cfg.token.clone())
+        (cfg.server_url.clone(), cfg.token.clone(), cfg.device_id.clone())
     };
-    let client = ApiClient::new(&server_url, &token);
+    let client = ApiClient::new(&server_url, &token, &device_id);
 
     match tc.task_type.as_str() {
         "download" => {

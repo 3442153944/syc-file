@@ -6,6 +6,7 @@ import { userStore } from '../app/UserStore';
 import type { LoginParams } from '../api/user/UserTypes';
 import { AppRoutes } from '../router/AppRoutes';
 import { appConfig } from '../app/AppConfig';
+import { deviceInfoSvc } from '../util/DeviceInfo';
 
 /**
  * LoginPage
@@ -64,6 +65,7 @@ struct LoginPage {
       const params: LoginParams = {
         username: this.username,
         password: this.password,
+        device_id: deviceInfoSvc.getDeviceId(),
       };
       const resp = await UserApi.login(params);
       if (resp.data) {
