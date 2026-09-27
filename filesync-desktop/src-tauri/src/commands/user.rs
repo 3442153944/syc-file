@@ -17,8 +17,9 @@ pub async fn login(
     config: State<'_, SharedSyncConfig>,
     app: tauri::AppHandle,
 ) -> Result<LoginData, String> {
+    let device_id = config.read().device_id.clone();
     let client = make_client(&config.read())?;
-    let resp = user_api::login(&client, LoginParams { username, password }).await?;
+    let resp = user_api::login(&client, LoginParams { username, password, device_id }).await?;
     let data = api_data(resp, "login")?;
     config.write().token = data.token.clone();
     apply_quick_share_user_settings(&app, &config, &data.user);

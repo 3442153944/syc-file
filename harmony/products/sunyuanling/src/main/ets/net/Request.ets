@@ -2,6 +2,7 @@ import http from '@ohos.net.http';
 import { appConfig } from '../app/AppConfig';
 import { authManager } from './AuthManager';
 import { TokenManager } from '../token/tokenManager';
+import { deviceInfoSvc } from '../util/DeviceInfo';
 import { ApiResponseData, ResponseException, SessionGoneException, ChunkVerifyException } from './Response';
 
 /**
@@ -85,6 +86,7 @@ export class Request {
     if (token.length > 0) {
       header['Token'] = token;
     }
+    header['Device-Id'] = deviceInfoSvc.getDeviceId();
     if (extra !== undefined && extra !== null) {
       const keys = Object.keys(extra);
       for (let i = 0; i < keys.length; i++) {
@@ -280,7 +282,9 @@ export class Request {
       params['token'] = token;
     }
     const url = Request.getInstance().buildUrl(endpoint, params);
-    const header: Record<string, string> = {};
+    const header: Record<string, string> = {
+      'Device-Id': deviceInfoSvc.getDeviceId(),
+    };
     if (token.length > 0) {
       header['Token'] = token;
     }
@@ -328,6 +332,7 @@ export class Request {
     const url = Request.getInstance().buildUrl(endpoint, params);
     const header: Record<string, string> = {
       'Range': `bytes=${start}-${end}`,
+      'Device-Id': deviceInfoSvc.getDeviceId(),
     };
     if (token.length > 0) {
       header['Token'] = token;
@@ -468,6 +473,7 @@ export class Request {
     const url = Request.getInstance().buildUrl(endpoint, params);
     const header: Record<string, string> = {
       'Range': 'bytes=0-0',
+      'Device-Id': deviceInfoSvc.getDeviceId(),
     };
     if (token.length > 0) {
       header['Token'] = token;

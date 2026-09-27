@@ -1,5 +1,7 @@
 // router/index.ts
 import {createRouter, createWebHashHistory} from "vue-router"
+import {isTauri} from "@tauri-apps/api/core"
+import {verify} from "@/api/user/userApi"
 
 export const router = createRouter({
     history: createWebHashHistory(),
@@ -125,6 +127,14 @@ export const router = createRouter({
     ]
 })
 
+// Tauri 下 token 只在前端 localStorage 持久，Rust 侧的运行期状态（SyncConfig.token）
+// 故意不落盘，每次冷启动都是空的——用户完全退出重开后，路由守卫看 localStorage
+// 有 token 就放行进了首页，但 Rust 还没有这个 token，第一批走 invoke 的接口
+// （get_available_disks 等）打到后端就是匿名请求，报 401 未登录。
+// 这里在本次会话第一次进受保护页时，把 token 交还给 Rust 并顺带校验一次
+//（userApi.verify 内部调 restore_token），之后的导航不用再重复这一步。
+let restoredThisSession = false
+
 router.beforeEach(async (to, _from, next) => {
     const token = localStorage.getItem("token")
     const publicPages = ['/login', '/register', '/reset']
@@ -141,6 +151,18 @@ router.beforeEach(async (to, _from, next) => {
     if (!token) {
         next('/login')
         return
+    }
+
+    if (isTauri() && !restoredThisSession) {
+        try {
+            await verify()
+            restoredThisSession = true
+        } catch {
+            // token 已失效或 Rust 校验不通过：清掉本地缓存，回登录页重新来
+            localStorage.removeItem('token')
+            next('/login')
+            return
+        }
     }
 
     next()

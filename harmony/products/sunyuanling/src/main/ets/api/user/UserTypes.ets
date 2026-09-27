@@ -22,6 +22,8 @@ export interface LoginParams {
   email?: string;
   phone?: string;
   password: string;
+  /** 本机设备 id：服务端把 token 与它绑定，换设备重放旧 token 会被拒绝 */
+  device_id: string;
 }
 
 /** 登录响应 data 字段 */

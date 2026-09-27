@@ -94,6 +94,11 @@ object Request {
         Log.d(TAG, "Token 已清除")
     }
 
+    /** 本机设备 id：登录传给后端绑定 token，之后每个请求也带上供服务端核对。 */
+    fun deviceId(): String {
+        return appContext?.let { com.sunyuanling.filesync.util.DeviceInfoUtil.getDeviceId(it) } ?: ""
+    }
+
     suspend fun hasToken(): Boolean {
         return !getToken().isNullOrEmpty()
     }
@@ -232,6 +237,7 @@ object Request {
                 .url(url)
                 .apply {
                     token?.let { header("Token", it) }
+                    header("Device-Id", deviceId())
                     get()
                 }
 
@@ -300,6 +306,7 @@ object Request {
                 .url(url)
                 .apply {
                     token?.let { header("Token", it) }
+                    header("Device-Id", deviceId())
                 }
 
             // 构建请求体

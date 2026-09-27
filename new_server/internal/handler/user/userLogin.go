@@ -21,6 +21,7 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 			Email    string `json:"email"`
 			Phone    string `json:"phone"`
 			Password string `json:"password" binding:"required"`
+			DeviceID string `json:"device_id" binding:"required"`
 		}
 
 		// 1. 绑定参数
@@ -98,6 +99,7 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 			u.Username,
 			stringVal(u.Email),
 			[]string{u.Role},
+			req.DeviceID,
 			config.Conf.Auth.TokenExpire,
 		)
 		if err != nil {

@@ -5,7 +5,7 @@
  * 路由路径与 Rust routes.rs 保持一致（/user/login 等），无需 /v1 前缀（这里补）。
  */
 
-import { getServerUrl, getToken } from './platform'
+import { getServerUrl, getToken, getDeviceId } from './platform'
 import { registerAbort } from './net'
 
 interface ApiEnvelope<T> {
@@ -35,6 +35,7 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
   const token = getToken()
   const headers: Record<string, string> = {}
   if (token) headers['Token'] = token
+  headers['Device-Id'] = getDeviceId()
 
   // 登记到在途集合：切节点时统一 abort，不必干等这条打在旧地址上的请求超时
   const ctrl = new AbortController()
@@ -96,7 +97,7 @@ export function httpDelete<T = void>(path: string): Promise<T> {
 /** 构建带 token 的 GET URL（下载链接） */
 export function buildGetUrl(path: string, params: Record<string, string>): string {
   const token = getToken()
-  const allParams = { ...params, token }
+  const allParams = { ...params, token, device_id: getDeviceId() }
   return `${getServerUrl()}/v1${path}?${new URLSearchParams(allParams).toString()}`
 }
 
@@ -116,6 +117,7 @@ export async function httpPostRawBytes<T>(
     'Content-Type': 'application/octet-stream',
   }
   if (token) headers['Token'] = token
+  headers['Device-Id'] = getDeviceId()
 
   const ctrl = new AbortController()
   const unregister = registerAbort(ctrl)
@@ -162,6 +164,7 @@ export function httpPostBlob<T>(
     xhr.open('POST', url)
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
     if (token) xhr.setRequestHeader('Token', token)
+    xhr.setRequestHeader('Device-Id', getDeviceId())
 
     // 节点切换时 net.ts 会 abort 这个 controller，转发给 XHR
     const ctrl = new AbortController()

@@ -49,7 +49,7 @@ pub async fn catch_up_all_folders(
         return;
     }
 
-    let client = ApiClient::new(&server_url, &token);
+    let client = ApiClient::new(&server_url, &token, &device_id);
     let mut count = 0u64;
 
     for mapping in &mappings {

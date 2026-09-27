@@ -55,6 +55,7 @@ object PreviewCache {
             val token = Request.getToken()
             val builder = OkRequest.Builder().url(url).get()
             token?.let { builder.header("Token", it) }
+            builder.header("Device-Id", Request.deviceId())
 
             Request.client.newCall(builder.build()).execute().use { resp ->
                 if (!resp.isSuccessful) {

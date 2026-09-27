@@ -1,6 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { httpPost } from '../http'
-import { setToken } from '../platform'
+import { setToken, getDeviceId } from '../platform'
 import type { LoginData, VerifyData } from './userTypes'
 
 export async function login(username: string, password: string): Promise<LoginData> {
@@ -11,7 +11,7 @@ export async function login(username: string, password: string): Promise<LoginDa
     setToken(data.token)
     return data
   }
-  const data = await httpPost<LoginData>('/user/login', { username, password })
+  const data = await httpPost<LoginData>('/user/login', { username, password, device_id: getDeviceId() })
   setToken(data.token)
   return data
 }

@@ -17,7 +17,11 @@ data class LoginParams(
     /** 手机号 */
     val phone: String = "",
     /** 密码（必填） */
-    val password: String
+    val password: String,
+    /** 本机设备 id（Settings.Secure.ANDROID_ID）：服务端把 token 与它绑定，
+     * 换设备重放旧 token 会被拒绝。 */
+    @SerialName("device_id")
+    val deviceId: String = ""
 )
 
 // ==================== 注册 ====================
