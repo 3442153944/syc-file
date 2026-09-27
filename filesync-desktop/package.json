@@ -21,10 +21,12 @@
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@vicons/fa": "^0.13.0",
     "@vue/devtools": "^8.0.5",
+    "echarts": "^6.1.0",
     "naive-ui": "^2.44.1",
     "pinia": "^3.0.4",
     "pnpm": "11.0.0-alpha.3",
     "vue": "^3.5.13",
+    "vue-echarts": "^8.3.0",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {

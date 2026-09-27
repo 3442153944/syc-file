@@ -1,24 +1,18 @@
 use crate::api::{client::ApiClient, sync::api as sync_api};
-use crate::config::SharedSyncConfig;
+use crate::commands::support::make_client;
+use crate::config::{FolderMapping, SharedSyncConfig};
+use crate::logger;
 use crate::upload_worker::{start_upload_workers, UploadTask};
-use crate::ws_client::start_ws_client;
+use crate::ws_client::{start_ws_client, ws_is_connected};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, State};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncEvent {
-    pub path: String,
-    pub kind: String,
-}
 
 type DebounceMap = Arc<Mutex<HashMap<PathBuf, Instant>>>;
 
@@ -86,11 +80,10 @@ pub fn start_sync_engine(
         let dm = debounce_map.clone();
         let cfg = config.clone();
         let tx = upload_tx.clone();
-        let app2 = app.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(50)).await;
-                flush_debounce(&dm, &cfg, &tx, &app2, debounce_ms).await;
+                flush_debounce(&dm, &cfg, &tx, debounce_ms).await;
             }
         });
     }
@@ -132,7 +125,6 @@ async fn flush_debounce(
     dm: &DebounceMap,
     config: &SharedSyncConfig,
     tx: &mpsc::Sender<UploadTask>,
-    app: &AppHandle,
     debounce_ms: u64,
 ) {
     let now = Instant::now();
@@ -161,7 +153,7 @@ async fn flush_debounce(
                 // 池并发不一样，这里以前是直接 await，导致成百上千个删除只能挨个走网络往返
                 // （每个都要等一轮 HTTP 请求响应），批量删除时严重拖慢，还会连带挡住同一批
                 // 里排在后面的 create/modify 上传。spawn 出去让它们并发跑。
-                tokio::spawn(report_delete(config.clone(), folder_id, rel, path.clone(), app.clone()));
+                tokio::spawn(report_delete(config.clone(), folder_id, rel, path.clone()));
             } else {
                 crate::logger::debug(
                     "watch",
@@ -175,14 +167,7 @@ async fn flush_debounce(
         }
         if let Some((folder_id, rel, remote_dir)) = find_mapping_with_remote(config, &path) {
             crate::logger::info("watch", format!("检测到变更，准备上传: {}", rel));
-            app.emit(
-                "sync-event",
-                SyncEvent {
-                    path: path.to_string_lossy().to_string(),
-                    kind: "modify".into(),
-                },
-            )
-            .ok();
+            crate::transfers::sync_event(&path.to_string_lossy(), "modify");
             tx.send(UploadTask {
                 local_path: path,
                 remote_dir,
@@ -206,7 +191,6 @@ async fn report_delete(
     folder_id: u64,
     relative_path: String,
     path: PathBuf,
-    app: AppHandle,
 ) {
     use crate::api::sync::params::NotifyParams;
 
@@ -248,14 +232,7 @@ async fn report_delete(
     crate::base_store::remove(folder_id, &relative_path);
     crate::logger::info("watch", format!("已上报删除: {}", relative_path));
 
-    app.emit(
-        "sync-event",
-        SyncEvent {
-            path: path.to_string_lossy().to_string(),
-            kind: "delete".into(),
-        },
-    )
-    .ok();
+    crate::transfers::sync_event(&path.to_string_lossy(), "delete");
 }
 
 pub fn engine_watch_path(engine: &SharedSyncEngine, path: PathBuf) -> Result<(), String> {
@@ -269,6 +246,131 @@ pub fn engine_watch_path(engine: &SharedSyncEngine, path: PathBuf) -> Result<(),
 pub fn stop_sync_engine(engine: &SharedSyncEngine) {
     let mut guard = engine.lock();
     *guard = None;
+}
+
+// ── commands ─────────────────────────────────────────────────────────────────
+
+/// 添加目录映射（folder_id 为服务端注册后返回的 SyncFolder.id）
+#[tauri::command]
+pub fn add_folder_mapping(
+    local_path: String,
+    remote_path: String,
+    folder_id: u64,
+    config: State<SharedSyncConfig>,
+    engine: State<SharedSyncEngine>,
+) -> Result<(), String> {
+    let p = PathBuf::from(&local_path);
+    if !p.exists() || !p.is_dir() {
+        return Err(format!("本地路径不存在或不是目录: {}", local_path));
+    }
+    {
+        let mut cfg = config.write();
+        if cfg
+            .folder_mappings
+            .iter()
+            .any(|m| m.local_path == local_path)
+        {
+            return Err(format!("目录已添加: {}", local_path));
+        }
+        cfg.folder_mappings.push(FolderMapping {
+            local_path: local_path.clone(),
+            remote_path,
+            folder_id,
+        });
+    }
+    let guard = engine.lock();
+    if guard.is_some() {
+        drop(guard);
+        engine_watch_path(&engine, p)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_folder_mapping(local_path: String, config: State<SharedSyncConfig>) {
+    config
+        .write()
+        .folder_mappings
+        .retain(|m| m.local_path != local_path);
+}
+
+/// 启动同步引擎：先从服务器拉取 sync_folders 填充内存缓存，再启动引擎和文件监听
+pub async fn do_start_sync(
+    config: &SharedSyncConfig,
+    engine: &SharedSyncEngine,
+    app_handle: &AppHandle,
+) -> Result<(), String> {
+    let client = make_client(&config.read())?;
+    let resp = sync_api::get_folder(&client).await?;
+    if resp.is_ok() {
+        let mapping = resp
+            .data
+            .flatten()
+            .filter(|f| f.enabled)
+            .map(|f| FolderMapping {
+                local_path: f.local_path,
+                remote_path: f.remote_path,
+                folder_id: f.id,
+            });
+        config.write().folder_mappings = mapping.into_iter().collect();
+    }
+
+    start_sync_engine(engine, config.clone(), app_handle.clone())?;
+
+    let paths: Vec<PathBuf> = config
+        .read()
+        .folder_mappings
+        .iter()
+        .map(|m| PathBuf::from(&m.local_path))
+        .collect();
+    if paths.is_empty() {
+        logger::warn(
+            "sync",
+            "未配置任何同步目录，引擎已启动但不会监听任何文件。请先在「同步管理」创建同步文件夹。",
+        );
+    }
+    for p in &paths {
+        match engine_watch_path(engine, p.clone()) {
+            Ok(_) => logger::info("sync", format!("开始监听同步目录: {}", p.display())),
+            Err(e) => logger::error("sync", format!("监听目录失败 {}: {}", p.display(), e)),
+        }
+    }
+
+    engine_enqueue_initial_sync(engine, config);
+    logger::info(
+        "sync",
+        format!("同步引擎已启动，监听 {} 个目录", paths.len()),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_sync(
+    engine: State<'_, SharedSyncEngine>,
+    config: State<'_, SharedSyncConfig>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    if engine.lock().is_some() {
+        return Ok(()); // 已在运行，幂等
+    }
+    do_start_sync(&config, &engine, &app_handle).await
+}
+
+#[tauri::command]
+pub fn stop_sync(engine: State<SharedSyncEngine>) {
+    stop_sync_engine(&engine);
+}
+
+#[tauri::command]
+pub fn is_sync_running(engine: State<SharedSyncEngine>) -> bool {
+    engine.lock().is_some()
+}
+
+/// 查询当前 WS 是否已连接。`ws-status` 事件是边沿信号，前端注册监听后应主动查一次，
+/// 补齐可能已错过的连接事件（详见 ws_client::WS_CONNECTED）。
+#[tauri::command]
+pub fn is_ws_connected() -> bool {
+    ws_is_connected()
 }
 
 // ── 首次全量同步 ─────────────────────────────────────────────────────────────

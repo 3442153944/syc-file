@@ -91,6 +91,10 @@ func main() {
 		&model.ShareRecord{},
 		&model.SyncFolder{},
 		&model.AppRelease{},
+		&model.MonitorHistory{},
+		&model.ProcessHistory{},
+		&model.ListeningPortHistory{},
+		&model.PortConnHistory{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
@@ -112,6 +116,17 @@ func main() {
 
 	//初始化监控推送器（注册 WS monitor 处理器）
 	monitor.InitBroadcaster()
+
+	//监控历史记录：独立于 WS 推送常驻采样，写 Redis（7~8 天热数据）供仪表盘画趋势图；
+	//每天再把前一天的数据批量归档进 MySQL，长期保存
+	monitor.Init(redisClient, db)
+	monitor.StartHistoryRecorder()
+	monitor.StartDailyArchiver()
+
+	//进程/端口明细采集：间隔见 config.monitor.sys_detail_interval_seconds（默认30s），
+	//Rust 侧 sysinfo+netstat2 采集（见 file_lib/src/sys_info.rs），存储策略同上
+	monitor.StartSysDetailRecorder()
+	monitor.StartSysDetailArchiver()
 
 	//初始化设备状态Redis存储
 	device_store.Init(redisClient)

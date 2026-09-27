@@ -94,6 +94,12 @@ onMounted(async () => {
   unlisten = await listen('open-network-settings', () => {
     showSettings.value = true
   })
+  // 主窗口关闭时会被销毁；若是从菜单点「网络节点设置…」重建的窗口，事件发出时页面
+  // 还没加载好、收不到，Rust 改为留个标记，这里挂载后来取
+  const {invoke} = await import('@tauri-apps/api/core')
+  if (await invoke<boolean>('take_pending_network_settings').catch(() => false)) {
+    showSettings.value = true
+  }
 })
 
 onBeforeUnmount(() => {

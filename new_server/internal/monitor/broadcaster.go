@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -154,13 +155,23 @@ func (b *broadcaster) pushOne(connID string) {
 	}
 }
 
-// buildPayload 组装一帧监控数据。system 与 network 一起推，前端一次拿全。
-// ⚠ 用 broadcaster 自己的 sampler，不碰 HTTP 的基线。
+// buildPayload 组装一帧监控数据。system/network 每次都实时采；进程/端口明细
+// 不在这里现采（那份采集本身较重，独立按 config.monitor 的间隔跑，见
+// sys_detail.go 的 StartSysDetailRecorder）——这里只是把它"最近一次采到的结果"
+// （Redis 里的最后一帧，O(1) 读）捎带着一起推下去，桌面端复用同一条 WS 连接
+// 就能拿到进程/端口数据，不用另外发 HTTP 轮询、多一份连接建立开销。
+// 没采集到时（Redis 未就绪等）这两个字段就是 null，前端按"暂无数据"处理。
 func (b *broadcaster) buildPayload() gin.H {
-	return gin.H{
+	payload := gin.H{
 		"system":  SystemSnapshot(),
 		"network": NetworkSnapshot(&b.sampler),
 	}
+	if f := latestSysDetailFrame(context.Background()); f != nil {
+		payload["processes"] = f.Processes
+		payload["listening_ports"] = f.ListeningPorts
+		payload["port_connections"] = f.PortConnections
+	}
+	return payload
 }
 
 func (b *broadcaster) currentInterval() time.Duration {

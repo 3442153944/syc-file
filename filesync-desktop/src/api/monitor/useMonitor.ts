@@ -69,15 +69,117 @@ export interface NetworkMetrics {
 export interface MonitorFrame {
   system: SystemMetrics
   network: NetworkMetrics
+  // 进程/端口明细：服务端按 config.monitor 的间隔（默认 30s）独立采集，这里
+  // 只是把"最近一次采到的结果"捎带在每帧监控推送里，不是每帧都重新采一次；
+  // 采集还没跑过一轮时（刚启动等）不带这三个字段。
+  processes?: ProcessInfo[]
+  listening_ports?: ListeningPort[]
+  port_connections?: PortConnCount[]
+}
+
+/** 历史采样点（画图用），字段比实时快照精简。见后端 internal/monitor/history.go。 */
+export interface HistoryPoint {
+  t: number // unix 秒
+  cpu: number
+  mem: number
+  mem_used: number
+  send_rate: number
+  recv_rate: number
+  online_devices: number
+  active_connections: number
 }
 
 /**
- * 订阅监控数据。返回响应式的 system / network / connected。
+ * 拉最近 days 天的历史采样点。7 天内服务端直接查 Redis，更早的从 MySQL 长期
+ * 归档表补（服务端每天批量归档一次），对这里透明；超出范围会被服务端夹住。
+ * 按时间升序返回。
+ */
+export function fetchMonitorHistory(days = 1): Promise<HistoryPoint[]> {
+  return httpGet<HistoryPoint[]>('/monitor/history', { days: String(days) })
+}
+
+/** 一次采集里进入 Top-N 的一个进程。见后端 internal/monitor/sys_detail.go。 */
+export interface ProcessInfo {
+  pid: number
+  name: string
+  cpu_percent: number
+  mem_bytes: number
+  mem_percent: number
+  disk_read_bytes: number
+  disk_write_bytes: number
+  connections: number
+  score: number
+}
+export interface ProcessFrame {
+  t: number
+  processes: ProcessInfo[]
+}
+
+/** 一个正在监听的端口。 */
+export interface ListeningPort {
+  port: number
+  protocol: 'tcp' | 'udp'
+  pid: number
+  process_name: string
+}
+/** 某端口/协议当前的连接数（聚合，不含每条连接明细）。 */
+export interface PortConnCount {
+  port: number
+  protocol: 'tcp' | 'udp'
+  connections: number
+}
+export interface PortFrame {
+  t: number
+  listening_ports: ListeningPort[]
+  port_connections: PortConnCount[]
+}
+
+/**
+ * 进程 Top-N 采集历史。不传 name：概览首次加载用，days 给小值即可；传 name：
+ * 详情用，只回这一个进程名的数据，days 可以给大——PID 会在进程重启后变，
+ * 跨时间范围认同一个进程只能按名字，不能按 PID。
+ */
+export function fetchProcessHistory(days = 1, name?: string): Promise<ProcessFrame[]> {
+  const params: Record<string, string> = { days: String(days) }
+  if (name) params.name = name
+  return httpGet<ProcessFrame[]>('/monitor/processes', params)
+}
+
+/** 概览轮询刷新用：只要最新一帧，O(1)，不用把一整天的明细重新拉一遍。 */
+export async function fetchLatestProcesses(): Promise<ProcessFrame | null> {
+  const frames = await httpGet<ProcessFrame[]>('/monitor/processes', { latest: '1' })
+  return frames[0] ?? null
+}
+
+/** 监听端口 + 端口连接数历史。传 port：只回该端口（跨 tcp/udp）的数据。 */
+export function fetchPortHistory(days = 1, port?: number): Promise<PortFrame[]> {
+  const params: Record<string, string> = { days: String(days) }
+  if (port) params.port = String(port)
+  return httpGet<PortFrame[]>('/monitor/ports', params)
+}
+
+/** 概览轮询刷新用：只要最新一帧，O(1)。 */
+export async function fetchLatestPorts(): Promise<PortFrame | null> {
+  const frames = await httpGet<PortFrame[]>('/monitor/ports', { latest: '1' })
+  return frames[0] ?? null
+}
+
+/**
+ * 订阅监控数据。返回响应式的 system / network / processes / listeningPorts /
+ * portConnections / connected。
+ *
+ * 进程/端口明细复用同一条监控推送（Tauri 下是 WS，见 MonitorFrame 的注释），
+ * 不另开 HTTP 轮询——那样等于给同一份数据建第二条连接，白多一份连接建立开销。
+ * Web 端没有常驻 WS，退化成轮询时把这两个接口也带上，语义保持一致。
+ *
  * @param intervalSec 期望推送间隔（秒），服务端夹到 [1,10]；也是 Web 兜底轮询的间隔。
  */
 export function useMonitor(intervalSec = 2) {
   const system = ref<SystemMetrics | null>(null)
   const network = ref<NetworkMetrics | null>(null)
+  const processes = ref<ProcessInfo[] | null>(null)
+  const listeningPorts = ref<ListeningPort[] | null>(null)
+  const portConnections = ref<PortConnCount[] | null>(null)
   const connected = ref(false)
 
   let unlisten: UnlistenFn | null = null
@@ -87,6 +189,9 @@ export function useMonitor(intervalSec = 2) {
     unlisten = await listen<MonitorFrame>('monitor-metrics', (e) => {
       if (e.payload.system) system.value = e.payload.system
       if (e.payload.network) network.value = e.payload.network
+      if (e.payload.processes) processes.value = e.payload.processes
+      if (e.payload.listening_ports) listeningPorts.value = e.payload.listening_ports
+      if (e.payload.port_connections) portConnections.value = e.payload.port_connections
       connected.value = true
     })
     await invoke('subscribe_monitor', { interval: intervalSec })
@@ -94,12 +199,19 @@ export function useMonitor(intervalSec = 2) {
 
   async function pollOnce() {
     try {
-      const [sys, net] = await Promise.all([
+      const [sys, net, latestProcs, latestPorts] = await Promise.all([
         httpGet<SystemMetrics>('/monitor/system'),
         httpGet<NetworkMetrics>('/monitor/network'),
+        fetchLatestProcesses().catch(() => null),
+        fetchLatestPorts().catch(() => null),
       ])
       system.value = sys
       network.value = net
+      if (latestProcs) processes.value = latestProcs.processes
+      if (latestPorts) {
+        listeningPorts.value = latestPorts.listening_ports
+        portConnections.value = latestPorts.port_connections
+      }
       connected.value = true
     } catch {
       connected.value = false
@@ -121,7 +233,7 @@ export function useMonitor(intervalSec = 2) {
     if (isTauri()) invoke('unsubscribe_monitor').catch(() => {})
   })
 
-  return { system, network, connected }
+  return { system, network, processes, listeningPorts, portConnections, connected }
 }
 
 // ── 格式化小工具 ──────────────────────────────────────────

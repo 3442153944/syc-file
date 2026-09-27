@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,4 +115,32 @@ pub fn list_watch_paths(state: &SharedWatcherState) -> Vec<String> {
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect()
+}
+
+// ── commands（监控页面用，不触发上传）────────────────────────────────────────
+
+#[tauri::command]
+pub fn add_watch(
+    path: String,
+    state: State<SharedWatcherState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let p = PathBuf::from(&path);
+    if !p.exists() {
+        return Err(format!("路径不存在: {}", path));
+    }
+    if !p.is_dir() {
+        return Err(format!("路径不是目录: {}", path));
+    }
+    add_watch_path(&state, p, app_handle)
+}
+
+#[tauri::command]
+pub fn remove_watch(path: String, state: State<SharedWatcherState>) -> Result<(), String> {
+    remove_watch_path(&state, &PathBuf::from(&path))
+}
+
+#[tauri::command]
+pub fn list_watches(state: State<SharedWatcherState>) -> Vec<String> {
+    list_watch_paths(&state)
 }

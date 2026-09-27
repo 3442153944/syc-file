@@ -159,6 +159,14 @@ sync:
   conflict_suffix: "conflict"    # 冲突文件保留后缀
   sync_catalogue: "F:/同步目录/"  # 执行实时同步的目录
 
+# 系统明细监控配置：进程/端口 Top-N 采集（见 internal/monitor/sys_detail.go）。
+# 独立于系统级 CPU/内存趋势（1 分钟一次，不受这里影响）。
+monitor:
+  # 采集间隔（秒）
+  sys_detail_interval_seconds: 30
+  # 每轮记录的进程条数上限（按 cpu*2+mem*1.5+连接数*1 加权评分取前 N 个）
+  process_top_n: 20
+
 # ── 外部进程托管 ──────────────────────────────────────────────────────────────
 # 后端启动时自动拉起内网穿透与动态域名，退出时一并关闭（见 internal/supervisor）。
 #

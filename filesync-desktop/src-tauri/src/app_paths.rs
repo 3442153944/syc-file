@@ -36,6 +36,11 @@ pub fn state_file() -> PathBuf {
     config_dir().join("state.json")
 }
 
+/// 主窗口位置/大小缓存，base/config/window_state.json（关闭时记录，重建/启动时复原）。
+pub fn window_state_file() -> PathBuf {
+    config_dir().join("window_state.json")
+}
+
 /// 日志目录 base/log，自动创建（对齐后端 ./log/ 约定，放在运行目录下而非 config/ 内）。
 pub fn log_dir() -> PathBuf {
     let d = base_dir().join("log");

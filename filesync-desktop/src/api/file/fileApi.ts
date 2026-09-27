@@ -31,8 +31,8 @@ export async function uploadFile(
     onConflict: 'reject' | 'timestamp' = 'reject',
 ): Promise<UploadCompleteData> {
     if (isTauri()) {
-        // Rust command 内部已实现分片 + 进度事件 emit；这里不直接传进度回调
-        // （Tauri command 无法把 JS 函数传入 Rust），调用方若需进度可监听 `upload-progress-byte` 事件。
+        // 分片上传整个在 Rust 里执行，进度由 Rust 记进传输状态（transfers.rs），
+        // 通过 transfer-changed 事件推给页面（见 useTransferStore）；这里的 onProgress 不会被调用。
         return invoke<UploadCompleteData>('upload_file', {
             localPath: localPathOrFile as string,
             remoteDir,

@@ -1,9 +1,9 @@
-import {ref} from 'vue'
+import {ref, computed} from 'vue'
 import {isTauri} from '@tauri-apps/api/core'
 import {quickSharePaste} from '@/api/share/quickShareApi'
 import {copyText} from '@/utils/clipboard'
 import {getServerUrl} from '@/api/platform'
-import {useTransferStore, type UploadEntry} from '@/store/useTransferStore'
+import {useTransferStore} from '@/store/useTransferStore'
 import type {CreateShareLinkData} from '@/api/file/fileTypes'
 
 export interface QuickPasteResult {
@@ -19,9 +19,11 @@ export interface QuickPasteResult {
  * 比如用户在快传页面上点了别处导致焦点不在容器里，粘贴会由全局监听接住，页面若只看
  * 自己发起的任务就会毫无反应。
  *
- * 值就是 transfer store 里那条响应式 UploadEntry，进度/速度由 store 统一维护。
+ * 只存 id，条目从 transfer store 里现取：桌面端条目由 Rust 事件整条推送后合并进来，
+ * 按 id 取到的才是最新的响应式对象（进度/速度由 store 统一维护）。
  */
-const currentTask = ref<UploadEntry | null>(null)
+const currentTaskId = ref<string | null>(null)
+const currentTask = computed(() => useTransferStore().uploadById(currentTaskId.value) ?? null)
 /** 最近一次快传成功后的分享链接（和 currentTask 对应） */
 const currentUrl = ref('')
 
@@ -57,28 +59,39 @@ export function useQuickPaste(onResult?: (result: QuickPasteResult | null, error
     const file = files[0]
 
     const store = useTransferStore()
-    const task = store.beginUpload({
-      name: file.name || 'pasted-file',
-      kind: 'quick-share',
-      total: file.size,
-    })
-    currentTask.value = task
     currentUrl.value = ''
-
     uploading.value = true
+
+    // 登记失败（比如 IPC 出错）不该拦住上传本身：没有进度显示也比传不了强
+    let taskId: string | null = null
     try {
-      const data = await quickSharePaste(file, (sent, total) => store.reportUploadProgress(task, sent, total))
-      store.finishUpload(task)
+      taskId = await store.beginUpload({
+        name: file.name || 'pasted-file',
+        kind: 'quick-share',
+        total: file.size,
+      })
+      currentTaskId.value = taskId
+    } catch {
+      currentTaskId.value = null
+    }
+
+    try {
+      const data = await quickSharePaste(file, (sent, total) => {
+        if (taskId) store.reportUploadProgress(taskId, sent, total)
+      })
       const url = buildShareUrl(data)
-      if (currentTask.value === task) currentUrl.value = url
+      if (currentTaskId.value === taskId) currentUrl.value = url
+      // 先复制链接再报完成：桌面端主窗口若在上传期间被关闭（隐藏着等上传结束），
+      // finish 之后 Rust 会销毁这个 WebView —— 顺序反过来的话链接可能来不及进剪贴板
       try {
         await copyText(url)
       } catch {
         // 复制失败不影响主流程（链接已经生成），交给调用方在结果里自行提示
       }
+      if (taskId) await store.finishUpload(taskId)
       onResult?.({data, url})
     } catch (e) {
-      store.finishUpload(task, e)
+      if (taskId) await store.finishUpload(taskId, e)
       onResult?.(null, e)
     } finally {
       uploading.value = false

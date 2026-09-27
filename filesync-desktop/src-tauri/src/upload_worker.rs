@@ -9,10 +9,9 @@ use crate::api::{
 };
 use crate::chunked_uploader::{self, UploadOptions};
 use crate::config::SharedSyncConfig;
-use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 /// 一次上传任务
@@ -24,14 +23,6 @@ pub struct UploadTask {
     pub relative_path: String,
     /// create / modify（空串回退 "modify" 兼容旧调用方）
     pub action: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UploadProgress {
-    pub path: String,
-    pub status: String,
-    pub error: Option<String>,
 }
 
 pub fn start_upload_workers(
@@ -185,14 +176,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     emit_progress(app, &path_str, "done", None);
 }
 
-fn emit_progress(app: &AppHandle, path: &str, status: &str, error: Option<String>) {
-    app.emit(
-        "upload-progress",
-        UploadProgress {
-            path: path.to_string(),
-            status: status.to_string(),
-            error,
-        },
-    )
-    .ok();
+fn emit_progress(_app: &AppHandle, path: &str, status: &str, error: Option<String>) {
+    // 同步引擎的上传进度记进统一的传输状态（transfers.rs），窗口销毁重建后仍能看到
+    crate::transfers::sync_upload_progress(path, status, error);
 }

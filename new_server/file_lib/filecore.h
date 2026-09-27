@@ -22,7 +22,8 @@ extern "C" {
 /* v2 新增：文件实际尺寸/分片数与描述不符（v1 里混在 ROOT_MISMATCH） */
 #define FC_ERR_SIZE_MISMATCH -5
 
-/* ABI 版本，链接自检用。v2：新增 fc_evict 与 FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe */
+/* ABI 版本，链接自检用。v2：新增 fc_evict 与 FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe；
+ * v4：新增 fc_sys_snapshot/fc_free_string */
 int32_t fc_abi_version(void);
 
 /* 预分配临时文件到 total_size；已存在则只调整长度，不清空（支持续传复用） */
@@ -71,6 +72,17 @@ int32_t fc_evict(const char *path);
 int64_t fc_describe(const char *path, uint64_t chunk_size,
                     uint8_t *out_leaves, size_t leaf_cap,
                     uint8_t *out_root32, uint8_t *out_file_hash32);
+
+/*
+ * v4 新增：采一次进程 Top-N（按 cpu/mem/连接数加权评分排序）+ 端口/连接明细，
+ * 序列化成 JSON 字符串写入 *out_json（NUL 结尾，UTF-8）。
+ * 调用方读完 JSON 后【必须】调 fc_free_string 释放——Go 和 Rust 分配器不同，
+ * 不能用 C.free() 直接释放这块内存。
+ */
+int32_t fc_sys_snapshot(uint32_t top_n, char **out_json);
+
+/* 释放 fc_sys_snapshot 返回的字符串。空指针安全。 */
+void fc_free_string(char *s);
 
 #ifdef __cplusplus
 }
