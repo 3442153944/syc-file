@@ -2,11 +2,16 @@
 // 系统监控：CPU / 内存 / 主机 / 磁盘。数据经 WS 实时推送（见 useMonitor）。
 import { computed } from 'vue'
 import {
-  NCard, NGrid, NGi, NProgress, NStatistic, NSpace, NText, NTag, NEmpty, NSpin,
+  NCard, NGrid, NGi, NProgress, NStatistic, NSpace, NText, NTag, NEmpty, NSpin, NTabs, NTabPane,
 } from 'naive-ui'
 import { useMonitor, fmtBytes, fmtUptime } from '@/api/monitor/useMonitor'
+import MonitorHistoryChart from '@/components/MonitorHistoryChart.vue'
+import ProcessDimension from '@/components/monitor/ProcessDimension.vue'
+import PortDimension from '@/components/monitor/PortDimension.vue'
+import NetworkDimension from '@/components/monitor/NetworkDimension.vue'
+import DiskDimension from '@/components/monitor/DiskDimension.vue'
 
-const { system, connected } = useMonitor(2)
+const { system, network, processes, listeningPorts, portConnections, connected } = useMonitor(2)
 
 const cpu = computed(() => system.value?.cpu)
 const mem = computed(() => system.value?.memory)
@@ -118,6 +123,29 @@ function usageColor(p: number): string {
         </NGi>
       </NGrid>
     </NSpin>
+
+    <!-- 分维度深挖：每个 tab 是独立组件，display-directive="if" 保证切走的
+         那个 tab 被真正卸载（不是 v-show 藏起来），它的数据跟着释放，
+         不会几个维度的历史都常驻在内存里。 -->
+    <NCard size="small" style="margin-top: 12px" :segmented="{ content: true }" content-style="padding: 12px">
+      <NTabs type="line" animated display-directive="if" default-value="cpu-mem">
+        <NTabPane name="cpu-mem" tab="CPU / 内存">
+          <MonitorHistoryChart :live="system" />
+        </NTabPane>
+        <NTabPane name="process" tab="进程">
+          <ProcessDimension :live="processes" />
+        </NTabPane>
+        <NTabPane name="port" tab="端口分布">
+          <PortDimension :live-listening="listeningPorts" :live-connections="portConnections" />
+        </NTabPane>
+        <NTabPane name="network" tab="网络资源">
+          <NetworkDimension :live="network" />
+        </NTabPane>
+        <NTabPane name="disk" tab="硬盘资源">
+          <DiskDimension :live="processes" />
+        </NTabPane>
+      </NTabs>
+    </NCard>
   </div>
 </template>
 

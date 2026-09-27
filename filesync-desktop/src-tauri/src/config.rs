@@ -3,9 +3,12 @@
 // 基准目录见 app_paths.rs。token 不落 yml（避免明文凭证），仅运行期/前端 localStorage 持有。
 use crate::app_paths;
 use crate::device;
+use crate::logger;
+use crate::net;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
@@ -384,4 +387,73 @@ pub type SharedSyncConfig = Arc<RwLock<SyncConfig>>;
 
 pub fn init_sync_config() -> SharedSyncConfig {
     Arc::new(RwLock::new(SyncConfig::load()))
+}
+
+// ── commands ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn set_sync_config(
+    server_url: String,
+    ws_url: String,
+    token: Option<String>,
+    upload_workers: Option<usize>,
+    download_workers: Option<usize>,
+    debounce_ms: Option<u64>,
+    log_level: Option<String>,
+    config: State<SharedSyncConfig>,
+) {
+    let mut cfg = config.write();
+    // 服务器地址统一走节点体系：地址属于已知节点就激活它，否则收编成一条自定义节点。
+    // 这样「改地址」和「切节点」是同一件事，灾备模块永远知道当前在哪个节点上。
+    let switched = if server_url.trim().is_empty() {
+        false
+    } else {
+        let before = cfg.server_url.clone();
+        cfg.use_server_url(&server_url, &ws_url);
+        before != cfg.server_url
+    };
+    // 只有明确传了非空 token 才覆盖：ServerSettings.vue 只是改服务器地址，不该动登录态；
+    // 之前这里无条件用调用方传来的空字符串覆盖，导致每次改地址都把已登录的 token 清空。
+    if let Some(t) = token {
+        if !t.is_empty() {
+            cfg.token = t;
+        }
+    }
+    if let Some(w) = upload_workers {
+        cfg.upload_workers = w;
+    }
+    if let Some(w) = download_workers {
+        cfg.download_workers = w;
+    }
+    if let Some(d) = debounce_ms {
+        cfg.debounce_ms = d;
+    }
+    if let Some(lvl) = log_level {
+        cfg.log.level = lvl;
+    }
+    cfg.save(); // 持久化到 config/config.yml（token 不写入）
+    logger::info(
+        "config",
+        format!("同步配置已更新并保存（日志级别: {}）", cfg.log.level),
+    );
+    drop(cfg); // net::on_nodes_changed 还要拿写锁，parking_lot 的锁不可重入
+    net::on_nodes_changed(switched);
+}
+
+/// 返回当前配置（token 脱敏）
+#[tauri::command]
+pub fn get_sync_config(config: State<SharedSyncConfig>) -> SyncConfig {
+    let mut cfg = config.read().clone();
+    cfg.token = if cfg.token.is_empty() {
+        String::new()
+    } else {
+        "***".into()
+    };
+    cfg
+}
+
+/// 返回设备 ID（供前端在注册 folder 时传给服务端）
+#[tauri::command]
+pub fn get_device_id(config: State<SharedSyncConfig>) -> String {
+    config.read().device_id.clone()
 }

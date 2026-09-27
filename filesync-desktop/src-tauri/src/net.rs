@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::watch;
 
 /// 单次探测的超时。比业务请求的 15s 连接超时短得多：探测的目的是「快速判断死活」，
@@ -551,6 +551,156 @@ pub fn status() -> NetStatus {
 pub fn emit_status() {
     if let Some(r) = rt() {
         let _ = r.app.emit("network-status", status());
-        crate::refresh_app_menu(&r.app);
+        crate::app_shell::menu::refresh_app_menu(&r.app);
     }
+}
+
+// ── commands ─────────────────────────────────────────────────────────────────
+//
+// 桌面端所有出网请求（HTTP + WS）都走这里管的「当前激活节点」，以下 command 只是把
+// 节点表的增删改查和探测暴露给前端与原生菜单栏。切换是瞬时的：在途请求会被
+// 世代号作废，不必等它们跑完（见本文件顶部注释）。
+
+/// 当前网络状态：节点列表 + 各节点最近一次探测结果 + 激活节点 + 灾备设置。
+#[tauri::command]
+pub fn get_network_status() -> NetStatus {
+    status()
+}
+
+/// 立即探测所有节点（「立即检测」按钮 / 菜单项）。
+#[tauri::command]
+pub async fn probe_server_nodes() -> Result<NetStatus, String> {
+    probe_all().await;
+    Ok(status())
+}
+
+/// 手动切到指定节点。
+#[tauri::command]
+pub fn switch_server_node(node_id: String) -> Result<NetStatus, String> {
+    switch_to(&node_id, "用户手动切换")?;
+    Ok(status())
+}
+
+/// 新增或修改节点。`id` 为空表示新增；`activate` 为 true 时保存完顺手切过去。
+#[tauri::command]
+pub fn save_server_node(
+    id: Option<String>,
+    name: String,
+    server_url: String,
+    ws_url: Option<String>,
+    activate: Option<bool>,
+    config: State<SharedSyncConfig>,
+) -> Result<NetStatus, String> {
+    let server_url = server_url.trim().trim_end_matches('/').to_string();
+    if server_url.is_empty() {
+        return Err("服务器地址不能为空".into());
+    }
+    if !server_url.starts_with("http://") && !server_url.starts_with("https://") {
+        return Err("服务器地址需以 http:// 或 https:// 开头".into());
+    }
+    let ws = match ws_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        Some(w) => w.trim_end_matches('/').to_string(),
+        None => ServerNode::derive_ws_url(&server_url),
+    };
+    let name = if name.trim().is_empty() {
+        server_url.clone()
+    } else {
+        name.trim().to_string()
+    };
+
+    // touched_active：改的是当前正在用的节点 → 地址变了就得掐断在途连接，
+    // 否则 WS 会一直挂在老地址上直到它自己断开
+    let (node_id, touched_active) = {
+        let mut cfg = config.write();
+        match id {
+            Some(id) => {
+                let is_active = cfg.active_node_id == id;
+                let node = cfg
+                    .nodes
+                    .iter_mut()
+                    .find(|n| n.id == id)
+                    .ok_or_else(|| format!("节点不存在: {}", id))?;
+                let addr_changed = node.server_url != server_url || node.ws_url != ws;
+                node.name = name;
+                node.server_url = server_url.clone();
+                node.ws_url = ws.clone();
+                if is_active {
+                    cfg.server_url = server_url.clone();
+                    cfg.ws_url = ws.clone();
+                }
+                (id, is_active && addr_changed)
+            }
+            None => {
+                let new_id = format!("custom-{}", uuid::Uuid::new_v4());
+                cfg.nodes.push(ServerNode {
+                    id: new_id.clone(),
+                    name,
+                    server_url,
+                    ws_url: ws,
+                    builtin: false,
+                });
+                (new_id, false)
+            }
+        }
+    };
+    on_nodes_changed(touched_active);
+    if activate.unwrap_or(false) {
+        switch_to(&node_id, "用户手动切换")?;
+    }
+    Ok(status())
+}
+
+/// 删除自定义节点。内置节点不给删（灾备总得有备胎），只能改地址。
+#[tauri::command]
+pub fn remove_server_node(
+    node_id: String,
+    config: State<SharedSyncConfig>,
+) -> Result<NetStatus, String> {
+    let fallback = {
+        let mut cfg = config.write();
+        let node = cfg
+            .nodes
+            .iter()
+            .find(|n| n.id == node_id)
+            .cloned()
+            .ok_or_else(|| format!("节点不存在: {}", node_id))?;
+        if node.builtin {
+            return Err("内置节点不能删除，可以修改它的地址".into());
+        }
+        if cfg.nodes.len() <= 1 {
+            return Err("至少要保留一个节点".into());
+        }
+        cfg.nodes.retain(|n| n.id != node_id);
+        if cfg.active_node_id == node_id {
+            cfg.nodes.first().map(|n| n.id.clone())
+        } else {
+            None
+        }
+    };
+    on_nodes_changed(false);
+    // 删掉的正是当前节点：立刻顶上第一个，别让 server_url 悬空
+    if let Some(next) = fallback {
+        switch_to(&next, "当前节点已被删除")?;
+    }
+    Ok(status())
+}
+
+/// 灾备开关与巡检间隔。间隔单位分钟，默认 15。
+#[tauri::command]
+pub fn set_failover_settings(
+    auto_failover: Option<bool>,
+    interval_minutes: Option<u64>,
+    config: State<SharedSyncConfig>,
+) -> NetStatus {
+    {
+        let mut cfg = config.write();
+        if let Some(v) = auto_failover {
+            cfg.auto_failover = v;
+        }
+        if let Some(m) = interval_minutes {
+            cfg.health_interval_minutes = m.clamp(1, 24 * 60);
+        }
+    }
+    on_nodes_changed(false);
+    status()
 }

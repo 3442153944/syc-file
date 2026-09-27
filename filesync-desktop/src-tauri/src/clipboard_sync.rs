@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use arboard::Clipboard;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::api::client::ApiClient;
 use crate::config::SharedSyncConfig;
@@ -151,7 +151,7 @@ async fn watch_loop(state: SharedClipboardState, config: SharedSyncConfig, app: 
 
         let (client, device_id, device_name) = {
             let cfg = config.read();
-            match crate::make_client_public(&cfg) {
+            match crate::commands::support::make_client(&cfg) {
                 Ok(c) => (c, cfg.device_id.clone(), cfg.device_name.clone()),
                 Err(_) => continue, // 没配服务器/未登录
             }
@@ -222,7 +222,7 @@ pub async fn push_current(
     let (client, device_id, device_name) = {
         let cfg = config.read();
         (
-            crate::make_client_public(&cfg)?,
+            crate::commands::support::make_client(&cfg)?,
             cfg.device_id.clone(),
             cfg.device_name.clone(),
         )
@@ -230,4 +230,52 @@ pub async fn push_current(
     push_clipboard(&client, &text, &device_id, &device_name).await?;
     state.write().last_synced = fingerprint(&text);
     Ok(())
+}
+
+// ── commands ─────────────────────────────────────────────────────────────────
+
+/// 当前剪贴板同步开关状态。
+#[tauri::command]
+pub fn get_clipboard_settings(state: State<SharedClipboardState>) -> serde_json::Value {
+    let s = state.read();
+    serde_json::json!({ "enabled": s.enabled, "auto_apply": s.auto_apply })
+}
+
+/// 开关剪贴板同步。**默认关闭**，必须用户显式打开——剪贴板里常有密码和验证码，
+/// 内容会经过服务器（虽然只在 Redis 存 24 小时且不进数据库），这一点要在设置页写清楚。
+#[tauri::command]
+pub fn set_clipboard_settings(
+    enabled: Option<bool>,
+    auto_apply: Option<bool>,
+    state: State<SharedClipboardState>,
+) {
+    let mut s = state.write();
+    if let Some(v) = enabled {
+        s.enabled = v;
+    }
+    if let Some(v) = auto_apply {
+        s.auto_apply = v;
+    }
+    logger::info(
+        "clipboard",
+        format!(
+            "剪贴板同步: enabled={} auto_apply={}",
+            s.enabled, s.auto_apply
+        ),
+    );
+}
+
+/// 手动把当前剪贴板内容推送一次（不受 enabled 开关限制，用户点了就是要推）。
+#[tauri::command]
+pub async fn push_clipboard_now(
+    config: State<'_, SharedSyncConfig>,
+    state: State<'_, SharedClipboardState>,
+) -> Result<(), String> {
+    push_current(&config, &state).await
+}
+
+/// 把一条历史内容写回本机剪贴板（历史列表里点「复制」）。
+#[tauri::command]
+pub fn apply_clipboard_text(text: String, state: State<SharedClipboardState>) -> Result<(), String> {
+    apply_to_clipboard(&state, &text)
 }

@@ -29,6 +29,16 @@ type Config struct {
 	QuickShare QuickShareConfig `mapstructure:"quick_share"`
 	Sync       SyncConfig       `mapstructure:"sync"`
 	Supervisor supervisor.Config `mapstructure:"supervisor"`
+	Monitor    MonitorConfig    `mapstructure:"monitor"`
+}
+
+// MonitorConfig 系统明细监控配置（进程/端口 Top-N 采集，见 internal/monitor）。
+// 与之统计维度独立的系统级 CPU/内存趋势（1 分钟一次）不受这里影响。
+type MonitorConfig struct {
+	// 采集间隔（秒）。<=0 时按 30 处理。
+	SysDetailIntervalSeconds int `mapstructure:"sys_detail_interval_seconds"`
+	// 每轮记录的进程条数上限（按 cpu*2+mem*1.5+连接数*1 加权评分取前 N 个）。<=0 时按 20 处理。
+	ProcessTopN int `mapstructure:"process_top_n"`
 }
 
 // DBConfig 数据库配置 (注意：这里将 uri 拆分为 host 和 port 以适配 GORM)

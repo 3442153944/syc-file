@@ -94,6 +94,10 @@ func (c *Connection) readPump() {
 				}
 				return
 			}
+			// 收到任何数据帧都说明对端还活着（含客户端的应用层 heartbeat），不能只认 WS 层 pong：
+			// 企业网关的 WS 代理可能吞掉或就地应答 ping/pong，那种网络里客户端心跳一直在发，
+			// 服务端却因为等不到 pong 在 PongWait 后把连接掐了。
+			_ = c.Conn.SetReadDeadline(time.Now().Add(PongWait))
 
 			switch messageType {
 			case websocket.TextMessage:

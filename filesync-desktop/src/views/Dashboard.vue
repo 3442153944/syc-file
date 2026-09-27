@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 首页仪表盘：一屏看清「系统在不在、同步顺不顺、盘还有多少、最近发生了什么」。
 // 数据全部来自既有接口 + 新增的监控/存储接口，页面本身不做任何业务逻辑。
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   NCard, NGrid, NGi, NStatistic, NSpace, NText, NProgress, NButton, NTag, NList,
@@ -13,7 +13,8 @@ import { myStorage } from '@/api/admin/adminApi'
 import type { DiskInfo } from '@/api/file/fileTypes'
 import type { SyncTask, SyncConflict } from '@/api/sync/syncTypes'
 import { useTransferStore } from '@/store/useTransferStore'
-import { useMonitor } from '@/api/monitor/useMonitor'
+import { useMonitor, fetchMonitorHistory } from '@/api/monitor/useMonitor'
+import Sparkline from '@/components/Sparkline.vue'
 
 const router = useRouter()
 const transferStore = useTransferStore()
@@ -52,8 +53,32 @@ async function loadAll() {
   loading.value = false
 }
 
+// 卡片右上角缩略趋势图：先拉一段历史垫底，再跟着 system 的 WS 推送实时追加——
+// 和卡片上的数字用同一份数据源，天然同步刷新，不用另起轮询。
+const SPARK_MAX_POINTS = 60
+const cpuTrend = ref<number[]>([])
+const memTrend = ref<number[]>([])
+
+async function seedTrends() {
+  try {
+    const hist = await fetchMonitorHistory(1)
+    const tail = hist.slice(-SPARK_MAX_POINTS)
+    cpuTrend.value = tail.map((p) => p.cpu)
+    memTrend.value = tail.map((p) => p.mem)
+  } catch {
+    // 拉不到就从空开始，靠后面的实时推送慢慢攒出趋势
+  }
+}
+
+watch(system, (s) => {
+  if (!s) return
+  cpuTrend.value = [...cpuTrend.value, s.cpu.used_percent].slice(-SPARK_MAX_POINTS)
+  memTrend.value = [...memTrend.value, s.memory.used_percent].slice(-SPARK_MAX_POINTS)
+})
+
 onMounted(() => {
   loadAll()
+  seedTrends()
   timer = window.setInterval(loadAll, 15000) // 首页轮询放慢，不跟监控页抢
 })
 onUnmounted(() => {
@@ -116,7 +141,8 @@ const activeTaskCount = computed(
     <!-- 关键指标 -->
     <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
       <NGi span="4 m:2 l:1">
-        <NCard size="small" hoverable @click="router.push('/monitor/system')" style="cursor: pointer">
+        <NCard size="small" hoverable @click="router.push('/monitor/system')" style="cursor: pointer; position: relative">
+          <div class="card-spark"><Sparkline :points="cpuTrend" color="#2a78d6" /></div>
           <NStatistic label="服务器 CPU">
             {{ system ? `${system.cpu.used_percent.toFixed(1)}%` : '—' }}
           </NStatistic>
@@ -128,7 +154,8 @@ const activeTaskCount = computed(
       </NGi>
 
       <NGi span="4 m:2 l:1">
-        <NCard size="small" hoverable @click="router.push('/monitor/system')" style="cursor: pointer">
+        <NCard size="small" hoverable @click="router.push('/monitor/system')" style="cursor: pointer; position: relative">
+          <div class="card-spark"><Sparkline :points="memTrend" color="#eb6834" /></div>
           <NStatistic label="服务器内存">
             {{ system ? `${system.memory.used_percent.toFixed(1)}%` : '—' }}
           </NStatistic>
@@ -244,5 +271,11 @@ const activeTaskCount = computed(
 <style scoped>
 .dashboard {
   padding: 16px;
+}
+.card-spark {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  pointer-events: none;
 }
 </style>

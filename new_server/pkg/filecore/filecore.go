@@ -9,13 +9,14 @@ package filecore
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../file_lib
-#cgo LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp
+#cgo LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
 #include <stdlib.h>
 #include "filecore.h"
 */
 import "C"
 
 import (
+	"encoding/json"
 	"errors"
 	"unsafe"
 )
@@ -159,4 +160,58 @@ func Evict(path string) error {
 	cp := C.CString(path)
 	defer C.free(unsafe.Pointer(cp))
 	return codeToErr(C.fc_evict(cp))
+}
+
+// ProcessInfo 一个进程的资源占用快照。Score 是排序用的加权综合分
+//（cpu*2 + mem*1.5 + 连接数*1，各自在本轮进程集合内归一化，见 sys_info.rs），
+// 网络维度缺跨平台可靠的进程级字节数接口，用连接数代理。
+type ProcessInfo struct {
+	PID            uint32  `json:"pid"`
+	Name           string  `json:"name"`
+	CPUPercent     float32 `json:"cpu_percent"`
+	MemBytes       uint64  `json:"mem_bytes"`
+	MemPercent     float32 `json:"mem_percent"`
+	DiskReadBytes  uint64  `json:"disk_read_bytes"`
+	DiskWriteBytes uint64  `json:"disk_write_bytes"`
+	Connections    uint32  `json:"connections"`
+	Score          float32 `json:"score"`
+}
+
+// ListeningPort 一个正在监听的端口。
+type ListeningPort struct {
+	Port        uint16 `json:"port"`
+	Protocol    string `json:"protocol"` // "tcp" | "udp"
+	PID         uint32 `json:"pid"`
+	ProcessName string `json:"process_name"`
+}
+
+// PortConnCount 某个端口/协议当前的连接数（不含每条连接的明细）。
+type PortConnCount struct {
+	Port        uint16 `json:"port"`
+	Protocol    string `json:"protocol"`
+	Connections uint32 `json:"connections"`
+}
+
+// SysSnapshot 一次系统明细采集的结果。
+type SysSnapshot struct {
+	Processes       []ProcessInfo   `json:"processes"`
+	ListeningPorts  []ListeningPort `json:"listening_ports"`
+	PortConnections []PortConnCount `json:"port_connections"`
+}
+
+// CollectSysSnapshot 采一次进程 Top-N + 端口/连接明细。topN 决定返回的进程
+// 条数（按综合评分排序取前 N 个），端口/连接明细不受 topN 限制。
+func CollectSysSnapshot(topN int) (*SysSnapshot, error) {
+	var cJSON *C.char
+	rc := C.fc_sys_snapshot(C.uint32_t(topN), &cJSON)
+	if err := codeToErr(rc); err != nil {
+		return nil, err
+	}
+	defer C.fc_free_string(cJSON)
+
+	var snap SysSnapshot
+	if err := json.Unmarshal([]byte(C.GoString(cJSON)), &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
 }

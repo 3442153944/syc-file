@@ -38,7 +38,7 @@
 compile_error!("filecore 仅支持 unix 系（Linux/Android/macOS/OHOS）与 Windows 目标");
 
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::raw::c_char;
@@ -50,6 +50,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
+
+mod sys_info;
 
 pub const FC_OK: i32 = 0;
 pub const FC_ERR_IO: i32 = -1;
@@ -69,10 +71,11 @@ const MAX_CHUNK_SIZE: u64 = 1 << 30; // 1 GiB
 const FINALIZE_WINDOW: usize = 64 << 20; // 64 MiB
 
 /// ABI 版本号，供宿主 smoke test 确认链接成功。
-/// v2：新增 fc_evict、FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe（客户端描述计算）。
+/// v2：新增 fc_evict、FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe（客户端描述计算）；
+/// v4：新增 fc_sys_snapshot/fc_free_string（进程/端口明细采集，见 sys_info.rs）。
 #[no_mangle]
 pub extern "C" fn fc_abi_version() -> i32 {
-    3
+    4
 }
 
 // ---------------------------------------------------------------------------
@@ -715,4 +718,41 @@ pub extern "C" fn fc_evict(path: *const c_char) -> i32 {
         evict_handle(path);
         FC_OK
     })
+}
+
+// ---------------------------------------------------------------------------
+// 系统明细采集（进程 / 端口，见 sys_info.rs）
+// ---------------------------------------------------------------------------
+
+/// 采一次进程 Top-N + 端口/连接明细，以 JSON 字符串写入 `*out_json`。
+/// `top_n`：进程按综合评分（cpu/mem/连接数加权，见 sys_info.rs）取前 N 个。
+///
+/// 返回的字符串由 Rust 分配，调用方读完后【必须】调 `fc_free_string` 释放——
+/// Go 的 runtime 分配器和 Rust 的不是同一个，不能直接 C.free()。
+#[no_mangle]
+pub extern "C" fn fc_sys_snapshot(top_n: u32, out_json: *mut *mut c_char) -> i32 {
+    ffi_guard(|| {
+        if out_json.is_null() {
+            return FC_ERR_ARG;
+        }
+        let json = sys_info::collect_snapshot(top_n as usize);
+        match CString::new(json) {
+            Ok(cstr) => {
+                unsafe { *out_json = cstr.into_raw() };
+                FC_OK
+            }
+            Err(_) => FC_ERR_IO, // 理论上不会发生：JSON 序列化不产生内嵌 NUL
+        }
+    })
+}
+
+/// 释放 `fc_sys_snapshot` 返回的字符串。空指针安全（no-op）。
+#[no_mangle]
+pub extern "C" fn fc_free_string(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        drop(CString::from_raw(s));
+    }));
 }
