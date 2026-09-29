@@ -197,6 +197,8 @@ type SysSnapshot struct {
 	Processes       []ProcessInfo   `json:"processes"`
 	ListeningPorts  []ListeningPort `json:"listening_ports"`
 	PortConnections []PortConnCount `json:"port_connections"`
+	// 本轮归一化 cpu_percent 用的逻辑核数，见 sys_info.rs 的注释。
+	NumCpus uint32 `json:"num_cpus"`
 }
 
 // CollectSysSnapshot 采一次进程 Top-N + 端口/连接明细。topN 决定返回的进程

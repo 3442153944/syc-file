@@ -190,7 +190,7 @@ pub fn run() {
                 // WebView 没了，页面卸载钩子不一定有机会执行：监控页的 WS 订阅要在这里退掉，
                 // 否则服务端会一直按间隔推送没人看的指标
                 tauri::WindowEvent::Destroyed => {
-                    ws_client::set_monitor_subscription(0);
+                    ws_client::set_monitor_subscription(0, false);
                     logger::info("app", "主窗口已销毁，常驻内存仅剩后台进程");
                 }
                 _ => {}
@@ -246,6 +246,7 @@ pub fn run() {
             // 系统监控（WS 推送）
             ws_client::subscribe_monitor,
             ws_client::unsubscribe_monitor,
+            ws_client::set_process_detail_boost,
             // 用户域
             commands::user::login,
             commands::user::restore_token,

@@ -113,6 +113,30 @@ export interface ProcessInfo {
 export interface ProcessFrame {
   t: number
   processes: ProcessInfo[]
+  /** 本帧归一化 cpu_percent 用的逻辑核数，诊断用——和任务管理器的核数对不上说明有 bug */
+  num_cpus?: number
+}
+
+/**
+ * 一条资源告警。见后端 internal/monitor/resource_alert.go。
+ * 触发条件看的是单核占用（trigger_core/trigger_cpu_percent），不是单个进程——
+ * top_processes 只是触发那一刻顺手存的 Top-N 进程快照，供排查参考，不是触发原因。
+ */
+export interface ResourceAlert {
+  id: number
+  triggered_at: number // unix 秒
+  trigger_core: number // 触发告警的核心序号（0-based）
+  trigger_cpu_percent: number // 该核心当时的占用率
+  top_processes: ProcessInfo[]
+  status: 'active' | 'resolved'
+  resolved_at: number // 0 表示未恢复
+}
+
+/** 拉最近 days 天的资源告警历史，按触发时间倒序。status 不传则不过滤。 */
+export function fetchResourceAlerts(days = 7, status?: 'active' | 'resolved'): Promise<ResourceAlert[]> {
+  const params: Record<string, string> = { days: String(days) }
+  if (status) params.status = status
+  return httpGet<ResourceAlert[]>('/monitor/alerts', params)
 }
 
 /** 一个正在监听的端口。 */

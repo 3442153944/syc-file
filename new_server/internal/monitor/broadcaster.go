@@ -34,9 +34,10 @@ const (
 	defaultInterval = 2 * time.Second
 )
 
-// subInfo 单个订阅者：它想要的推送间隔。
+// subInfo 单个订阅者：它想要的推送间隔，以及要不要进程秒级采集。
 type subInfo struct {
-	interval time.Duration
+	interval    time.Duration
+	detailBoost bool
 }
 
 type broadcaster struct {
@@ -50,7 +51,11 @@ type broadcaster struct {
 var globalBroadcaster = &broadcaster{subs: make(map[string]subInfo)}
 
 // Subscribe 加入订阅集，按需拉起推送循环。interval 会被夹到 [min,max]。
-func (b *broadcaster) Subscribe(connID string, interval time.Duration) {
+// detailBoost=true 表示这个订阅者正看着一个短时间窗口的进程视图，需要后端把
+// 进程/端口明细的采集频率临时顶到秒级（见 sys_detail.go 的 SetDetailBoost）。
+// 同一个 connID 重复调用会覆盖旧的订阅信息——前端切换时间区间预设时就是这么
+// 用的：不退订重订，直接带着新的 detailBoost 再 Subscribe 一次。
+func (b *broadcaster) Subscribe(connID string, interval time.Duration, detailBoost bool) {
 	if interval < minInterval {
 		interval = defaultInterval
 	}
@@ -58,7 +63,7 @@ func (b *broadcaster) Subscribe(connID string, interval time.Duration) {
 		interval = maxInterval
 	}
 	b.mu.Lock()
-	b.subs[connID] = subInfo{interval: interval}
+	b.subs[connID] = subInfo{interval: interval, detailBoost: detailBoost}
 	needStart := !b.running
 	if needStart {
 		b.running = true
@@ -66,6 +71,7 @@ func (b *broadcaster) Subscribe(connID string, interval time.Duration) {
 	}
 	stop := b.stop
 	b.mu.Unlock()
+	b.syncDetailBoost()
 
 	if needStart {
 		go b.loop(stop)
@@ -79,6 +85,22 @@ func (b *broadcaster) Unsubscribe(connID string) {
 	b.mu.Lock()
 	delete(b.subs, connID)
 	b.mu.Unlock()
+	b.syncDetailBoost()
+}
+
+// syncDetailBoost 按当前订阅集里有没有人要秒级视图，同步全局采集开关。
+// 每次订阅集变化（新增/退订/死连接剔除）都要调一次。
+func (b *broadcaster) syncDetailBoost() {
+	b.mu.Lock()
+	want := false
+	for _, s := range b.subs {
+		if s.detailBoost {
+			want = true
+			break
+		}
+	}
+	b.mu.Unlock()
+	SetDetailBoost(want)
 }
 
 // loop 采样 + 推送。间隔取所有订阅者请求的最小值（最挑剔的那个说了算）。
@@ -137,6 +159,9 @@ func (b *broadcaster) tick() bool {
 			b.running = false
 		}
 		b.mu.Unlock()
+		// 掉线剔除也可能让"还有没有人要秒级"这个结论变化，同步一下，
+		// 不然一个开着秒级视图的客户端悄悄掉线，采集会一直空转在高频挡位。
+		b.syncDetailBoost()
 		return empty
 	}
 	return false
@@ -189,18 +214,21 @@ func (b *broadcaster) currentInterval() time.Duration {
 // HandleMonitorMessage 处理客户端上行的 monitor 消息：subscribe / unsubscribe。
 // 由 InitBroadcaster 注册到 Hub。
 //
-// 上行形状：{type:"monitor", content:{event:"subscribe"|"unsubscribe", interval:2}}
+// 上行形状：{type:"monitor", content:{event:"subscribe"|"unsubscribe", interval:2, detail_boost:false}}
+// detail_boost：前端进程页选了短时间窗口（比如最近 5/15/30 分钟）时置 true，
+// 服务端据此把 sys_detail 采集临时顶到秒级，见 SetDetailBoost。
 func HandleMonitorMessage(conn *ws.Connection, msg *ws.Message) {
 	var content struct {
-		Event    string `json:"event"`
-		Interval int    `json:"interval"` // 秒
+		Event       string `json:"event"`
+		Interval    int    `json:"interval"` // 秒
+		DetailBoost bool   `json:"detail_boost"`
 	}
 	if err := json.Unmarshal(msg.Content, &content); err != nil {
 		return
 	}
 	switch content.Event {
 	case "subscribe":
-		globalBroadcaster.Subscribe(conn.ID, time.Duration(content.Interval)*time.Second)
+		globalBroadcaster.Subscribe(conn.ID, time.Duration(content.Interval)*time.Second, content.DetailBoost)
 	case "unsubscribe":
 		globalBroadcaster.Unsubscribe(conn.ID)
 	}

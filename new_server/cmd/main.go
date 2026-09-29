@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -11,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"syc-file/config"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
@@ -24,7 +24,9 @@ import (
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/procpriority"
 	"syc-file/pkg/upload_store"
+	"syscall"
 	"time"
 )
 
@@ -49,6 +51,11 @@ func main() {
 
 	logger.Logger.Info("配置与日志初始化成功", zap.Int("port", config.Conf.Server.Port))
 
+	// 尽量提高本进程的调度优先级：资源告警/进程采集的价值就在于系统被打满
+	// 时还能看清状况，自己跟普通进程一个优先级会在系统最忙的时候反而被
+	// 调度器晾在一边，见 pkg/procpriority 的注释
+	procpriority.Raise()
+
 	// 3. 初始化 Gin 引擎
 	// 以前是 r := gin.Default()，现在改为 gin.New()，并手动挂载我们的 Zap 中间件和默认的恢复中间件
 	r := gin.New()
@@ -56,7 +63,7 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Content-Type", "Token"},
+		AllowHeaders:     []string{"Content-Type", "Token", "Device-Id"},
 		ExposeHeaders:    []string{"New-Token", "Token-Refreshed"},
 		AllowCredentials: false,
 		MaxAge:           86400 * time.Second,
@@ -93,6 +100,7 @@ func main() {
 		&model.AppRelease{},
 		&model.MonitorHistory{},
 		&model.ProcessHistory{},
+		&model.ResourceAlert{},
 		&model.ListeningPortHistory{},
 		&model.PortConnHistory{},
 	); err != nil {
@@ -127,6 +135,14 @@ func main() {
 	//Rust 侧 sysinfo+netstat2 采集（见 file_lib/src/sys_info.rs），存储策略同上
 	monitor.StartSysDetailRecorder()
 	monitor.StartSysDetailArchiver()
+
+	//资源告警巡检：独立于上面的历史采集 ticker，固定 3s 基线扫一次单进程 CPU 占比，
+	//越过阈值连续几次才告警，见 internal/monitor/resource_alert.go
+	monitor.StartResourceAlertWatcher()
+
+	//监控历史长期表降采样清理：1 个月以上降到按小时、1 年以上降到按天，
+	//不然 process_history 这类明细表会无限膨胀，见 internal/monitor/retention.go
+	monitor.StartRetentionCleaner()
 
 	//初始化设备状态Redis存储
 	device_store.Init(redisClient)
@@ -193,7 +209,7 @@ func main() {
 
 	go func() {
 		logger.Logger.Info("服务器准备启动", zap.String("addr", addr))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Logger.Fatal("服务器启动失败", zap.Error(err))
 		}
 	}()
