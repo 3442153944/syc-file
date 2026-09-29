@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +26,10 @@ const (
 	sysDetailTTL          = 8 * 24 * time.Hour
 	defaultDetailInterval = 30 * time.Second
 	defaultTopN           = 20
+	// 秒级采集：前端进程页选了 5/15/30 分钟这类短窗口时才需要的分辨率。
+	// 只在有人要的时候临时提速，没人要就退回 defaultDetailInterval，不能常驻——
+	// 8 天 TTL 的 Redis 热存按 1s 一帧存不起，MySQL 归档表也会被灌爆。
+	boostDetailInterval = 1 * time.Second
 )
 
 // sysDetailFrame 一次采集的完整快照，Redis 里按天存的就是这个结构的 JSON 数组。
@@ -32,6 +38,7 @@ type sysDetailFrame struct {
 	Processes       []filecore.ProcessInfo   `json:"processes"`
 	ListeningPorts  []filecore.ListeningPort `json:"listening_ports"`
 	PortConnections []filecore.PortConnCount `json:"port_connections"`
+	NumCpus         uint32                   `json:"num_cpus"`
 }
 
 func sysDetailKey(t time.Time) string {
@@ -54,18 +61,58 @@ func detailTopN() int {
 	return n
 }
 
+var (
+	// detailBoosted：是否至少有一个订阅者要秒级采集，由 broadcaster 的订阅集变化驱动
+	// （见 broadcaster.go 的 syncDetailBoost）。
+	detailBoosted atomic.Bool
+	// 采集 goroutine 自己的 ticker，SetDetailBoost 需要跨 goroutine 立即 reset 它，
+	// 不能等到下一次已经排定的 tick 才生效——那样最坏要等一个默认间隔（30s）才提速，
+	// 短窗口视图刚打开时等于白等。指针读写和 Reset 调用都过这把锁。
+	detailTickerMu sync.Mutex
+	detailTicker   *time.Ticker
+)
+
+func effectiveDetailInterval() time.Duration {
+	if detailBoosted.Load() {
+		return boostDetailInterval
+	}
+	return detailInterval()
+}
+
+// SetDetailBoost 打开/关闭秒级采集。状态没变就什么都不做（避免每次订阅集小抖动
+// 都去折腾 ticker）；状态真的翻转时立即重置 ticker 到新间隔，打开时还补采一帧，
+// 不让前端刚打开秒级视图就先干等一个间隔。
+func SetDetailBoost(on bool) {
+	if detailBoosted.Swap(on) == on {
+		return
+	}
+	detailTickerMu.Lock()
+	t := detailTicker
+	detailTickerMu.Unlock()
+	if t != nil {
+		t.Reset(effectiveDetailInterval())
+	}
+	if on {
+		go recordDetailOnce()
+	}
+}
+
 // StartSysDetailRecorder 后台常驻采集，独立于 WS broadcaster 的懒启动，
-// 也独立于 StartHistoryRecorder 的 1 分钟节奏——间隔从 config.monitor 读。
+// 也独立于 StartHistoryRecorder 的 1 分钟节奏——间隔从 config.monitor 读，
+// 或在有人要秒级视图时临时顶到 boostDetailInterval（见 SetDetailBoost）。
 func StartSysDetailRecorder() {
 	recordDetailOnce()
 	go func() {
-		interval := detailInterval()
+		interval := effectiveDetailInterval()
 		ticker := time.NewTicker(interval)
+		detailTickerMu.Lock()
+		detailTicker = ticker
+		detailTickerMu.Unlock()
 		defer ticker.Stop()
 		for range ticker.C {
 			recordDetailOnce()
-			// 配置支持热改：间隔变了就重建 ticker
-			if ni := detailInterval(); ni != interval {
+			// 配置热改 / 秒级开关都可能已经让目标间隔变了，对齐一下
+			if ni := effectiveDetailInterval(); ni != interval {
 				interval = ni
 				ticker.Reset(interval)
 			}
@@ -86,6 +133,7 @@ func recordDetailOnce() {
 		Processes:       snap.Processes,
 		ListeningPorts:  snap.ListeningPorts,
 		PortConnections: snap.PortConnections,
+		NumCpus:         snap.NumCpus,
 	}
 	data, err := json.Marshal(frame)
 	if err != nil {
@@ -333,7 +381,7 @@ func Processes(c *gin.Context) {
 	if c.Query("latest") != "" {
 		out := []gin.H{}
 		if f := latestSysDetailFrame(c.Request.Context()); f != nil {
-			out = append(out, gin.H{"t": f.Time, "processes": f.Processes})
+			out = append(out, gin.H{"t": f.Time, "processes": f.Processes, "num_cpus": f.NumCpus})
 		}
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": out})
 		return
@@ -344,6 +392,7 @@ func Processes(c *gin.Context) {
 	type point struct {
 		Time      int64                  `json:"t"`
 		Processes []filecore.ProcessInfo `json:"processes"`
+		NumCpus   uint32                 `json:"num_cpus"`
 	}
 	out := make([]point, 0, len(frames))
 	for _, f := range frames {
@@ -360,7 +409,7 @@ func Processes(c *gin.Context) {
 		if len(procs) == 0 {
 			continue
 		}
-		out = append(out, point{Time: f.Time, Processes: procs})
+		out = append(out, point{Time: f.Time, Processes: procs, NumCpus: f.NumCpus})
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": out})
 }

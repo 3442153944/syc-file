@@ -10,6 +10,7 @@ import ProcessDimension from '@/components/monitor/ProcessDimension.vue'
 import PortDimension from '@/components/monitor/PortDimension.vue'
 import NetworkDimension from '@/components/monitor/NetworkDimension.vue'
 import DiskDimension from '@/components/monitor/DiskDimension.vue'
+import AlertDimension from '@/components/monitor/AlertDimension.vue'
 
 const { system, network, processes, listeningPorts, portConnections, connected } = useMonitor(2)
 
@@ -143,6 +144,9 @@ function usageColor(p: number): string {
         </NTabPane>
         <NTabPane name="disk" tab="硬盘资源">
           <DiskDimension :live="processes" />
+        </NTabPane>
+        <NTabPane name="alert" tab="资源告警">
+          <AlertDimension />
         </NTabPane>
       </NTabs>
     </NCard>

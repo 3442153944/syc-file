@@ -85,24 +85,33 @@ pub fn ws_send_text(json: String) -> bool {
 /// 监控订阅意向：断线重连后 connID 会变、服务端旧订阅随之失效，
 /// 所以要在每次新会话建立时自动补发一次 subscribe。0 = 未订阅，>0 = 订阅且为推送间隔（秒）。
 static MONITOR_SUB_INTERVAL: AtomicI64 = AtomicI64::new(0);
+/// 是否要求服务端把进程明细采集顶到秒级（见 new_server 的 SetDetailBoost）。
+/// 断线重连时跟 interval 一起补发，避免重连后悄悄掉回默认间隔而前端毫无感知。
+static MONITOR_SUB_DETAIL_BOOST: AtomicBool = AtomicBool::new(false);
 
 /// 设置/取消监控订阅意向，并立即对当前会话生效。interval<=0 表示退订。
-pub fn set_monitor_subscription(interval: i64) {
+pub fn set_monitor_subscription(interval: i64, detail_boost: bool) {
     MONITOR_SUB_INTERVAL.store(interval.max(0), Ordering::SeqCst);
+    MONITOR_SUB_DETAIL_BOOST.store(detail_boost, Ordering::SeqCst);
     let frame = if interval > 0 {
-        serde_json::json!({"type":"monitor","content":{"event":"subscribe","interval":interval}})
+        serde_json::json!({
+            "type":"monitor",
+            "content":{"event":"subscribe","interval":interval,"detail_boost":detail_boost}
+        })
     } else {
         serde_json::json!({"type":"monitor","content":{"event":"unsubscribe"}})
     };
     ws_send_text(frame.to_string());
 }
 
-/// 新会话建立后调用：若之前订阅了监控，自动补发 subscribe。
+/// 新会话建立后调用：若之前订阅了监控，自动补发 subscribe（带上当时的 detail_boost）。
 fn resubscribe_monitor() {
     let interval = MONITOR_SUB_INTERVAL.load(Ordering::SeqCst);
     if interval > 0 {
+        let detail_boost = MONITOR_SUB_DETAIL_BOOST.load(Ordering::SeqCst);
         let frame = serde_json::json!({
-            "type":"monitor","content":{"event":"subscribe","interval":interval}
+            "type":"monitor",
+            "content":{"event":"subscribe","interval":interval,"detail_boost":detail_boost}
         });
         ws_send_text(frame.to_string());
     }
@@ -110,15 +119,29 @@ fn resubscribe_monitor() {
 
 /// 订阅系统监控。进入监控页时调用，指标经 WS 推来，前端监听 `monitor-metrics` 事件。
 /// interval 是期望推送间隔（秒），服务端会夹到 [1,10]。断线重连由 Rust 侧自动补订阅。
+/// 不改 detail_boost（沿用当前值，默认 false）——秒级采集由 set_process_detail_boost 单独控制。
 #[tauri::command]
 pub fn subscribe_monitor(interval: Option<i64>) {
-    set_monitor_subscription(interval.unwrap_or(2).max(1));
+    let detail_boost = MONITOR_SUB_DETAIL_BOOST.load(Ordering::SeqCst);
+    set_monitor_subscription(interval.unwrap_or(2).max(1), detail_boost);
 }
 
 /// 退订系统监控。离开监控页时调用，服务端随即停止为本连接采样。
 #[tauri::command]
 pub fn unsubscribe_monitor() {
-    set_monitor_subscription(0);
+    set_monitor_subscription(0, false);
+}
+
+/// 打开/关闭进程秒级采集，不改推送间隔。进程页切换时间区间预设时调用：选了
+/// 5/15/30 分钟这类短窗口传 true，选更长的区间传 false。
+/// 前提是已经订阅了监控（interval>0）——没订阅就没有当前会话可用的推送间隔，直接忽略。
+#[tauri::command]
+pub fn set_process_detail_boost(on: bool) {
+    let interval = MONITOR_SUB_INTERVAL.load(Ordering::SeqCst);
+    if interval <= 0 {
+        return;
+    }
+    set_monitor_subscription(interval, on);
 }
 
 async fn run_ws_loop(
@@ -335,6 +358,13 @@ fn route_text(text: &str, app: &AppHandle, sync_tx: &mpsc::UnboundedSender<serde
         // 监控：服务端定时推送的指标帧，原样转成 Tauri 事件给监控页
         "monitor" => {
             let _ = app.emit("monitor-metrics", content);
+        }
+        // 通用通知：服务端主动推送的提示（目前用于资源告警，见 new_server 的
+        // ws.NotifyAll），内容形如 {title, message, level, time}，原样转发给前端
+        // 弹 naive-ui 通知，不在 Rust 侧解析字段——以后这条通道加别的通知类型
+        // 也不用跟着改 Rust。
+        "notification" => {
+            let _ = app.emit("server-notification", content);
         }
         "file_sync" => {
             let _ = sync_tx.send(content);

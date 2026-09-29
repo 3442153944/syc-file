@@ -29,6 +29,18 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 调试用：发请求前把方法/URL/请求头打到 console（桌面端经 consoleBridge 转发进日志窗口 + 日志文件）。
+ * Token 值太长且敏感，只打前 8 位；其余头原样打，方便核对 Device-Id 之类是否真的发出去了。
+ */
+function logOutgoing(method: string, url: string, headers: Record<string, string>) {
+  const safeHeaders: Record<string, string> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    safeHeaders[k] = k.toLowerCase() === 'token' && v ? `${v.slice(0, 8)}...(${v.length}字符)` : v
+  }
+  console.info(`[http] → ${method} ${url}`, safeHeaders)
+}
+
 async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
   // 基地址现取：切节点后 getServerUrl() 立刻返回新节点，不用重启页面
   const url = `${getServerUrl()}/v1${path}`
@@ -48,6 +60,8 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
     init.body = JSON.stringify(body)
   }
 
+  logOutgoing(method, url, headers)
+
   let res: Response
   try {
     res = await fetch(url, init)
@@ -62,6 +76,7 @@ async function send<T>(method: string, path: string, body?: unknown): Promise<T>
   }
 
   const text = await res.text()
+  console.info(`[http] ← ${res.status} ${url}`, text.slice(0, 500))
   let json: ApiEnvelope<T>
   try {
     json = JSON.parse(text) as ApiEnvelope<T>
@@ -119,6 +134,8 @@ export async function httpPostRawBytes<T>(
   if (token) headers['Token'] = token
   headers['Device-Id'] = getDeviceId()
 
+  logOutgoing('POST', url, headers)
+
   const ctrl = new AbortController()
   const unregister = registerAbort(ctrl)
   let res: Response
@@ -162,9 +179,15 @@ export function httpPostBlob<T>(
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', url)
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-    if (token) xhr.setRequestHeader('Token', token)
-    xhr.setRequestHeader('Device-Id', getDeviceId())
+    const reqHeaders: Record<string, string> = { 'Content-Type': 'application/octet-stream' }
+    xhr.setRequestHeader('Content-Type', reqHeaders['Content-Type'])
+    if (token) {
+      reqHeaders['Token'] = token
+      xhr.setRequestHeader('Token', token)
+    }
+    reqHeaders['Device-Id'] = getDeviceId()
+    xhr.setRequestHeader('Device-Id', reqHeaders['Device-Id'])
+    logOutgoing('POST', url, reqHeaders)
 
     // 节点切换时 net.ts 会 abort 这个 controller，转发给 XHR
     const ctrl = new AbortController()
@@ -183,6 +206,7 @@ export function httpPostBlob<T>(
 
     xhr.onload = () => {
       const text = xhr.responseText
+      console.info(`[http] ← ${xhr.status} ${url}`, text.slice(0, 500))
       try {
         settle(JSON.parse(text) as ApiEnvelope<T>)
       } catch {

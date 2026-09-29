@@ -222,18 +222,31 @@ pub fn report_transport_failure(reason: &str) {
 /// - 方法：先 GET，撞上 404/405 再试一次 POST（旧后端只注册了 POST /v1/ping）；
 /// - 响应：新版是 `{code,message,data}` 信封，旧版只有 `{"message":"pong"}`，
 ///   后者只要 HTTP 200 就算通，data 留空（前端会显示成「未知节点」，但不影响选路）。
+/// 探测专用的共享 client，进程内只建一次。
+///
+/// 之前每次探测都现建一个 reqwest::Client：Windows 上 Client::build() 会去查一遍系统
+/// 代理设置（注册表/WinHTTP），这一步经常要花几十毫秒——测出来的"延迟"里混进了这段
+/// 建连开销，本机/局域网节点明明 1~2ms 能到，报出来却是 50+ms。复用同一个 client 就
+/// 只在首次探测时付这个成本，后面都是纯网络往返。
+fn probe_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(PROBE_TIMEOUT)
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 async fn ping_url(server_url: &str) -> Result<(u64, PingData), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(PROBE_TIMEOUT)
-        .timeout(PROBE_TIMEOUT)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = probe_client();
     let url = format!("{}/v1/ping", server_url.trim_end_matches('/'));
     let started = Instant::now();
 
-    let mut resp = send_probe(&client, reqwest::Method::GET, &url).await?;
+    let mut resp = send_probe(client, reqwest::Method::GET, &url).await?;
     if matches!(resp.status().as_u16(), 404 | 405) {
-        resp = send_probe(&client, reqwest::Method::POST, &url).await?;
+        resp = send_probe(client, reqwest::Method::POST, &url).await?;
     }
 
     let status = resp.status();

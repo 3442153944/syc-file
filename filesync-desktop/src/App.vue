@@ -6,6 +6,7 @@ import { useTransferStore } from './store/useTransferStore'
 import LogViewer from './views/logs/LogViewer.vue'
 import QuickPaste from './views/share/QuickPaste.vue'
 import GlobalPasteListener from './components/GlobalPasteListener.vue'
+import ServerNotificationListener from './components/ServerNotificationListener.vue'
 
 // 日志窗口（label === 'logs'）只渲染 LogViewer，粘贴快传悬浮窗（label === 'quick-paste'）
 // 只渲染 QuickPaste，两者都跳过主应用路由。
@@ -38,6 +39,7 @@ useTransferStore().initWs()
       <n-dialog-provider>
         <div class="main">
           <GlobalPasteListener />
+          <ServerNotificationListener />
           <router-view />
         </div>
       </n-dialog-provider>

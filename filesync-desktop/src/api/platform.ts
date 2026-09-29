@@ -66,8 +66,20 @@ export function avatarUrl(relativePath: string | undefined | null): string {
 // ── device ID ─────────────────────────────────────────────────────────────────
 // Tauri 模式由 Rust 生成并持有；web 模式在 localStorage 生成一次后复用。
 
+// Tauri 下缓存一份到内存：http.ts 的 fetch/XHR 请求（如粘贴快传的 httpPostBlob）
+// 是纯前端发起、不经过 Rust 的 ApiClient，取 device id 又必须同步返回，撑不起
+// 每次请求都 await invoke。main.ts 启动时调一次 initDeviceId() 填好这个缓存。
+let cachedDeviceId = ''
+
+/** 由 main.ts 启动时调一次。Tauri 模式下把 Rust 持有的 device_id 同步进内存缓存。 */
+export async function initDeviceId(): Promise<void> {
+    if (!isTauri()) return
+    const {invoke} = await import('@tauri-apps/api/core')
+    cachedDeviceId = await invoke<string>('get_device_id')
+}
+
 export function getDeviceId(): string {
-    if (isTauri()) return ''   // web 模式才走这里；Tauri 调 invoke('get_device_id')
+    if (isTauri()) return cachedDeviceId
     let id = localStorage.getItem(KEY_DEVICE)
     if (!id) {
         id = crypto.randomUUID()

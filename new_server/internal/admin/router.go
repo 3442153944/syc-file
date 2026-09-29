@@ -60,4 +60,5 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	m.GET("/history", monitor.History)
 	m.GET("/processes", monitor.Processes)
 	m.GET("/ports", monitor.Ports)
+	m.GET("/alerts", monitor.Alerts)
 }

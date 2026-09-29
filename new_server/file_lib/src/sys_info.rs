@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use netstat2::{
     get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
@@ -55,11 +56,36 @@ pub struct Snapshot {
     pub processes: Vec<ProcessInfo>,
     pub listening_ports: Vec<ListeningPort>,
     pub port_connections: Vec<PortConnCount>,
+    /// 本轮采集用来归一化 cpu_percent 的逻辑核数，跟着快照带出去方便核对
+    /// （比如怀疑某台机器上算出来的 cpu_percent 不对头，先看这个数对不对）。
+    pub num_cpus: u32,
 }
 
-fn system() -> &'static Mutex<System> {
-    static SYS: OnceLock<Mutex<System>> = OnceLock::new();
-    SYS.get_or_init(|| Mutex::new(System::new_all()))
+/// 长期存活的 System 会在 Windows 上偶发"某个 PID 的 cpu_usage 卡死不再更新"
+/// （排查记录：一个已经退出的 rustc.exe 子进程，读数精确冻结在同一个值上，
+/// 跨越采集间隔从 1s 变到 30s 都没有任何变化——sysinfo 对它的增量追踪状态
+/// 没有正常收敛到 0，只是不再刷新了。具体是 sysinfo 在 Windows 下哪一步的
+/// 边界情况目前没有继续深挖，但现象很明确：只要 System 实例活得够久，
+/// 就可能有 PID 卡在这种状态里，从"僵尸读数"变成"永远的僵尸读数"）。
+///
+/// 兜底方案：定期把整个 System 换成全新实例。新实例里没有任何 PID 的历史
+/// 基线，卡死的旧状态没机会带过来。代价是换新那一轮 cpu_usage 会短暂失真
+/// （denominator 太小），但这比一个进程的读数永远卡死要好得多。
+const SYS_RESET_INTERVAL: Duration = Duration::from_secs(120);
+
+struct SysState {
+    sys: System,
+    last_reset: Instant,
+}
+
+fn system() -> &'static Mutex<SysState> {
+    static SYS: OnceLock<Mutex<SysState>> = OnceLock::new();
+    SYS.get_or_init(|| {
+        Mutex::new(SysState {
+            sys: System::new_all(),
+            last_reset: Instant::now(),
+        })
+    })
 }
 
 /// 采一次快照，序列化成 JSON 字符串（失败时退化成 `{}`，调用方按空快照处理）。
@@ -68,7 +94,12 @@ pub fn collect_snapshot(top_n: usize) -> String {
 }
 
 fn build_snapshot(top_n: usize) -> Snapshot {
-    let mut sys = system().lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = system().lock().unwrap_or_else(|e| e.into_inner());
+    if state.last_reset.elapsed() >= SYS_RESET_INTERVAL {
+        state.sys = System::new_all();
+        state.last_reset = Instant::now();
+    }
+    let sys = &mut state.sys;
     sys.refresh_all();
 
     let mut names: HashMap<u32, String> = HashMap::new();
@@ -79,10 +110,15 @@ fn build_snapshot(top_n: usize) -> Snapshot {
     let (listening_ports, port_connections, conn_by_pid) = scan_sockets(&names);
 
     let total_mem = sys.total_memory().max(1) as f32;
+    // sysinfo 的 Process::cpu_usage() 是相对单核的：一个吃满 4 个核的进程在 8 核机器上
+    // 报的是 400，不是 50。不除以核数直接当"占用百分比"用会跟前端 0~100% 的坐标轴、
+    // 以及"总 CPU 占用"这类直觉严重对不上（尤其多线程进程一冒峰就顶穿 100% 刻度线）。
+    // 这里统一换算成相对整机的占比，跟 mem_percent 口径一致。
+    let num_cpus = sys.cpus().len().max(1) as f32;
     let max_cpu = sys
         .processes()
         .values()
-        .map(|p| p.cpu_usage())
+        .map(|p| p.cpu_usage() / num_cpus)
         .fold(0.0f32, f32::max)
         .max(1e-6);
     let max_conn = conn_by_pid.values().copied().max().unwrap_or(0).max(1) as f32;
@@ -92,7 +128,9 @@ fn build_snapshot(top_n: usize) -> Snapshot {
         .iter()
         .map(|(pid, p)| {
             let pid_u32 = pid.as_u32();
-            let cpu = p.cpu_usage();
+            // 单个进程物理上不可能用得比"整机所有核"还多，超过 100 只可能是 sysinfo
+            // 在采样窗口内的测量噪声（线程刚创建/刚被调度到不同核之类），夹住兜底。
+            let cpu = (p.cpu_usage() / num_cpus).min(100.0);
             let mem_bytes = p.memory();
             let mem_percent = mem_bytes as f32 / total_mem * 100.0;
             let disk = p.disk_usage();
@@ -121,6 +159,7 @@ fn build_snapshot(top_n: usize) -> Snapshot {
         processes,
         listening_ports,
         port_connections,
+        num_cpus: num_cpus as u32,
     }
 }
 
