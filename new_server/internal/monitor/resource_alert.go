@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shirou/gopsutil/v3/cpu"
+	"gorm.io/gorm"
 
 	"syc-file/internal/model"
 	"syc-file/internal/ws"
@@ -180,11 +182,35 @@ type alertOut struct {
 	ResolvedAt   int64           `json:"resolved_at"` // 0 表示未恢复
 }
 
-// Alerts GET /v1/monitor/alerts?days=N&status=active|resolved —— 资源告警历史。
-// status 不传则不过滤，按触发时间倒序（最新的在前，告警历史列表要的就是这个顺序）。
+// alertPage 分页响应：形状与 admin/sync 域一致 {list,total,page,page_size}，
+// 另带 active_count——「进行中」总数要看整个时间范围而不是当前页，前端没法自己数。
+type alertPage struct {
+	List        []alertOut `json:"list"`
+	Total       int64      `json:"total"`
+	Page        int        `json:"page"`
+	PageSize    int        `json:"page_size"`
+	ActiveCount int64      `json:"active_count"`
+}
+
+// Alerts GET /v1/monitor/alerts?days=N&status=active|resolved&page=&page_size=
+// —— 资源告警历史。status 不传则不过滤，按触发时间倒序（最新的在前）。
+// 告警不会自动清理，记录会一直涨，所以必须服务端分页；page 从 1 开始，page_size 默认 20、上限 200。
 func Alerts(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	empty := alertPage{List: []alertOut{}, Page: page, PageSize: pageSize}
+
 	if db == nil {
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": []alertOut{}})
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": empty})
 		return
 	}
 	days := parseDaysParam(c)
@@ -193,14 +219,22 @@ func Alerts(c *gin.Context) {
 	}
 	since := time.Now().AddDate(0, 0, -days)
 
-	q := db.Model(&model.ResourceAlert{}).Where("triggered_at >= ?", since)
+	base := db.Model(&model.ResourceAlert{}).Where("triggered_at >= ?", since)
+	q := base
 	if status := c.Query("status"); status != "" {
 		q = q.Where("status = ?", status)
 	}
 
+	var total, activeCount int64
+	if err := q.Count(&total).Error; err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": empty})
+		return
+	}
+	base.Session(&gorm.Session{}).Where("status = ?", "active").Count(&activeCount)
+
 	var rows []model.ResourceAlert
-	if err := q.Order("triggered_at DESC").Limit(500).Find(&rows).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": []alertOut{}})
+	if err := q.Order("triggered_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&rows).Error; err != nil {
+		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": empty})
 		return
 	}
 
@@ -224,5 +258,7 @@ func Alerts(c *gin.Context) {
 			ResolvedAt:   resolvedAt,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": out})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": alertPage{
+		List: out, Total: total, Page: page, PageSize: pageSize, ActiveCount: activeCount,
+	}})
 }

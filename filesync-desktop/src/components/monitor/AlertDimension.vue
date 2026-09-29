@@ -21,25 +21,57 @@ const days = ref<DaysPreset>(7)
 const alerts = ref<ResourceAlert[]>([])
 const loading = ref(false)
 
+// 服务端分页：告警不会自动清理，记录只增不减，不能一次全拉。
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+const activeCount = ref(0) // 整个时间范围内进行中的总数，由后端给，不是当前页数出来的
+let loadSeq = 0 // 快速翻页/切换时间段时丢弃过期响应
+
+const pagination = computed(() => ({
+  page: page.value,
+  pageSize: pageSize.value,
+  itemCount: total.value,
+  pageSizes: [10, 20, 50, 100],
+  showSizePicker: true,
+  prefix: ({ itemCount }: { itemCount?: number }) => `共 ${itemCount ?? 0} 条`,
+  onUpdatePage: (p: number) => {
+    page.value = p
+    load()
+  },
+  onUpdatePageSize: (s: number) => {
+    pageSize.value = s
+    page.value = 1
+    load()
+  },
+}))
+
 async function load() {
+  const seq = ++loadSeq
   loading.value = true
   try {
-    alerts.value = await fetchResourceAlerts(days.value)
+    const res = await fetchResourceAlerts(days.value, page.value, pageSize.value)
+    if (seq !== loadSeq) return
+    alerts.value = res.list
+    total.value = res.total
+    activeCount.value = res.active_count
   } catch {
+    if (seq !== loadSeq) return
     alerts.value = []
+    total.value = 0
+    activeCount.value = 0
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
 function applyDays(v: DaysPreset) {
   days.value = v
+  page.value = 1
   load()
 }
 
 onMounted(load)
-
-const activeCount = computed(() => alerts.value.filter((a) => a.status === 'active').length)
 
 function fmtTime(unixSec: number): string {
   return unixSec ? new Date(unixSec * 1000).toLocaleString() : '—'
@@ -103,10 +135,13 @@ const detailColumns: DataTableColumns<ProcessInfo> = [
       </template>
       <NSpin :show="loading">
         <NDataTable
-          v-if="alerts.length"
+          v-if="total > 0"
+          remote
           :columns="columns"
           :data="alerts"
+          :row-key="(row: ResourceAlert) => row.id"
           :row-props="rowProps"
+          :pagination="pagination"
           size="small"
           :bordered="false"
         />

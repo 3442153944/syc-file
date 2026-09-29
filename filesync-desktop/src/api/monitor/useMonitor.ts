@@ -132,11 +132,29 @@ export interface ResourceAlert {
   resolved_at: number // 0 表示未恢复
 }
 
-/** 拉最近 days 天的资源告警历史，按触发时间倒序。status 不传则不过滤。 */
-export function fetchResourceAlerts(days = 7, status?: 'active' | 'resolved'): Promise<ResourceAlert[]> {
-  const params: Record<string, string> = { days: String(days) }
+/** 资源告警分页结果。active_count 是整个时间范围内「进行中」的总数，不是当前页的。 */
+export interface ResourceAlertPage {
+  list: ResourceAlert[]
+  total: number
+  page: number
+  page_size: number
+  active_count: number
+}
+
+/** 分页拉最近 days 天的资源告警历史（服务端分页），按触发时间倒序。status 不传则不过滤。 */
+export function fetchResourceAlerts(
+  days = 7,
+  page = 1,
+  pageSize = 20,
+  status?: 'active' | 'resolved',
+): Promise<ResourceAlertPage> {
+  const params: Record<string, string> = {
+    days: String(days),
+    page: String(page),
+    page_size: String(pageSize),
+  }
   if (status) params.status = status
-  return httpGet<ResourceAlert[]>('/monitor/alerts', params)
+  return httpGet<ResourceAlertPage>('/monitor/alerts', params)
 }
 
 /** 一个正在监听的端口。 */
