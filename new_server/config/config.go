@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -14,6 +15,16 @@ var Conf = new(Config)
 
 // Version 服务端版本号，随 /v1/ping 回给客户端，用于客户端比对各节点版本是否一致。
 const Version = "1.0.0"
+
+// 运行模式。dev 即现有的直接启动方式（本机开发 / systemd 直跑二进制），prod 即 Docker 生产部署。
+// 两者差异集中在「环境相关」的行为（Gin 模式、旧密钥文件导入、外部进程托管），业务逻辑完全一致。
+const (
+	ModeDev  = "dev"
+	ModeProd = "prod"
+)
+
+// IsProd 是否生产（Docker）模式。
+func IsProd() bool { return Conf.Server.Mode == ModeProd }
 
 // Config 根节点配置，完全对齐你的 YAML
 type Config struct {
@@ -81,6 +92,9 @@ type AuthConfig struct {
 // ServerConfig 服务器配置
 type ServerConfig struct {
 	Port int `mapstructure:"port"`
+	// Mode 运行模式：dev（默认，开发 / 现有的直接启动方式）或 prod（Docker 生产部署）。
+	// 环境变量 SYC_MODE 优先于配置文件；镜像里固定设为 prod。见 IsProd。
+	Mode string `mapstructure:"mode"`
 	// Name 节点名，会在 /v1/ping 里回给客户端。桌面端多节点灾备靠它显示
 	// 「当前连的是哪个入口」；留空则退回主机名。
 	Name string `mapstructure:"name"`
@@ -200,7 +214,12 @@ func (c *Config) GetAllowedPaths() []string {
 func Init() error {
 	viper.SetConfigName("config") // 你的 yaml 文件名 (不带后缀)
 	viper.SetConfigType("yaml")
-	viper.AddConfigPath("./config") // 假设配置文件在项目根目录
+	// 配置目录：环境变量 SYC_CONFIG_DIR 优先（容器里指向数据卷 /data/config，改配置不用动镜像），默认 ./config
+	cfgDir := os.Getenv("SYC_CONFIG_DIR")
+	if cfgDir == "" {
+		cfgDir = "./config"
+	}
+	viper.AddConfigPath(cfgDir)
 
 	// 开启环境变量覆盖机制 (非常重要：用于生产环境覆盖 Secret 等敏感信息)
 	viper.AutomaticEnv()
@@ -211,6 +230,18 @@ func Init() error {
 
 	if err := viper.Unmarshal(Conf); err != nil {
 		return fmt.Errorf("解析配置到结构体失败: %w", err)
+	}
+
+	if v := strings.TrimSpace(os.Getenv("SYC_MODE")); v != "" {
+		Conf.Server.Mode = v
+	}
+	Conf.Server.Mode = strings.ToLower(strings.TrimSpace(Conf.Server.Mode))
+	switch Conf.Server.Mode {
+	case "":
+		Conf.Server.Mode = ModeDev
+	case ModeDev, ModeProd:
+	default:
+		return fmt.Errorf("未知运行模式 %q（server.mode / SYC_MODE 只能是 dev 或 prod）", Conf.Server.Mode)
 	}
 
 	return nil

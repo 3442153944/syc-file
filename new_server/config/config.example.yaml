@@ -55,6 +55,9 @@ auth:
 #  服务器配置
 server:
   port: 8991
+  # 运行模式：dev（默认，直接启动 / 本机开发）或 prod（Docker 生产，镜像里由环境变量 SYC_MODE=prod 固定）。
+  # prod 下：Gin 用 release 模式、不读旧 venv/key.yaml、不托管 frpc/ddns-go。环境变量优先于这里。
+  mode: dev
   # 节点名：随 /v1/ping 回给客户端，桌面端灾备面板上显示「当前连的是哪个入口」。
   # 留空则用主机名。多台机器各自部署时给不同的名字。
   name: ""

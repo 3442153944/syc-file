@@ -11,9 +11,68 @@ import (
 	"time"
 )
 
+// builtinWhitelist 代码内置的免登录路径，不依赖 config.yaml：
+// 老部署的配置文件里没有这些条目，升级后也必须能用（否则未初始化 / 未登录的客户端无法探测服务器状态）。
+var builtinWhitelist = []string{
+	"/v1/system/status",
+	"/v1/system/init",
+	"/v1/routes",
+}
+
+// LiveUserLookup 查账号最新状态（角色 / 级别 / 启用）。由 system 包注入，避免 middleware 反向依赖。
+type LiveUserLookup func(userID int64) (role string, level int8, status int8, ok bool)
+
+// GuestGuard 游客请求放行判定（默认拒绝）。由 system 包注入。
+type GuestGuard func(c *gin.Context, userID int64) bool
+
+// GuestAlive 访客账号此刻是否仍有效（启用、未过期、仍是访客）。由 system 包注入。
+type GuestAlive func(userID int64) bool
+
+var (
+	userLookup LiveUserLookup
+	guestGuard GuestGuard
+	guestAlive GuestAlive
+)
+
+func SetUserLookup(f LiveUserLookup) { userLookup = f }
+func SetGuestGuard(f GuestGuard)     { guestGuard = f }
+func SetGuestAlive(f GuestAlive)     { guestAlive = f }
+
+// LevelOf 取当前请求的权限级别（未登录为 0）。
+func LevelOf(c *gin.Context) int8 {
+	if v, ok := c.Get("UserLevel"); ok {
+		if l, ok := v.(int8); ok {
+			return l
+		}
+	}
+	return 0
+}
+
+// RequireLevel 要求权限级别不低于 min，否则 403。
+func RequireLevel(min int8) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if auth, _ := c.Get("Auth"); auth != true {
+			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "未登录", "data": nil})
+			c.Abort()
+			return
+		}
+		if LevelOf(c) < min {
+			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "权限不足", "data": nil})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // isWhitelisted 判断请求路径是否命中配置文件中的白名单
 // 支持精确匹配，或以白名单项为前缀的子路径匹配（如 /v1/public 放行 /v1/public/xxx）
 func isWhitelisted(path string) bool {
+	for _, p := range builtinWhitelist {
+		if path == p {
+			return true
+		}
+	}
 	for _, p := range config.Conf.Whitelist {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
@@ -53,18 +112,37 @@ func Auth() gin.HandlerFunc {
 				)
 			} else {
 				// 检查剩余有效期，不足 refresh_expire 天则自动刷新
+				level := claims.EffectiveLevel()
 				remaining := time.Until(claims.ExpiresAt.Time)
 				refreshThreshold := time.Duration(config.Conf.Auth.RefreshExpire) * 24 * time.Hour
-				if remaining < refreshThreshold {
-					newToken, err := token.GenerateToken(
-						claims.UserID,
-						claims.Username,
-						claims.Email,
-						claims.Roles,
-						claims.DeviceID,
-						config.Conf.Auth.TokenExpire,
-					)
-					if err != nil {
+				// 访客账号自带有效期，token 不续期（续了就活过账号了）
+				if remaining < refreshThreshold && level > 0 {
+					roles := claims.Roles
+					canRefresh := true
+					if userLookup != nil {
+						// 续期时按库里最新的角色 / 级别重签：降级、禁用在这里生效，不会被旧 token 一直续下去
+						if role, lv, status, ok := userLookup(claims.UserID); ok && status == 1 && lv > 0 {
+							roles, level = []string{role}, lv
+						} else {
+							canRefresh = false
+						}
+					}
+					var newToken string
+					var err error
+					if canRefresh {
+						newToken, err = token.GenerateToken(
+							claims.UserID,
+							claims.Username,
+							claims.Email,
+							roles,
+							claims.DeviceID,
+							level,
+							config.Conf.Auth.TokenExpire,
+						)
+					}
+					if !canRefresh {
+						// 账号已被禁用 / 删除：不续期，旧 token 自然到期
+					} else if err != nil {
 						logger.Logger.Warn("Token刷新失败", zap.Error(err))
 					} else {
 						// 新token写回响应头，前端从 New-Token 取
@@ -77,8 +155,15 @@ func Auth() gin.HandlerFunc {
 					}
 				}
 
-				c.Set("Auth", true)
-				c.Set("UserInfo", claims)
+				// 访客账号被禁用 / 过期 / 删除后，手里的 token 虽然签名有效，也必须立刻失效：
+				// 在这里（白名单判定之前）按未登录处理，白名单接口同样拿不到身份
+				if level == 0 && (guestAlive == nil || !guestAlive(claims.UserID)) {
+					logger.Logger.Warn("访客账号已失效，按未登录处理", zap.Int64("user_id", claims.UserID))
+				} else {
+					c.Set("Auth", true)
+					c.Set("UserInfo", claims)
+					c.Set("UserLevel", level)
+				}
 				logger.Logger.Info("Token验证成功",
 					zap.Int64("user_id", claims.UserID),
 					zap.String("username", claims.Username),
@@ -101,6 +186,17 @@ func Auth() gin.HandlerFunc {
 			})
 			c.Abort()
 			return
+		}
+
+		// 游客（level=0）默认拒绝：只放行 system 包按「被授权页面」算出的接口
+		if LevelOf(c) == 0 {
+			uc, _ := c.Get("UserInfo")
+			claims, _ := uc.(*token.Claims)
+			if claims == nil || guestGuard == nil || !guestGuard(c, claims.UserID) {
+				c.JSON(http.StatusOK, gin.H{"code": 403, "message": "访客无权访问该接口，或访客账号已过期", "data": nil})
+				c.Abort()
+				return
+			}
 		}
 
 		c.Next()
