@@ -20,6 +20,46 @@
             },
             "group": "build",
             "problemMatcher": []
+        },
+        {
+            "label": "后端: build (linux)",
+            "type": "shell",
+            "command": "bash build.sh",
+            "options": {
+                "cwd": "${workspaceFolder}/new_server"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "后端: 停系统服务（释放 8991）",
+            "type": "shell",
+            "command": "bash .vscode/stop-service.sh",
+            "problemMatcher": []
+        },
+        {
+            "label": "后端: 恢复系统服务",
+            "type": "shell",
+            "command": "sudo -n systemctl start syc-file",
+            "problemMatcher": []
+        },
+        {
+            "label": "后端: 重启系统服务",
+            "type": "shell",
+            "command": "sudo -n systemctl restart syc-file",
+            "problemMatcher": []
+        },
+        {
+            "label": "后端: prepare",
+            "dependsOn": ["filecore: build (linux)", "后端: 停系统服务（释放 8991）"],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
+        },
+        {
+            "label": "后端: 构建并重启服务",
+            "dependsOn": ["filecore: build (linux)", "后端: build (linux)", "后端: 重启系统服务"],
+            "dependsOrder": "sequence",
+            "problemMatcher": []
         }
     ]
 }
