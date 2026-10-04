@@ -83,6 +83,21 @@
             "skipFiles": [
                 "<node_internals>/**"
             ]
+        },
+        {
+            "name": "构建: 后端 Docker 镜像",
+            "type": "node",
+            "request": "launch",
+            "noDebug": true,
+            "runtimeExecutable": "bash",
+            "runtimeArgs": [
+                "docker/build.sh"
+            ],
+            "cwd": "${workspaceFolder}/new_server",
+            "console": "integratedTerminal",
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
         }
     ]
 }

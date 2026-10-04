@@ -1,0 +1,99 @@
+# 云梯后端配置（容器版，首次启动由入口脚本生成到 /data/config/config.yaml）
+#
+# 这份配置开箱即用；之后想改什么，直接编辑数据卷里的 /data/config/config.yaml，
+# 然后 `docker restart <容器名>` 即可，不需要重新打镜像。
+#
+# 其中 db / redis 的密码是入口脚本首次启动时随机生成并写入的（库也是用同一份密码建的），
+# 请不要手改，除非你同时改了库里对应账号的密码。
+# JWT 签名密钥不在这里：它首次启动时生成并存进数据库（app_secret 表），随数据卷走。
+
+# 数据库：容器内置 MySQL，只监听容器内 127.0.0.1，不对外暴露
+db:
+  host: 127.0.0.1
+  port: 3306
+  name: syncfile
+  user: syncfile
+  password: "__DB_PASSWORD__"
+
+# 缓存：容器内置 Redis，同样只监听容器内 127.0.0.1
+redis:
+  host: 127.0.0.1
+  port: 6379
+  db: 0
+  password: "__REDIS_PASSWORD__"
+
+log:
+  path: ./log                    # 相对工作目录 /data，即 /data/log
+  level: info
+  format: json
+  console: true
+  file: true
+  max_size: 100                  # 单文件最大 MB
+  max_age: 7                     # 保留天数
+  max_backup: 3
+
+# 无需登录即可访问的路由（含 /v1 前缀；精确或前缀匹配）
+whitelist:
+  - /v1/ping
+  - /v1/user/register
+  - /v1/user/login
+  - /v1/user/reset-password
+  - /v1/user/verify
+  - /v1/file/share-link/download
+
+auth:
+  enabled: true
+  token_expire: 7                # token 有效期（天）
+  refresh_expire: 1              # 剩余不足该天数时自动续期
+
+server:
+  port: 9999                     # 默认对外端口；改这里后，docker run 的 -p 映射也要对应改
+  name: ""                       # 节点名，随 /v1/ping 回给客户端；留空用主机名
+
+file:
+  # 客户端能访问的目录。需要挂载别的磁盘时：docker run -v /mnt/disk1:/mnt/disk1，
+  # 再把 /mnt/disk1 追加到这里并重启容器。
+  allowed_paths:
+    - "/data/file_sync"
+  # 上传临时文件 / 版本仓库落在 <数据卷根>/<base_path>/ 下，保持默认即可
+  storage:
+    base_path: "file_sync"
+    upload_path: "uploads"
+    temp_path: "temp"
+    trash_path: "trash"
+  upload:
+    max_file_size: 10737418240   # 单文件上限 10GB
+    max_filename_length: 255
+
+user:
+  avatar_path: "static/avatar"   # 相对工作目录，即 /data/static/avatar
+  allowed_extensions: [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico"]
+  max_size: 50485760             # 头像上限 50MB
+
+share:
+  temp_path: "/data/file_sync/share_temp/"
+  max_expire_minutes: 43200
+  clean_interval_minutes: 30
+
+quick_share:
+  base_path: "/data/file_sync/quickshare/"
+  max_capacity_bytes: 10737418240
+  memory_threshold_bytes: 20971520
+  default_expire_minutes: 60
+
+sync:
+  worker_concurrency: 4
+  max_retry: 3
+  lock_ttl_seconds: 300
+  queue_timeout_seconds: 5
+  task_timeout_seconds: 600
+  conflict_suffix: "conflict"
+  sync_catalogue: "/data/file_sync/sync/"
+
+monitor:
+  sys_detail_interval_seconds: 30
+  process_top_n: 20
+
+# 容器里不托管 frpc / ddns-go：内网穿透请放在宿主机或另起容器
+supervisor:
+  enabled: false
