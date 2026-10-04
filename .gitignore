@@ -54,3 +54,6 @@ new_server/deploy/**
 !new_server/deploy/.gitignore
 !new_server/deploy/README.md
 !new_server/deploy/**/*.example.*
+
+# dlv 调试产生的二进制
+__debug_bin*
