@@ -4,7 +4,7 @@ import {getAvailableDisks} from "@/api/file/fileApi"
 import type {DiskInfo} from "@/api/file/fileTypes"
 import {
   NSpin, NGrid, NGi, NCard, NProgress,
-  NSpace, NButton, NEmpty
+  NButton, NEmpty
 } from "naive-ui"
 import {useRouter} from "vue-router"
 
@@ -49,7 +49,7 @@ const getProgressColor = (percent: number) => {
     <n-spin :show="loading">
       <n-empty v-if="!loading && disk_list.length === 0" description="暂无可用磁盘"/>
 
-      <n-grid v-else x-gap="16" y-gap="16" cols="1 s:2 m:3 l:4" responsive="screen">
+      <n-grid v-else x-gap="16" y-gap="16" cols="1 640:2 960:3 1280:4" responsive="self">
         <n-gi v-for="disk in disk_list" :key="disk.path">
 
           <n-card
@@ -61,11 +61,11 @@ const getProgressColor = (percent: number) => {
             <div class="disk-header">
               <div class="disk-title">
                 <span class="disk-icon">🖴</span>
-                <span class="disk-path">本地磁盘 ({{ disk.path }})</span>
+                <span class="disk-path" :title="disk.path">本地磁盘 ({{ disk.path }})</span>
               </div>
-              <n-space size="small">
-                <n-button size="tiny" quaternary>{{ disk.mountpoint }}</n-button>
-              </n-space>
+              <!-- 挂载点和路径通常是同一个值，重复显示只会挤占标题 -->
+              <span v-if="disk.mountpoint && disk.mountpoint !== disk.path" class="disk-mount"
+                    :title="disk.mountpoint">{{ disk.mountpoint }}</span>
             </div>
 
             <div class="disk-progress">
@@ -140,23 +140,42 @@ const getProgressColor = (percent: number) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 16px;
 }
 
+/* min-width: 0 是关键：flex 子项默认不会收缩到比内容更窄，长路径会把整行撑坏 */
 .disk-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
 }
 
 .disk-icon {
   font-size: 20px;
+  flex-shrink: 0;
 }
 
 .disk-path {
   font-size: 15px;
   font-weight: bold;
   color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disk-mount {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 45%;
+  font-size: 12px;
+  color: #999;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .disk-progress {

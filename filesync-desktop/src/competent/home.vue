@@ -125,8 +125,11 @@ const handleMenuClick = (key: string) => {
           <img :src="logo" alt="logo"/>
         </div>
 
+        <!-- responsive：放不下的菜单项自动收进「…」，不再把右侧区域挤出窗口 -->
         <n-menu
+            class="header-menu"
             mode="horizontal"
+            responsive
             :value="activeKey"
             :options="menuOptions"
             @update:value="handleMenuClick"
@@ -202,13 +205,22 @@ const handleMenuClick = (key: string) => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 
+/* 左侧占满剩余宽度并允许收缩（min-width: 0），菜单才有机会触发 responsive 折叠 */
 .header-left {
   display: flex;
   align-items: center;
-  gap: 32px;
+  gap: 20px;
+  flex: 1;
+  min-width: 0;
+}
+
+.header-menu {
+  flex: 1;
+  min-width: 0;
 }
 
 .logo {
+  flex-shrink: 0;
   font-size: 20px;
   font-weight: bold;
   color: #1890ff; /* 后续你可以用 Naive UI 的主题变量替换这里的硬编码颜色 */
@@ -224,10 +236,12 @@ const handleMenuClick = (key: string) => {
   }
 }
 
+/* 右侧（节点 / 传输 / 用户 / 设置）永远完整显示，不被菜单挤压 */
 .header-right {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
 .transfer-indicator {
@@ -277,6 +291,27 @@ const handleMenuClick = (key: string) => {
 .username {
   color: #666;
   font-size: 14px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窗口变窄时先收起文字，只留图标 / 头像 */
+@media (max-width: 960px) {
+  .username {
+    display: none;
+  }
+}
+
+@media (max-width: 820px) {
+  .header {
+    padding: 0 12px;
+  }
+
+  .header-right :deep(.node-name) {
+    display: none;
+  }
 }
 
 .user-area {
