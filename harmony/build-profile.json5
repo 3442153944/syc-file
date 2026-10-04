@@ -26,6 +26,19 @@
           "storeFile": "C:\\Users\\sunyuanling\\.ohos\\config\\vps_file_0bavNhVIkwxZ4rIIO_EcqUP0XRxTRGYnHBwdJ-_zmkg=.p12",
           "storePassword": "0000001B9EBE944BF4501E5D58BB5560F2E824B5F9C18AF6558434B02BCD0FFC58F57162B3AA1D19285CC7"
         }
+      },
+      {
+        "name": "file",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\sunyuanling\\.ohos\\config\\file_harmony_lf4wYnSd6Wn9x8l1wxtvy_9w4yPvqkl623_qnaP9XKc=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BB03FA549147E108A465AB395AE46B99C7D4986672CC6D12EF9D663ACF3176240C0CC2514E3330D",
+          "profile": "C:\\Users\\sunyuanling\\.ohos\\config\\file_harmony_lf4wYnSd6Wn9x8l1wxtvy_9w4yPvqkl623_qnaP9XKc=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\sunyuanling\\.ohos\\config\\file_harmony_lf4wYnSd6Wn9x8l1wxtvy_9w4yPvqkl623_qnaP9XKc=.p12",
+          "storePassword": "0000001B6AADF27D1BADF858F0A8F22294865C3C83C6E378D1A9768092E7489F6418CD6B12254505F97594"
+        }
       }
     ],
     "products": [
@@ -45,10 +58,37 @@
     ],
     "buildModeSet": [
       {
-        "name": "debug",
+        "name": "debug"
       },
       {
         "name": "release"
+      }
+    ],
+    "capabilities": [
+      {
+        "bundleName": "com.example.fileSyc",
+        "config": [
+          {
+            "name": "webAccessServiceForAIQA",
+            "capability": "webAccessServiceForAIQA"
+          },
+          {
+            "name": "Push Kit",
+            "capability": "com.huawei.service.push.base_service"
+          },
+          {
+            "name": "Device status detection",
+            "capability": "com.huawei.service.device_security.device_verify"
+          },
+          {
+            "name": "Map Kit",
+            "capability": "com.huawei.service.mapkit"
+          },
+          {
+            "name": "Safety Detect",
+            "capability": "com.huawei.service.device_security.safety_detect"
+          }
+        ]
       }
     ]
   },
