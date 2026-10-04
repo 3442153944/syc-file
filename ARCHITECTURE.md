@@ -1,6 +1,6 @@
 # 云梯 (FileSync) 架构说明文档
 
-> 本文档描述三端（Android / Go 后端 / Windows 桌面端）的整体架构、技术栈、模块关系与已知问题，作为后续对话的统一背景参考，避免重复解释。
+> 本文档描述四端（Android / 鸿蒙 / Windows 桌面端 / Go 后端）的整体架构、技术栈、模块关系与已知问题，作为后续对话的统一背景参考，避免重复解释。
 > 维护原则：描述「代码现状」而非「期望状态」，已定义但未实现的能力会明确标注为 **[仅 schema/未接线]**。
 
 ---
@@ -10,6 +10,52 @@
 这是一个**个人自托管文件传输/同步系统**，四端：Android（Kotlin/Compose）+ Windows 桌面（Tauri 2 + Vue 3 + Rust）+ HarmonyOS（ArkTS + ArkUI）+ Go 后端。客户端通过 HTTP（文件上传/下载/浏览）+ WebSocket（实时状态/同步任务）与 Go 后端交互；后端用 MySQL 存账户与传输记录、Redis 记在线设备与同步队列、本地磁盘存文件、WS 推送实时事件。
 
 ⚠ **同步链路现状（2026-07-19）**：**同步核心已闭环、双向真机实测通过**。Go 后端同步引擎全链路实现（Redis 队列 + worker + base CAS + 冲突保留两者 + scan 追赶比对 + **同内容幂等吸收/回声抑制** + 物理文件缺失自愈，见 §4.11）；**Windows 端**探测→上传→上报→执行闭环（§3B.6）+ **离线追赶机制已落地**（`catch_up.rs`：两阶段 stat 比对 + scan）+ **同步默认启用**（setup 自动启动 + 登录后补位）+ **个人中心/资料编辑/密码修改/头像** + **服务器地址设置**（`ServerSettings.vue`）；**Android 端**同步引擎落地（task 执行 + FileObserver 探测 + 连接追赶 + 冲突隔离 + 保活服务，§3.11），Windows↔Android 双向同步实测可用；**同步列表分页加载**（每页 10 条，滚动到底自动追加，FAB 回到顶部）+ **GC 优化**（`DateUtil`/`TimeUtils`/`parseIsoToMillis` 缓存格式化器，`HomeScreen` `forEach` 改 `items` 懒渲染）。**三端统一分片上传协议（blake3）**：`file_lib` v3（`fc_describe`）经 cgo（服务端）/JNI（安卓 `filecore_jni`，缺 .so 回退纯 Java）/原生（桌面）/NAPI（鸿蒙 `libfilecore.so`，缺 .so 回退纯 ArkTS `Blake3Util`）**四端**复用同一实现。**鸿蒙端 MVP 已落地**（§3C：login + 文件浏览 + 分片上传 + 下载 + 同步执行 download_only + 同步列表 + 设置；无 root、无文件监听，只接 task_created 不上报 file_changed）。**剩余核心尾巴见 §6.3 待办清单**（公网安全为首位）。
+
+---
+
+## 0.5 部署现状（2026-10-04 迁移至 Linux VM）
+
+> 本章记录**当前实际部署环境**；后续章节描述代码能力（服务端与桌面端代码均同时支持 Windows/Linux 构建）。
+
+**主机与目录**
+
+| 项 | 值 |
+|---|---|
+| 主机 | 内网 VMware 虚拟机 `sunyuanling-webserver`（Ubuntu 26.04，`192.168.31.120`，另有公网 IPv6 可直连） |
+| 代码 | `/mnt/data/project`（git 仓库；systemd 直接运行仓库内构建产物，无手工拷贝） |
+| 数据根 | `/mnt/data/file_sync`：`sync/`（原 `F:\同步目录`）、`quickshare/`、`versions/`、`updates/`、`share_temp/`、`temp/`、`web/`（前端 dist）、`bin/`（frpc/ddns-go）、`backup/`、`desktop-linux/`（Linux 桌面端构建产物） |
+| 旧 Windows 路径映射 | `E:\FileSync`、`F:\FileSync` → `/mnt/data/file_sync`；`F:\同步目录` → `/mnt/data/file_sync/sync`（DB 内路径已重写；两个存储目录外的散落文件记录已标记删除） |
+| 证书 | `/mnt/data/sunyuanling/`（acme.sh + Cloudflare DNS-01 通配符 `sunyuanling.cn` / `*.sunyuanling.cn`；续签后自动 reload 本机 nginx 并推送到 HK/JP 服务器） |
+
+**运行时组件**
+
+| 组件 | 形态 |
+|---|---|
+| Go 后端 | `systemd syc-file.service`（`ExecStart=/mnt/data/project/new_server/syc-file`，`Restart=always`，开机自启），并托管 frpc×2 + ddns-go |
+| MySQL | 1Panel Docker 容器 `mysql-server`（库 `syncfile`，数据卷 `/mnt/data/mysql`） |
+| Redis | 1Panel Docker 容器 `1Panel-redis-EJP7`（`password: 123456`） |
+| Web 服务器 | 系统 nginx（80/443），配置 `/etc/nginx/conf.d/{sunyuanling,vps}.conf`；`/file/` → `127.0.0.1:8991`（含 WS/Range/不缓冲） |
+| 对外入口 | frp 双节点：`ddns.sunyuanling.cn`（VPS 13.193.51.91:443）、`jp.sunyuanling.cn:8443`（东京）；Cloudflare Tunnel（`www.sunyuanling.cn`、`vps.sunyuanling.cn` → 本机 nginx）；`ddns` 的 AAAA 由 ddns-go 指向本机 IPv6 |
+| 1Panel | 仅作容器面板（MySQL/Redis）；网站功能未使用，nginx 配置为普通文件手工维护 |
+
+**后端配置要点**（`new_server/config/config.yaml`）
+
+- `file.allowed_paths: ["/mnt/data"]`；`storage.base_path: file_sync`（temp/versions 落在 `/mnt/data/file_sync` 下）
+- `share.temp_path: /mnt/data/file_sync/share_temp/`；`quick_share.base_path: /mnt/data/file_sync/quickshare/`；`sync.sync_catalogue: /mnt/data/file_sync/sync/`
+- Redis 段新增 `password` 字段（容器要求认证）；`supervisor.enabled: true` 托管 frpc/ddns-go
+
+**开发工作流（VS Code，配置在 `.vscode/`）**
+
+- `launch.json`：后端 (Go 调试) / 桌面端 (Tauri dev) / Web端 (Vite dev) / filecore 构建 / 桌面端构建（deb）
+- 后端 F5：先构建 filecore → 停系统服务释放 8991 → 启动调试；调试结束自动恢复 systemd 服务（`postDebugTask`）
+- 发布常驻：任务「后端: 构建并重启服务」= `new_server/build.sh`（原地构建 `syc-file`）→ `systemctl restart syc-file`
+- 构建脚本：`new_server/file_lib/build.sh`（Rust filecore，Linux，产出 `lib/libfilecore.a`；cgo LDFLAGS 已按平台拆分）、`new_server/build.sh`（Go 后端，原地构建）
+- Linux 构建前置：Rust（cargo）+ gcc；Go 在 `/usr/local/go/bin`，GOPROXY 已指向 `goproxy.cn`
+
+**Windows 主机现状**
+
+- 后端 / MySQL / Redis / nginx / frpc / ddns-go 均已停止（MySQL/Redis/nginx 启动类型改为手动），保留作为客户端开发环境与数据备份
+- 三端客户端无需改配置（域名、端口不变）；桌面端 Web 模式仍指向同一域名
 
 ---
 
@@ -54,7 +100,7 @@ flowchart LR
         SYNC["sync/<br/>引擎+Worker+API"]
         DS2[("Redis<br/>在线设备+同步队列/锁/进度")]
         DB[("MySQL<br/>User/UploadHistory/DownloadHistory/SyncTask/SyncFolder/...")]
-        DISK[("本地磁盘<br/>D:/E:/F:/G: 任意路径")]
+        DISK[("本地磁盘/挂载点<br/>allowed_paths（当前 /mnt/data）")]
         R --> H
         R --> WS
         R --> SYNC
@@ -588,7 +634,7 @@ new_server/
 ### 4.7 文件操作（后端侧）
 **上传** `handler/file/upload.go:22 HandlerFuncUpload`：
 - 同时接 JSON 与 multipart（嗅探 Content-Type）。参数 `path/name/action∈{check,upload}`。
-- 路径授权 `isPathAllowedDownload`（`download.go:232`）按 `config.Conf.File.AllowedPaths`（D:/E:/F:/G:）做盘符感知前缀匹配。
+- 路径授权 `isPathAllowedDownload`（`download.go:232`）按 `config.Conf.File.AllowedPaths` 做前缀匹配（Windows 为盘符如 D:/E:/F:/G:，Linux 为目录如 `/mnt/data`，见 §0.5）。
 - 扩展名/大小/文件名长度校验（`allowed_extensions` 不写=允许所有；`forbidden_extensions` 默认空——见 §4.9；默认上限 10GB、名 ≤255）。
 - `action=check`：`os.Stat` 报存在/大小/mtime（客户端文件名冲突预检）。
 - `action=upload`：拒覆盖，`c.FormFile("file")` → **`c.SaveUploadedFile`（Gin 缓冲落盘，非流式/非分块）** → 写 `UploadHistory`（uploading→completed）。WS 推 `file_upload` start/failed/completed（仅起止无百分比）。**此旧端点客户端已弃用，桌面/Android 改走分片协议。**
@@ -617,7 +663,7 @@ new_server/
 - 后端**已具备** `file_sync` 服务端编排：见 §4.11 同步引擎。
 
 ### 4.9 配置
-Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./config")`）+ `AutomaticEnv()` → `var Conf = new(Config)`（`config.go:11`）。结构含 db/redis/log/whitelist/auth/server/file/user/**sync**；helper `IsExtensionAllowed`/`IsPathAllowed`（盘符前缀校验，file 与 sync 共用）/`GetAllowedPaths`。`config.yaml` 关键值：MySQL `syncfile@127.0.0.1:3306/syncfile`（密码 123456）、Redis `127.0.0.1:6379 db0`、`server.port=8991`、token 7d、refresh 1d、允许盘 D/E/F/G、头像 ≤~50MB、sync.worker_concurrency=4/max_retry=3/lock_ttl=300s/task_timeout=600s。**log 段**：`path=./log`、`level/format/json/console(file)/max_size(MB)/max_age(天)/max_backup`——lumberjack 按大小轮转策略（与桌面端 `LogConfig` 字段命名一致，见 §3B.6）。**文件上传扩展名策略**：`file.upload.allowed_extensions` 不写=允许所有；`forbidden_extensions` 默认注释掉（空）。**真实 JWT 密钥在 `venv/key.yaml`，与 `config.yaml.auth.secret` 无关**。
+Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./config")`）+ `AutomaticEnv()` → `var Conf = new(Config)`（`config.go:11`）。结构含 db/redis/log/whitelist/auth/server/file/user/**sync**；helper `IsExtensionAllowed`/`IsPathAllowed`（盘符前缀校验，file 与 sync 共用）/`GetAllowedPaths`。`config.yaml` 关键值：MySQL `syncfile@127.0.0.1:3306/syncfile`（密码 123456）、Redis `127.0.0.1:6379 db0`、`server.port=8991`、token 7d、refresh 1d、允许盘 D/E/F/G、头像 ≤~50MB、sync.worker_concurrency=4/max_retry=3/lock_ttl=300s/task_timeout=600s。**log 段**：`path=./log`、`level/format/json/console(file)/max_size(MB)/max_age(天)/max_backup`——lumberjack 按大小轮转策略（与桌面端 `LogConfig` 字段命名一致，见 §3B.6）。**文件上传扩展名策略**：`file.upload.allowed_extensions` 不写=允许所有；`forbidden_extensions` 默认注释掉（空）。**真实 JWT 密钥在 `venv/key.yaml`，与 `config.yaml.auth.secret` 无关**。Linux 部署的实际配置见 §0.5（允许路径 `/mnt/data`、`storage.base_path=file_sync`、Redis 带 `password` 字段）。
 
 ### 4.10 并发与后台任务
 - **同步 worker**：`sync.InitSync` 启动 `WorkerConcurrency`(默认4) 个 goroutine `BRPOP` Redis 队列 `sync:queue`，目标设备在线则置 syncing + 发文件锁(SetNX TTL) + WS 推 `task_created`；Reaper goroutine 30s 扫超时任务重试、扫 pending+在线补入队。
@@ -660,7 +706,7 @@ Viper 读 `config/config.yaml`（`SetConfigName("config")`、`AddConfigPath("./c
 ### 5.5 文件传输约定
 - 上传：分片协议 `POST /v1/file/upload/{init,chunk,complete}` + `GET /v1/file/upload/status`，blake3 校验（叶子/树根/整文件），落盘即成品无需拼接，支持乱序/并发/断点续传/秒传（详见 §9.5）。旧 multipart `POST /v1/file/upload`（字段 `path/name/action=upload` + 文件 part `file`，先 `action=check` 冲突预检，10GB 上限单次缓冲落盘）仍存在但客户端已弃用。
 - 下载：`GET /v1/file/download?path=&name=&device_id=`，支持 `Range` 续传。
-- 路径必须落在 `File.AllowedPaths`（默认 D:/E:/F:/G:）盘符前缀内，大小写不敏感（Windows）。
+- 路径必须落在 `File.AllowedPaths` 前缀内（Windows 为盘符、Linux 为目录；比较时统一转大写，两平台均大小写不敏感）。
 - 哈希统一 blake3（同步链路文件哈希、base_store、下载校验、分片描述均用）；`device.rs` device_id 仍用 sha256（非文件哈希）。
 
 ### 5.6 已知前后端不一致
