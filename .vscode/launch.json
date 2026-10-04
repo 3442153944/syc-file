@@ -100,6 +100,21 @@
             ]
         },
         {
+            "name": "部署: 后端 (本机 systemd)",
+            "type": "node",
+            "request": "launch",
+            "noDebug": true,
+            "runtimeExecutable": "bash",
+            "runtimeArgs": [
+                "deploy.sh"
+            ],
+            "cwd": "${workspaceFolder}/new_server",
+            "console": "integratedTerminal",
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
+        },
+        {
             "name": "部署: Web 端构建并发布到 nginx",
             "type": "node",
             "request": "launch",
