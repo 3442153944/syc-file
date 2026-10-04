@@ -12,6 +12,7 @@ import (
 	"syc-file/pkg/logger"
 	"syc-file/pkg/password"
 	"syc-file/pkg/token"
+	"time"
 )
 
 func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
@@ -94,14 +95,27 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 		}
 
 		// 6. 生成token
-		tokenStr, err := token.GenerateToken(
-			int64(u.ID),
-			u.Username,
-			stringVal(u.Email),
-			[]string{u.Role},
-			req.DeviceID,
-			config.Conf.Auth.TokenExpire,
-		)
+		// 访客：账号必须在有效期内，token 不能活过账号
+		var tokenStr string
+		var err error
+		if u.Level == model.LevelGuest {
+			if u.ExpiresAt == nil || time.Now().After(*u.ExpiresAt) {
+				c.JSON(http.StatusOK, gin.H{"code": 403, "message": "访客账号已过期", "data": nil})
+				return
+			}
+			tokenStr, err = token.GenerateTokenAt(int64(u.ID), u.Username, stringVal(u.Email),
+				[]string{u.Role}, req.DeviceID, u.Level, *u.ExpiresAt)
+		} else {
+			tokenStr, err = token.GenerateToken(
+				int64(u.ID),
+				u.Username,
+				stringVal(u.Email),
+				[]string{u.Role},
+				req.DeviceID,
+				u.Level,
+				config.Conf.Auth.TokenExpire,
+			)
+		}
 		if err != nil {
 			logger.Logger.Error("生成token失败", zap.Error(err))
 			c.JSON(http.StatusOK, gin.H{
@@ -130,7 +144,10 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 					"phone":    u.Phone,
 					"avatar":   u.Avatar,
 					"role":     u.Role,
-					"status":   u.Status,
+					// level / expires_at：新客户端据此区分四级权限与访客有效期；role 保留兼容旧客户端
+					"level":      u.Level,
+					"expires_at": u.ExpiresAt,
+					"status":     u.Status,
 					// 客户端个人中心要展示「最后登录 / 注册时间」，此前这两个字段没返回，
 					// 三端一律显示「未知」。字段与 model.User 的 json tag 保持一致。
 					"last_login": u.LastLogin,

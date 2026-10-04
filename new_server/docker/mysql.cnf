@@ -1,0 +1,8 @@
+[mysqld]
+datadir = /data/mysql
+bind-address = 127.0.0.1
+mysqlx = OFF
+skip-name-resolve
+character-set-server = utf8mb4
+innodb_buffer_pool_size = 256M
+max_connections = 200

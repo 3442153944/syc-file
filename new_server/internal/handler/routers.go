@@ -10,6 +10,7 @@ import (
 	"syc-file/internal/handler/user"
 	"syc-file/internal/middleware"
 	"syc-file/internal/sync"
+	"syc-file/internal/system"
 	"syc-file/internal/update"
 	"syc-file/internal/ws"
 )
@@ -31,6 +32,8 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	v1.POST("/user/change-password", user.HandlerFuncChangePassword(db, redisClient))
 	ws.RegisterWSRouter(v1, db, redisClient)
 	sync.RegisterSyncRouter(v1, engine)
+	// 初始化 / 路由下发 / 访客与级别管理
+	system.RegisterRouter(v1, db)
 	update.RegisterUpdateRouter(v1, db)
 	// 管理域：用户/设备/操作日志/存储配额/角色权限/粘贴快传缓存 + 系统监控
 	admin.RegisterAdminRouter(v1, db, redisClient)

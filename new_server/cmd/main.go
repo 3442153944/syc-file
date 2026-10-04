@@ -21,10 +21,12 @@ import (
 	"syc-file/internal/monitor"
 	"syc-file/internal/supervisor"
 	"syc-file/internal/sync"
+	"syc-file/internal/system"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/procpriority"
+	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
 	"syscall"
 	"time"
@@ -49,7 +51,13 @@ func main() {
 		}
 	}(logger.Logger)
 
-	logger.Logger.Info("配置与日志初始化成功", zap.Int("port", config.Conf.Server.Port))
+	logger.Logger.Info("配置与日志初始化成功",
+		zap.Int("port", config.Conf.Server.Port), zap.String("mode", config.Conf.Server.Mode))
+
+	if config.IsProd() {
+		// 生产不打印路由表 / debug 日志
+		gin.SetMode(gin.ReleaseMode)
+	}
 
 	// 尽量提高本进程的调度优先级：资源告警/进程采集的价值就在于系统被打满
 	// 时还能看清状况，自己跟普通进程一个优先级会在系统最忙的时候反而被
@@ -103,10 +111,32 @@ func main() {
 		&model.ResourceAlert{},
 		&model.ListeningPortHistory{},
 		&model.PortConnHistory{},
+		&model.AppSetting{},
+		&model.Route{},
+		&model.UserRoute{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
 	logger.Logger.Info("数据库表迁移完成")
+
+	// 升级旧管理员 → 超级管理员、播种路由、判定是否需要初始化（见 internal/system）
+	if err := system.Bootstrap(db); err != nil {
+		logger.Logger.Fatal("系统初始化检查失败", zap.Error(err))
+	}
+
+	// share_link 历来靠 sql/share_link.sql 手工建表、不进 AutoMigrate（避免动已有表的索引）；
+	// 全新库（例如容器首次启动）没有这张表，这里只在「不存在」时创建，已有的表一律不碰。
+	if !db.Migrator().HasTable(&model.ShareLink{}) {
+		if err := db.Migrator().CreateTable(&model.ShareLink{}); err != nil {
+			logger.Logger.Fatal("创建 share_link 表失败", zap.Error(err))
+		}
+		logger.Logger.Info("已创建 share_link 表")
+	}
+
+	// JWT 密钥存数据库：首次启动自动生成，老部署会从旧 venv/key.yaml 导入（见 pkg/token/secret.go）
+	if err := token.InitSecret(db, !config.IsProd()); err != nil {
+		logger.Logger.Fatal("JWT 密钥初始化失败", zap.Error(err))
+	}
 
 	//建立缓存连接
 	redisClient, err := database.InitRedis(config.Conf.Redis)
@@ -196,7 +226,13 @@ func main() {
 	// 这条链路是外网访问的唯一入口：frpc 一断，两个域名就全都打不进来，
 	// 而现象只是"服务好好的但访问不了"。以前靠 start.bat 手动拉起、死了没人管，
 	// 现在跟着后端一起起、一起停，并且死了会自动重启（见 internal/supervisor）。
-	sv := supervisor.New(config.Conf.Supervisor, logger.Logger)
+	svCfg := config.Conf.Supervisor
+	if config.IsProd() && svCfg.Enabled {
+		// 容器里没有宿主机的 frpc / ddns-go 二进制，托管只会反复拉起失败；内网穿透放宿主机或另起容器
+		logger.Logger.Warn("生产模式不托管外部进程，已忽略 supervisor 配置")
+		svCfg.Enabled = false
+	}
+	sv := supervisor.New(svCfg, logger.Logger)
 	sv.Start()
 
 	// 6. 启动服务

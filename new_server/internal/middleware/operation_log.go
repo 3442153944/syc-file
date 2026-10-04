@@ -35,6 +35,8 @@ var skipLogging = []string{
 	"/v1/ws/",                   // WS 相关（连接本身是 GET，这里兜住其余）
 	"/v1/user/verify",           // 每次启动都调
 	"/v1/monitor/",              // 监控页轮询
+	"/v1/system/init",           // ⚠ 请求体含初始化码和管理员密码
+	"/v1/admin/guests",          // ⚠ 响应体含一次性明文密码
 	"/v1/clipboard/",            // ⚠ 剪贴板内容是敏感数据（密码/验证码），绝不能落日志表
 }
 
@@ -78,6 +80,11 @@ func shouldLog(c *gin.Context) bool {
 		return false
 	}
 	path := c.Request.URL.Path
+	// 精确匹配：POST /v1/admin/users 的响应里可能带着自动生成的一次性密码；
+	// 不能按前缀跳过，否则管理员改 / 删 / 重置密码这些该审计的操作也记不下来了
+	if c.Request.Method == "POST" && path == "/v1/admin/users" {
+		return false
+	}
 	for _, p := range skipLogging {
 		if strings.HasPrefix(path, p) {
 			return false

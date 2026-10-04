@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
+	"syc-file/internal/system"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/password"
 )
@@ -28,6 +29,16 @@ func HandlerFuncRegister(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 		if err := c.ShouldBindJSON(&req); err != nil {
 			logger.Logger.Warn("注册请求参数错误", zap.Error(err))
 			c.JSON(http.StatusBadRequest, gin.H{"message": "参数格式错误"})
+			return
+		}
+
+		// 1.5 注册开关：未初始化或关闭自助注册时拒绝（开关在用户表 user.allow_register，见 system 包）
+		if !system.Initialized() {
+			c.JSON(http.StatusForbidden, gin.H{"message": "服务器尚未初始化，请先在管理端完成初始化"})
+			return
+		}
+		if !system.RegistrationOpen(db) {
+			c.JSON(http.StatusForbidden, gin.H{"message": "注册已关闭，请联系管理员创建账号"})
 			return
 		}
 

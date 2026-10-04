@@ -17,6 +17,8 @@ export interface AdminUser {
   phone: string | null
   avatar: string | null
   role: string
+  /** 权限级别：0 访客 / 1 用户 / 2 管理员 / 3 超级管理员 */
+  level: number
   status: number
   last_login: string | null
   created_at: string
