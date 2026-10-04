@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=云梯
+GenericName=文件同步
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=Network;FileTransfer;
+StartupNotify=true
+StartupWMClass=filesync-desktop
+{{#if mime_type}}
+MimeType={{mime_type}}
+{{/if}}

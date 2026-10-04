@@ -98,6 +98,38 @@
             "skipFiles": [
                 "<node_internals>/**"
             ]
+        },
+        {
+            "name": "部署: Web 端构建并发布到 nginx",
+            "type": "node",
+            "request": "launch",
+            "noDebug": true,
+            "runtimeExecutable": "bash",
+            "runtimeArgs": [
+                "scripts/deploy-web.sh"
+            ],
+            "cwd": "${workspaceFolder}/filesync-desktop",
+            "console": "integratedTerminal",
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
+        },
+        {
+            "name": "部署: 桌面端 (Linux) 构建并安装",
+            "type": "node",
+            "request": "launch",
+            "noDebug": true,
+            "runtimeExecutable": "bash",
+            "runtimeArgs": [
+                "scripts/install-linux-desktop.sh",
+                "--pin",
+                "--desktop"
+            ],
+            "cwd": "${workspaceFolder}/filesync-desktop",
+            "console": "integratedTerminal",
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
         }
     ]
 }
