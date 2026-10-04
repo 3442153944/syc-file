@@ -52,9 +52,10 @@ type DBConfig struct {
 
 // RedisConfig 缓存配置
 type RedisConfig struct {
-	Host string `mapstructure:"host"`
-	Port int    `mapstructure:"port"`
-	DB   int    `mapstructure:"db"`
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	DB       int    `mapstructure:"db"`
+	Password string `mapstructure:"password"`
 }
 
 // LogConfig 日志配置

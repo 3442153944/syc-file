@@ -25,6 +25,7 @@ import (
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
+	"syc-file/pkg/volroot"
 )
 
 // uploadSessionTTL 会话闲置多久后过期（元数据+位图+临时文件视作可回收）。
@@ -328,8 +329,8 @@ func resolveUploadPath(reqPath, name string) string {
 
 // tempPathFor 临时文件放目标同盘的 <盘>/BasePath/TempPath 下，命名为 <id>.part。
 func tempPathFor(fullPath, id string) string {
-	vol := filepath.VolumeName(fullPath)
-	dir := filepath.Join(vol+string(filepath.Separator), config.Conf.File.Storage.BasePath, config.Conf.File.Storage.TempPath)
+	vol := volroot.RootOf(fullPath)
+	dir := filepath.Join(vol, config.Conf.File.Storage.BasePath, config.Conf.File.Storage.TempPath)
 	return filepath.Join(dir, id+".part")
 }
 

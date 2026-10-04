@@ -11,6 +11,7 @@ import (
 	"syc-file/config"
 	"syc-file/pkg/filecore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/volroot"
 )
 
 // StartTempJanitor 启动后台清理器，周期性删除各盘临时目录里超过 TTL 的僵尸 .part 文件
@@ -29,11 +30,8 @@ func StartTempJanitor() {
 func cleanupTempOnce() {
 	threshold := time.Now().Add(-uploadSessionTTL)
 	for _, drive := range config.Conf.File.AllowedPaths {
-		vol := filepath.VolumeName(drive + string(filepath.Separator))
-		if vol == "" {
-			vol = strings.TrimSuffix(drive, string(filepath.Separator))
-		}
-		dir := filepath.Join(vol+string(filepath.Separator), config.Conf.File.Storage.BasePath, config.Conf.File.Storage.TempPath)
+		vol := volroot.RootOf(drive)
+		dir := filepath.Join(vol, config.Conf.File.Storage.BasePath, config.Conf.File.Storage.TempPath)
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue // 目录不存在很正常
