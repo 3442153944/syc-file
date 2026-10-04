@@ -37,7 +37,7 @@
 
 **关键配置**（`new_server/config/config.yaml`，含密码，不入库）：`file.allowed_paths: ["/mnt/data"]`、`storage.base_path: file_sync`、`sync.sync_catalogue`、`share.temp_path`、`quick_share.base_path` 均指向 `/mnt/data/file_sync/*`；`supervisor.enabled: true`。
 
-**开发工作流**（`.vscode/`）：后端 F5 = 构建 filecore → 停系统服务释放 8991 → 调试，结束自动恢复服务；发布 = `new_server/build.sh`（原地构建 `syc-file`）→ `systemctl restart syc-file`；filecore 构建 `new_server/file_lib/build.sh`（Linux）/ `build.ps1`（Windows）。Linux 前置：Rust + gcc，Go 在 `/usr/local/go/bin`，GOPROXY=goproxy.cn。桌面端 CI：`.github/workflows/desktop-build.yml`（Win/mac/Linux 矩阵）。
+**开发工作流**（`.vscode/`）：后端 F5 = 构建 filecore → 停系统服务释放 8991 → 调试，结束自动恢复服务；发布 = `new_server/deploy.sh`（构建 → 原子替换 `syc-file`，上一版留作 `syc-file.prev` → `systemctl restart syc-file` → 健康检查，失败自动回滚；端口被 F5 调试进程占着时直接中止；运行配置「部署: 后端 (本机 systemd)」），仅需要原地编译时用 `build.sh`；Web 前端 `filesync-desktop/scripts/deploy-web.sh`（构建后拷进 nginx 站点目录），Linux 桌面端 `scripts/install-linux-desktop.sh`（构建 deb 并 apt 安装）；filecore 构建 `new_server/file_lib/build.sh`（Linux）/ `build.ps1`（Windows）。Linux 前置：Rust + gcc，Go 在 `/usr/local/go/bin`，GOPROXY=goproxy.cn。桌面端 CI：`.github/workflows/desktop-build.yml`（Win/mac/Linux 矩阵）。
 
 **一体镜像（Docker，开发中，暂不用于线上）**：`new_server/Dockerfile` 把 Go 后端 + MySQL 8.0 + Redis 打进一个镜像（不含 nginx），构建统一用 `bash new_server/docker/build.sh`（VS Code 运行配置「构建: 后端 Docker 镜像」）。首次启动由 `docker/entrypoint.sh` 生成随机 DB / Redis 密码并从范例生成 `/data/config/config.yaml`，之后改配置只需编辑数据卷再重启；默认端口 9999（改 `server.port` + `-p`）；`SYC_MODE=prod` 固定在镜像里（Gin release、不读旧 key.yaml、不托管 frpc/ddns-go），开发直接启动默认 `dev`，行为不变。
 
