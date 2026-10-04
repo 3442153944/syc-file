@@ -356,10 +356,19 @@ async fn read_and_upload_chunk(
     let offset = (index as i64) * (chunk_size as i64);
     let len = std::cmp::min(chunk_size as i64, total_size - offset) as usize;
     let mut data = vec![0u8; len];
-    use std::os::windows::fs::FileExt;
     let f = std::fs::File::open(file).map_err(|e| UploadError::Other(e.to_string()))?;
-    f.seek_read(&mut data, offset as u64)
-        .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        f.seek_read(&mut data, offset as u64)
+            .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.read_at(&mut data, offset as u64)
+            .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
+    }
     drop(f);
 
     let mut last_err: Option<String> = None;

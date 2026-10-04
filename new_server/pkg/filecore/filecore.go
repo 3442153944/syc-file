@@ -9,7 +9,8 @@ package filecore
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../file_lib
-#cgo LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
+#cgo windows LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
+#cgo linux LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lpthread -ldl -lm
 #include <stdlib.h>
 #include "filecore.h"
 */

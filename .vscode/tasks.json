@@ -1,0 +1,25 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "filecore: build (linux)",
+            "type": "shell",
+            "command": "bash file_lib/build.sh",
+            "options": {
+                "cwd": "${workspaceFolder}/new_server"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "桌面端: build (tauri build)",
+            "type": "shell",
+            "command": "pnpm tauri build --bundles deb",
+            "options": {
+                "cwd": "${workspaceFolder}/filesync-desktop"
+            },
+            "group": "build",
+            "problemMatcher": []
+        }
+    ]
+}

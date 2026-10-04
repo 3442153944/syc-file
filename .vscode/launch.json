@@ -1,0 +1,66 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "后端 (new_server)",
+            "type": "go",
+            "request": "launch",
+            "mode": "auto",
+            "program": "${workspaceFolder}/new_server/cmd",
+            "cwd": "${workspaceFolder}/new_server",
+            "env": {
+                "CGO_ENABLED": "1",
+                "CC": "gcc",
+                "PATH": "/usr/local/go/bin:${env:PATH}"
+            },
+            "preLaunchTask": "filecore: build (linux)"
+        },
+        {
+            "name": "桌面端 (Tauri dev)",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "pnpm",
+            "runtimeArgs": ["tauri", "dev"],
+            "cwd": "${workspaceFolder}/filesync-desktop",
+            "console": "integratedTerminal",
+            "skipFiles": ["<node_internals>/**"]
+        },
+        {
+            "name": "Web端 (Vite dev)",
+            "type": "node",
+            "request": "launch",
+            "runtimeExecutable": "pnpm",
+            "runtimeArgs": ["dev"],
+            "cwd": "${workspaceFolder}/filesync-desktop",
+            "console": "integratedTerminal",
+            "serverReadyAction": {
+                "pattern": "Local:\\s+(https?://\\S+)",
+                "uriFormat": "%s",
+                "action": "openExternally"
+            },
+            "skipFiles": ["<node_internals>/**"]
+        },
+        {
+            "name": "构建: filecore (Linux)",
+            "type": "node",
+            "request": "launch",
+            "noDebug": true,
+            "runtimeExecutable": "bash",
+            "runtimeArgs": ["file_lib/build.sh"],
+            "cwd": "${workspaceFolder}/new_server",
+            "console": "integratedTerminal",
+            "skipFiles": ["<node_internals>/**"]
+        },
+        {
+            "name": "构建: 桌面端 (deb)",
+            "type": "node",
+            "request": "launch",
+            "noDebug": true,
+            "runtimeExecutable": "pnpm",
+            "runtimeArgs": ["tauri", "build", "--bundles", "deb"],
+            "cwd": "${workspaceFolder}/filesync-desktop",
+            "console": "integratedTerminal",
+            "skipFiles": ["<node_internals>/**"]
+        }
+    ]
+}

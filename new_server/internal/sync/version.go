@@ -10,6 +10,7 @@ import (
 	"syc-file/config"
 	"syc-file/internal/model"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/volroot"
 )
 
 // 版本历史与版本内容仓库。
@@ -109,9 +110,9 @@ func BlobPathFor(sameVolumeAs, hash string) string {
 	if len(hash) < 2 {
 		return ""
 	}
-	vol := filepath.VolumeName(sameVolumeAs)
+	vol := volroot.RootOf(sameVolumeAs)
 	base := config.Conf.File.Storage.BasePath
-	return filepath.Join(vol+string(filepath.Separator), base, versionsDirName, hash[:2], hash)
+	return filepath.Join(vol, base, versionsDirName, hash[:2], hash)
 }
 
 func copyFileTo(src, dst string) error {
