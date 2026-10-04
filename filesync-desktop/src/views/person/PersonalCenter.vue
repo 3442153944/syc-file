@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import {levelText} from '@/utils/level'
 // 个人中心：查看当前资料，提供编辑入口
 import {ref, onMounted, computed} from 'vue'
 import {useRouter} from 'vue-router'
@@ -53,7 +54,7 @@ onMounted(async () => {
           </template>
         </n-avatar>
         <h2 style="margin:8px 0 0">{{ user?.username || '-' }}</h2>
-        <span style="color:#999;font-size:13px">{{ user?.role === 'admin' ? '管理员' : '普通用户' }}</span>
+        <span style="color:#999;font-size:13px">{{ levelText(user?.level ?? (user?.role === 'admin' ? 3 : 1)) }}</span>
       </n-space>
     </n-card>
 

@@ -1,11 +1,13 @@
 <!-- login.vue -->
 <script setup lang="ts">
-import {ref} from 'vue'
+import {ref, computed} from 'vue'
 import {useRouter} from 'vue-router'
 import {useLogin} from './login.ts'
 import {isTauri, invoke} from '@tauri-apps/api/core'
 import {saveWebPassword, loadWebPassword, clearWebPassword} from '@/utils/credentialStore'
 import NodeSwitcher from '@/components/NodeSwitcher.vue'
+import {pinia} from '@/store/useStore'
+import {useRouteStore} from '@/store/useRouteStore'
 import {
   useMessage,
   NForm,
@@ -20,6 +22,9 @@ import {
 const router = useRouter()
 const message = useMessage()
 const {login} = useLogin()
+const rs = useRouteStore(pinia)
+// 自助注册是否开放（服务器状态未知时不隐藏入口，让服务端自己拒绝）
+const registrationOpen = computed(() => rs.status ? rs.status.registration_open : true)
 
 const form = ref({
   username: '',
@@ -69,6 +74,8 @@ const handleLogin = async () => {
 
     localStorage.setItem('token', res.token)
     localStorage.setItem('userInfo', JSON.stringify(res.user))
+    // 换了账号：丢掉上一个人的动态路由，下一次导航按新身份重新拉路由表
+    rs.reset(router)
 
     if (rememberMe.value) {
       localStorage.setItem('rememberedAccount', JSON.stringify({username: form.value.username}))
@@ -102,6 +109,8 @@ const handleLogin = async () => {
 
     // 登录成功后自动启动同步引擎
     try {
+      // 访客不参与文件同步
+      if (res.user.level === 0) throw new Error('访客不启动同步')
       const {invoke} = await import('@tauri-apps/api/core')
       await invoke('start_sync')
     } catch { /* 未配置同步文件夹等正常情况 */
@@ -190,7 +199,7 @@ const handleResetPassword = () => {
         </n-form>
       </div>
 
-      <div class="login-divider">
+      <div class="login-divider" v-if="registrationOpen">
         <n-divider>还没有账号?</n-divider>
         <n-button block @click="handleRegister">
           立即注册

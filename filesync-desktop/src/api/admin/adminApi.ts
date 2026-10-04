@@ -4,49 +4,11 @@
 // Tauri 模式统一走 Rust 侧的通用代理命令 `api_request`（token/服务器地址由 Rust 的 SyncConfig 提供，
 // 不依赖 webview 里可能过期的 localStorage token）；Web 模式走 http.ts 的 fetch。
 // 管理域接口多且形态简单，逐个包 Rust command 属于重复劳动，故用一个通用代理。
-import { invoke, isTauri } from '@tauri-apps/api/core'
-import { httpGet, httpPost, httpPut, httpDelete } from '../http'
+import { request, clean } from '../request'
 import type {
   AdminUser, DeviceRow, OperationLogRow, StorageRow, RoleWithPerms, Permission,
   SystemMetrics, NetworkMetrics, Paged,
 } from './adminTypes'
-
-/** 统一请求入口：Tauri → invoke 代理；Web → fetch。 */
-async function request<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
-  path: string,
-  opts: { query?: Record<string, string>; body?: unknown } = {},
-): Promise<T> {
-  if (isTauri()) {
-    return invoke<T>('api_request', {
-      method,
-      path,
-      body: opts.body ?? null,
-      query: opts.query ?? null,
-    })
-  }
-  switch (method) {
-    case 'GET':
-      return httpGet<T>(path, opts.query)
-    case 'POST':
-      return httpPost<T>(path, opts.body)
-    case 'PUT':
-      return httpPut<T>(path, opts.body)
-    case 'DELETE': {
-      const qs = opts.query ? `?${new URLSearchParams(opts.query).toString()}` : ''
-      return httpDelete<T>(`${path}${qs}`)
-    }
-  }
-}
-
-/** 去掉空值，避免把 `?keyword=` 这种空筛选条件发上去。 */
-function clean(params: Record<string, string | number | undefined | null>): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== '') out[k] = String(v)
-  }
-  return out
-}
 
 // ── 监控 ──────────────────────────────────────────────────
 export const getSystemMetrics = () => request<SystemMetrics>('GET', '/monitor/system')
@@ -59,7 +21,7 @@ export const listUsers = (p: {
 
 export const updateUser = (
   id: number,
-  updates: { role?: string; status?: number; email?: string; phone?: string },
+  updates: { status?: number; email?: string; phone?: string },
 ) => request<null>('PUT', `/admin/users/${id}`, { body: updates })
 
 export const resetUserPassword = (id: number, newPassword: string) =>

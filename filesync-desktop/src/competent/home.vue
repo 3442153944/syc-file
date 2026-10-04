@@ -2,8 +2,10 @@
 import {onMounted, onBeforeUnmount, ref, computed} from "vue"
 import {useRouter, useRoute} from "vue-router"
 import {useLogin} from "./login/login.ts"
-import {useMenuConfig} from "./composeables/menu-config.ts"
-import {NMenu, NBadge, NDropdown, NAvatar, NIcon} from "naive-ui"
+import {pinia} from "@/store/useStore"
+import {useRouteStore} from "@/store/useRouteStore"
+import type {MenuNode} from "@/router/dynamic"
+import {NMenu, NBadge, NDropdown, NAvatar, NIcon, NTag} from "naive-ui"
 import type {MenuOption, DropdownOption} from "naive-ui"
 import {logo} from "@syl/icon"
 import {useTransferStore} from "@/store/useTransferStore"
@@ -23,7 +25,7 @@ import NodeSwitcher from '@/components/NodeSwitcher.vue'
 const router = useRouter()
 const route = useRoute() // 引入 route 用于菜单高亮
 const {verify} = useLogin()
-const {menuConfig} = useMenuConfig()
+const rs = useRouteStore(pinia)
 const transferStore = useTransferStore()
 
 const userInfo = ref<any>(null)
@@ -31,23 +33,16 @@ const userAvatar = computed(() => avatarUrl(userInfo.value?.avatar))
 // 节点面板挂在 NodeSwitcher 内部（登录页也要用），齿轮图标通过 ref 复用它
 const nodeSwitcher = ref<InstanceType<typeof NodeSwitcher> | null>(null)
 
-// 2. 数据转换：将你的 menuConfig 转为 Naive UI 要求的 MenuOption 格式
-const mapMenus = (menus: any[]): MenuOption[] => {
-  return menus.map(item => {
-    const option: MenuOption = {
-      label: item.name,
-      key: item.path, // 使用 path 作为唯一 key
-    }
-    // 如果有子节点，递归处理
-    if (item.children && item.children.length > 0) {
-      option.children = mapMenus(item.children)
-    }
+// 2. 菜单来自服务器下发的路由表（store/useRouteStore → router/dynamic.buildMenu），按级别 / 授权已过滤
+const mapMenus = (nodes: MenuNode[]): MenuOption[] => {
+  return nodes.map(n => {
+    const option: MenuOption = {label: n.title, key: n.key}
+    if (n.children && n.children.length > 0) option.children = mapMenus(n.children)
     return option
   })
 }
 
-// 使用 computed 确保数据响应式
-const menuOptions = computed(() => mapMenus(menuConfig || []))
+const menuOptions = computed(() => mapMenus(rs.menu))
 
 // 自动匹配当前路由高亮菜单
 const activeKey = computed(() => route.path)
@@ -73,8 +68,21 @@ onMounted(async () => {
     return
   }
   transferStore.init()
+  // 管理员改了路由表后，在线客户端几分钟内自动跟上（版本号没变则什么都不做）
+  refreshTimer = setInterval(async () => {
+    await rs.refresh(router)
+    // 访客到期 / 被禁用 / token 失效：回登录页
+    if (!rs.loaded && rs.loadError === 'unauthorized') {
+      localStorage.removeItem("token")
+      localStorage.removeItem("userInfo")
+      rs.reset(router)
+      router.push("/login")
+    }
+  }, 5 * 60 * 1000)
 })
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 onBeforeUnmount(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
   transferStore.dispose()
 })
 
@@ -95,6 +103,7 @@ const handleUserDropdown = (key: string) => {
 const handleLogout = () => {
   localStorage.removeItem("token")
   localStorage.removeItem("userInfo")
+  rs.reset(router)
   router.push("/login")
 }
 const handleHome = () => {
@@ -103,6 +112,7 @@ const handleHome = () => {
 
 // 3. 菜单点击事件：Naive UI 会直接传入对应的 key (即 item.path)
 const handleMenuClick = (key: string) => {
+  if (key.startsWith("dir:")) return // 菜单分组本身不跳转
   router.push(key)
 }
 </script>
@@ -156,6 +166,7 @@ const handleMenuClick = (key: string) => {
               </template>
             </n-avatar>
             <span v-if="userInfo" class="username">{{ userInfo.username }}</span>
+            <n-tag v-if="userInfo && userInfo.level === 0" size="small" type="warning">访客</n-tag>
           </div>
         </n-dropdown>
         <div class="settings-icon" v-if="isTauri()" @click="nodeSwitcher?.open()" title="网络节点设置">
