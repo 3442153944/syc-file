@@ -36,7 +36,10 @@ COPY --from=builder /out/syc-file /opt/syc/syc-file
 COPY docker/config.template.yaml docker/run-backend.sh docker/entrypoint.sh docker/healthcheck.sh /opt/syc/
 COPY docker/supervisord.conf /etc/supervisor/supervisord.conf
 COPY docker/mysql.cnf /etc/mysql/conf.d/zz-syc.cnf
-RUN chmod +x /opt/syc/*.sh
+# mysql 会忽略「世界可写」的配置文件（宿主机文件系统权限是 777/666 时 COPY 进来就会踩，
+# 表现为 datadir 配不上、初始化 mysqld 找不到 /var/lib/mysql 直接退出），这里显式收紧权限
+RUN chmod +x /opt/syc/*.sh \
+    && chmod 644 /etc/mysql/conf.d/zz-syc.cnf /etc/supervisor/supervisord.conf
 
 VOLUME /data
 # 默认端口 9999，可在 /data/config/config.yaml 的 server.port 修改（同时调整 -p 映射）

@@ -44,7 +44,9 @@ if [ ! -d "$DATA/mysql/mysql" ]; then
     log "初始化 MySQL 数据目录"
     mysqld --initialize-insecure --user=mysql --datadir="$DATA/mysql" >/dev/null 2>&1 \
         || { log "MySQL 初始化失败"; exit 1; }
-    mysqld --user=mysql --skip-networking --socket=/run/mysqld/init.sock \
+    # 显式带 --datadir：初始化这步不依赖 /etc/mysql/conf.d 里的配置
+    #（配置万一被 mysql 因权限等原因忽略，这里也必须能自举）
+    mysqld --user=mysql --datadir="$DATA/mysql" --skip-networking --socket=/run/mysqld/init.sock \
         --pid-file=/run/mysqld/init.pid >/dev/null 2>&1 &
     init_pid=$!
     for _ in $(seq 1 60); do
