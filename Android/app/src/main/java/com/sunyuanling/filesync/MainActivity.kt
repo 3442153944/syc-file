@@ -198,6 +198,16 @@ fun FileSyncApp(startDestination: Any) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // ========== 登录后补连 WS ==========
+    // Activity 的 ON_START 只在前后台切换时触发：更新后重装、或久未启动导致 token 失效
+    // 重新登录时都不会再有 ON_START，只在上面 observer 里连 WS 会让首页一直停在
+    // 「连接失败/连接中」。这里跟住当前页面，只要已登录且未连接就补一次连接。
+    LaunchedEffect(currentDestination) {
+        if (Request.hasToken() && !WebSocketManager.isConnected()) {
+            WebSocketManager.connect(context)
+        }
+    }
+
     // ========== 强制保活服务 + 同步引擎 ==========
     // 键在 currentDestination 上而非 Unit：本 composable 首次进入组合时如果用户还没登录
     // （新装/退出登录后的正常路径，此时页面停在 LoginDestination），Request.hasToken()

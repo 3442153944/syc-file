@@ -56,7 +56,8 @@
   → [Go] 与 trunk 比对：
          - trunk 有、本地无            → 给B派 download/mkdir
          - trunk 有、本地 hash 不同      → 给B派 download（trunk 为准）
-         - trunk 无、本地有            → 给B派 delete（trunk 已删）
+         - trunk 曾登记过但已软删、本地有 → 给B派 delete（trunk 已删）
+         - trunk 从未登记过的本地路径      → 忽略（新文件，等上传/notify 登记）
   → [Go] 同时把 B 离线期间积压的 pending/waiting_unlock 任务派发
 ```
 

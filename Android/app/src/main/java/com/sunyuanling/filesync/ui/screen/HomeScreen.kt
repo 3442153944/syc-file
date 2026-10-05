@@ -32,7 +32,7 @@ import com.sunyuanling.filesync.ui.viewModel.home.DevicesViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.HomeViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.RecentFilesViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.StorageViewModel
-import com.sunyuanling.filesync.ui.viewModel.home.SyncStatus
+import com.sunyuanling.filesync.ui.viewModel.home.ServerStatus
 import com.sunyuanling.filesync.ui.viewModel.home.SyncStatusViewModel
 
 private fun formatFileSize(bytes: Long): String = when {
@@ -57,7 +57,7 @@ fun HomeScreen(
     val devices by devicesVM.devices.collectAsState()
     val onlineCount by devicesVM.onlineCount.collectAsState()
     val recentFiles by recentFilesVM.files.collectAsState()
-    val syncStatus by syncVM.serverOnline.collectAsState()
+    val serverStatus by syncVM.serverStatus.collectAsState()
     val context = LocalContext.current
 
     LazyColumn(
@@ -79,9 +79,13 @@ fun HomeScreen(
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = if (!syncStatus) "服务器连接失败" else "一切正常运行中",
+                        text = when (serverStatus) {
+                            ServerStatus.Checking -> "正在连接服务器…"
+                            ServerStatus.Online -> "一切正常运行中"
+                            ServerStatus.Offline -> "服务器连接失败"
+                        },
                         fontSize = 14.sp,
-                        color = if (!syncStatus)
+                        color = if (serverStatus == ServerStatus.Offline)
                             MaterialTheme.colorScheme.error
                         else
                             MaterialTheme.colorScheme.onSurfaceVariant
