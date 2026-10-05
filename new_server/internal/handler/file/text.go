@@ -354,6 +354,15 @@ func registerSavedFile(db *gorm.DB, engine *sync.Engine, userID uint, fullPath, 
 		if handled {
 			return true
 		}
+		// 不在 trunk 前缀下：可能是服务端机器上某同步文件夹的本地镜像目录（设备自己的那份），
+		// 此时同样要把新内容并进 trunk 并广播，否则其它设备永远收不到这次编辑。
+		handled, err = engine.HandleMirrorEdit(userID, fullPath, name, size, hash)
+		if err != nil {
+			logger.Logger.Warn("文本保存后镜像目录同步派发失败", zap.String("path", fullPath), zap.Error(err))
+		}
+		if handled {
+			return true
+		}
 	}
 	if _, err := upsertFileRecord(db, userID, fullPath, name, size, hash); err != nil {
 		logger.Logger.Warn("文本保存后更新文件记录失败", zap.String("path", fullPath), zap.Error(err))

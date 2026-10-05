@@ -77,7 +77,9 @@ fi
 # ── 2. 替换二进制（保留上一版）────────────────────────────────
 step "替换二进制（上一版 -> $BIN.prev）"
 HAD_PREV=0
-if [ -f "$BIN" ]; then cp -p "$BIN" "$BIN.prev"; HAD_PREV=1; fi
+# 不用 cp -p：它要复制时间戳，而 .prev 可能是别的用户（如 root）留下的，非属主改不了时间戳会直接报错中止。
+# 回滚只需要内容和可执行位，先删掉旧的 .prev 再只保留权限位。
+if [ -f "$BIN" ]; then rm -f "$BIN.prev"; cp --preserve=mode "$BIN" "$BIN.prev"; HAD_PREV=1; fi
 mv -f "$BIN.new" "$BIN"
 
 # ── 3. 重启并健康检查 ─────────────────────────────────────────

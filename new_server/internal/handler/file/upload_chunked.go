@@ -55,6 +55,12 @@ type uploadInitReq struct {
 	FileHash   string   `json:"file_hash" binding:"required"`   // hex blake3 整文件哈希
 	LeafHashes []string `json:"leaf_hashes" binding:"required"` // 每片叶子哈希 hex，len==ChunkCount
 	DeviceID   string   `json:"device_id"`                      // 源设备（秒传时同步派发需排除）
+
+	// Sync 标记这是同步客户端的覆盖式上传：目标已存在且内容不同时不是一律拒绝，
+	// 而是比对 BaseHash（客户端上次与服务端对齐时的版本）与服务端当前版本——一致说明
+	// 是基于最新版本的修改（含离线编辑），允许覆盖；不一致或没有基线说明与其它设备分叉，走冲突待办。
+	Sync     bool   `json:"sync"`
+	BaseHash string `json:"base_hash"`
 }
 
 // HandlerFuncUploadInit 分片上传第一步：校验描述信息 → 秒传查重 → 建/续会话 → 预分配临时文件。
@@ -132,6 +138,19 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 				// init 重发）。这不是错误，直接当秒传成功返回，既不重传也不产生副本。
 				respondInstant(c, db, engine, userID, &req, fullPath,
 					upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize), "文件已是最新")
+				return
+			case req.Sync:
+				cur := pathHash(db, userID, fullPath)
+				if req.BaseHash != "" && req.BaseHash == cur {
+					break // 基于服务端当前版本的修改：快进，complete 时原子替换
+				}
+				if engine != nil {
+					engine.ReportUploadConflict(userID, req.DeviceID, fullPath, req.Name, req.TotalSize, req.FileHash, req.BaseHash)
+				}
+				logger.Logger.Warn("同步上传与服务端版本冲突，转入冲突待办", zap.String("path", fullPath),
+					zap.String("device_id", req.DeviceID), zap.String("base_hash", req.BaseHash), zap.String("server_hash", cur))
+				c.JSON(http.StatusOK, gin.H{"code": 409, "message": "同步冲突：服务端版本已被其它设备修改，本地副本将转入冲突待办",
+					"data": gin.H{"conflict": true, "server_hash": cur}})
 				return
 			case req.OnConflict == onConflictTimestamp:
 				// 「同名是常态」的场景（发布 APK：每次 build 出来都叫 app-release.apk）。
@@ -273,6 +292,7 @@ func respondInstant(c *gin.Context, db *gorm.DB, engine *sync.Engine, userID uin
 		}
 	}
 	if !handled {
+		mirrorToTrunk(engine, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
 		fileID, _ = upsertFileRecord(db, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
 	}
 	writeUploadHistoryCompleted(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
@@ -289,6 +309,16 @@ func respondInstant(c *gin.Context, db *gorm.DB, engine *sync.Engine, userID uin
 // pathHashEquals 该路径在 file 表里记录的哈希是否等于 want。
 // 只作为「同大小」之外的第二判据用：磁盘大小相同 + 库里哈希相同才认定是同一份内容，
 // 避免为了判断而去读几十 MB 的文件重算哈希。库里没记录则返回 false（宁可重传）。
+// pathHash 返回该路径当前在库里记录的整文件哈希，没有记录/已删除返回 ""。
+func pathHash(db *gorm.DB, userID uint, fullPath string) string {
+	var f model.File
+	if err := db.Where("user_id = ? AND file_path = ? AND is_deleted = ?", userID, fullPath, false).
+		First(&f).Error; err != nil || f.FileHash == nil {
+		return ""
+	}
+	return *f.FileHash
+}
+
 func pathHashEquals(db *gorm.DB, userID uint, fullPath, want string) bool {
 	if want == "" {
 		return false

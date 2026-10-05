@@ -41,7 +41,14 @@ pub struct UploadOptions {
     /// 目标同名时的策略：空/"reject" = 报错（默认，同步链路必须用这个），
     /// "timestamp" = 服务端自动给文件名加时间戳区分（发布 APK 这类同名是常态的场景）。
     pub on_conflict: Arc<str>,
+    /// 同步链路的覆盖式上传：Some(base_hash) 表示带基线上传（"" = 本机没有基线），
+    /// 服务端目标已存在时据此判断是快进还是与其它设备分叉；None = 普通上传。
+    pub sync_base: Option<Arc<str>>,
 }
+
+/// init 被服务端以版本冲突拒绝时，错误信息里带的标记。服务端已把冲突登记为待办并通知本机隔离本地副本，
+/// 调用方见到它不要当普通失败重试。
+pub const SYNC_CONFLICT: &str = "同步冲突";
 
 impl UploadOptions {
     pub fn new(device_id: impl Into<String>) -> Self {
@@ -50,7 +57,14 @@ impl UploadOptions {
             concurrency: DEFAULT_CONCURRENCY,
             device_id: Arc::from(device_id.into().into_boxed_str()),
             on_conflict: Arc::from(""),
+            sync_base: None,
         }
+    }
+
+    /// 标记为同步链路的覆盖式上传，并带上本机已知的基线 hash（没有基线传空串）。
+    pub fn with_sync_base(mut self, base_hash: impl AsRef<str>) -> Self {
+        self.sync_base = Some(Arc::from(base_hash.as_ref()));
+        self
     }
 
     /// 同名自动加时间戳（不影响其它字段）。
@@ -250,6 +264,7 @@ async fn run_once(
         desc,
         &options.device_id,
         &options.on_conflict,
+        options.sync_base.as_deref(),
     )
     .await
     .map_err(UploadError::Other)?;
@@ -409,6 +424,7 @@ async fn call_init(
     desc: &Description,
     device_id: &str,
     on_conflict: &str,
+    sync_base: Option<&str>,
 ) -> Result<UploadInitData, String> {
     let params = UploadInitParams {
         path: remote_dir.to_string(),
@@ -421,10 +437,14 @@ async fn call_init(
         leaf_hashes: desc.leaf_hashes_hex.clone(),
         device_id: device_id.to_string(),
         on_conflict: on_conflict.to_string(),
+        sync: sync_base.is_some(),
+        base_hash: sync_base.unwrap_or("").to_string(),
     };
     let resp = file_api::upload_init(client, params).await?;
     if resp.is_ok() {
         resp.data.ok_or_else(|| "init 响应为空".into())
+    } else if resp.code == 409 {
+        Err(format!("{}: {}", SYNC_CONFLICT, resp.message))
     } else {
         Err(format!("init 失败: {}", resp.message))
     }
