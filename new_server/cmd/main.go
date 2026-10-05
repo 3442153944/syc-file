@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,6 +33,9 @@ import (
 	"syscall"
 	"time"
 )
+
+// startupWaitTimeout 启动时等待 MySQL / Redis 就绪的最长时间（开机自启时它们的容器比本服务晚几秒才可用）。
+const startupWaitTimeout = 90 * time.Second
 
 func main() {
 	// 1. 初始化配置 (Viper)
@@ -79,9 +84,17 @@ func main() {
 	r.Use(middleware.ZapLogger(), gin.Recovery())
 
 	//建立数据库连接
-	db, err := database.InitMySQL(config.Conf.DB)
-	if err != nil {
-		logger.Logger.Error("数据库连接失败", zap.Error(err))
+	// 开机时 systemd 只保证 docker.service 起来了，MySQL / Redis 容器还要再等几秒才就绪。
+	// 以前这里连不上只记一条日志、拿着空的 db 继续往下走，随后在 AutoMigrate 处空指针 panic，
+	// 靠 Restart=always 重启碰巧成功——每次开机日志里都有一次崩溃。现在等它就绪，真连不上才明确退出。
+	var db *gorm.DB
+	var err error
+	if err = database.Retry("MySQL", startupWaitTimeout, func() error {
+		var e error
+		db, e = database.InitMySQL(config.Conf.DB)
+		return e
+	}); err != nil {
+		logger.Logger.Fatal("数据库连接失败", zap.Error(err))
 	}
 	logger.Logger.Info("数据库连接成功")
 
@@ -139,9 +152,13 @@ func main() {
 	}
 
 	//建立缓存连接
-	redisClient, err := database.InitRedis(config.Conf.Redis)
-	if err != nil {
-		logger.Logger.Error("缓存连接失败", zap.Error(err))
+	var redisClient *redis.Client
+	if err := database.Retry("Redis", startupWaitTimeout, func() error {
+		var e error
+		redisClient, e = database.InitRedis(config.Conf.Redis)
+		return e
+	}); err != nil {
+		logger.Logger.Fatal("缓存连接失败", zap.Error(err))
 	}
 	if err := redisClient.Ping(context.Background()).Err(); err != nil {
 		logger.Logger.Fatal("Redis连接测试失败", zap.Error(err))
