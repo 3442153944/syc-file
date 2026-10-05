@@ -34,7 +34,16 @@ pub fn run() {
     // 先创建共享配置，setup 与 manage 共用同一 Arc
     let shared_config = config::init_sync_config();
     let clipboard_state = clipboard_sync::init_clipboard_state();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // 单实例必须是第一个注册的插件。再次启动（点 Dock 图标 / 应用菜单）时，新进程把参数交给
+    // 已运行的实例后立即退出，已运行的这个负责把主窗口叫出来——关窗后窗口已被销毁、进程只剩托盘，
+    // GNOME 会把「点图标」当成「再启动一次」，没有这层保护就会冒出第二个进程。
+    // 仅 release：debug 与 release 标识符相同，dev 启用会被已安装的实例吃掉。
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        app_shell::window::show_main_window(app);
+    }));
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
@@ -84,8 +93,16 @@ pub fn run() {
             net::start_health_loop();
 
             // 顶部菜单栏：「工具」→ 日志窗口；「网络」→ 节点切换 / 检测 / 设置
-            let menu = app_shell::menu::build_app_menu(app.handle())?;
-            app.set_menu(menu)?;
+            //
+            // Linux 不挂原生菜单栏：GNOME + Wayland 下 Window::set_menu 会在 GTK 里无限递归直到栈溢出、
+            // 进程 SIGABRT（appmenu-gtk-module 全局菜单模块 / GTK 菜单栏的已知冲突，崩溃栈全部落在
+            // set_menu 下面）。这些功能在 Linux 上都有替代入口：节点切换 / 设置在页面顶栏的节点指示器和
+            // 齿轮里，日志窗口和网络节点设置在托盘菜单与用户下拉菜单里。
+            #[cfg(not(target_os = "linux"))]
+            {
+                let menu = app_shell::menu::build_app_menu(app.handle())?;
+                app.set_menu(menu)?;
+            }
 
             // 粘贴快传：本地已经知道快捷键（上次登录/verify 写回过）就直接注册，
             // 不用等这次再登录一遍才能用
