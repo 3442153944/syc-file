@@ -37,12 +37,21 @@ pub struct WsStatus {
     pub message: String,
 }
 
+/// 起 WS 循环并返回句柄。循环自己永不退出，调用方必须在停止同步时 abort 它，
+/// 否则「停止 → 启动」会叠出第二条循环：同一 device_id 的两条连接被服务端互相顶替，
+/// 谁也维持不住，最终降级成 HTTP 轮询。
 pub fn start_ws_client(
     config: SharedSyncConfig,
     upload_tx: mpsc::Sender<UploadTask>,
     app: AppHandle,
-) {
-    tokio::spawn(run_ws_loop(config, upload_tx, app));
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_ws_loop(config, upload_tx, app))
+}
+
+/// WS 循环被 abort 后收尾：被强制终止的循环来不及走正常的会话收尾，出站通道和连接状态由这里补上。
+pub fn on_engine_stopped(app: &AppHandle) {
+    *ws_outbound().lock() = None;
+    emit_ws_status(app, false, "同步已停止");
 }
 
 /// 重连间隔：固定 3 秒，**不做指数退避、不限次数**。

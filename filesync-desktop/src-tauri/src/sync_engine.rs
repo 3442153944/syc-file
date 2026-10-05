@@ -47,6 +47,19 @@ pub struct SyncEngine {
     pub watcher: RecommendedWatcher,
     #[allow(dead_code)]
     upload_tx: mpsc::Sender<UploadTask>,
+    /// 引擎 spawn 出来的常驻循环（WS、防抖刷新），都是永不退出的 loop，
+    /// 只能靠 abort 停；上传 worker 在发送端全部释放后会自行退出。
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    app: AppHandle,
+}
+
+impl Drop for SyncEngine {
+    fn drop(&mut self) {
+        for t in &self.tasks {
+            t.abort();
+        }
+        crate::ws_client::on_engine_stopped(&self.app);
+    }
 }
 
 pub type SharedSyncEngine = Arc<Mutex<Option<SyncEngine>>>;
@@ -71,12 +84,12 @@ pub fn start_sync_engine(
     };
 
     let upload_tx = start_upload_workers(worker_count, config.clone(), app.clone());
-    start_ws_client(config.clone(), upload_tx.clone(), app.clone());
+    let ws_task = start_ws_client(config.clone(), upload_tx.clone(), app.clone());
 
     let debounce_map: DebounceMap = Arc::new(Mutex::new(HashMap::new()));
 
     // 防抖刷新器
-    {
+    let flusher = {
         let dm = debounce_map.clone();
         let cfg = config.clone();
         let tx = upload_tx.clone();
@@ -85,8 +98,9 @@ pub fn start_sync_engine(
                 sleep(Duration::from_millis(50)).await;
                 flush_debounce(&dm, &cfg, &tx, debounce_ms).await;
             }
-        });
-    }
+        })
+    };
+    let tasks = vec![ws_task, flusher];
 
     // 文件 watcher
     let dm = debounce_map.clone();
@@ -115,9 +129,20 @@ pub fn start_sync_engine(
             map.insert(path, Instant::now());
         }
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        // 引擎没建起来，前面已经 spawn 的循环不能留着
+        for t in &tasks {
+            t.abort();
+        }
+        e.to_string()
+    })?;
 
-    *guard = Some(SyncEngine { watcher, upload_tx });
+    *guard = Some(SyncEngine {
+        watcher,
+        upload_tx,
+        tasks,
+        app,
+    });
     Ok(())
 }
 
