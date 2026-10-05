@@ -56,8 +56,18 @@ unpin() {
 remove_user_level_leftovers() {
     local f="$DATA/applications/$APP_ID.desktop"
     [ -f "$f" ] && { rm -f "$f"; echo "已清理旧的用户级入口：$f"; }
-    local s
-    for s in 32x32 128x128 256x256; do rm -f "$DATA/icons/hicolor/$s/apps/$APP_ID.png"; done
+    local s hc="$DATA/icons/hicolor"
+    for s in 32x32 128x128 256x256; do rm -f "$hc/$s/apps/$APP_ID.png"; done
+    # 图标缓存必须一并删掉：旧版脚本装图标时生成了 ~/.local/share/icons/hicolor/icon-theme.cache，
+    # 里面还记着「图标在用户目录」。PNG 删了而缓存留着，GTK / GNOME Shell 就会按缓存去找已经不存在的文件，
+    # 系统 deb 里那份反而不被采用——表现就是 Dock / 桌面上的图标变成空白。
+    # 用户目录里没有别的主题图标时，连同空目录一起清掉（有别的图标就只删缓存，让它下次自动重建）。
+    if [ -d "$hc" ]; then
+        rm -f "$hc/icon-theme.cache"
+        find "$hc" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+        find "$hc" -mindepth 1 -type d -empty -delete 2>/dev/null || true   # 删掉 apps 后尺寸目录才变空，再扫一遍
+        rmdir "$hc" 2>/dev/null || true
+    fi
     return 0
 }
 
