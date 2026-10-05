@@ -40,8 +40,8 @@ const logout = () => {
     >
       <template #footer>
         <n-space justify="center">
-          <n-button v-if="networkError" type="primary" :loading="retrying" @click="retry">重试</n-button>
-          <n-button @click="logout">退出登录</n-button>
+          <n-button v-if="networkError" key="retry" type="primary" :loading="retrying" @click="retry">重试</n-button>
+          <n-button key="logout" @click="logout">退出登录</n-button>
         </n-space>
       </template>
     </n-result>

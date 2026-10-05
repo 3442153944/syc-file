@@ -316,7 +316,7 @@ const columns: DataTableColumns<FileItem> = [
     <div class="toolbar">
       <n-space align="center" justify="space-between">
         <n-space align="center">
-          <n-button v-if="parentPath" type="primary" ghost size="small" @click="handleGoUp">⬆ 返回上一级</n-button>
+          <n-button v-if="parentPath" key="go-up" type="primary" ghost size="small" @click="handleGoUp">⬆ 返回上一级</n-button>
           <div class="current-path">
             <span class="path-label">当前路径：</span>
             <span class="path-value">{{ currentPath || "请从「文件列表」选择磁盘进入" }}</span>

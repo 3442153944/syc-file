@@ -255,7 +255,7 @@ onUnmounted(() => {
             <n-space align="center">
               <span class="lbl">本地目录</span>
               <n-input v-model:value="form.localPath" placeholder="例如默认同步根目录" style="width: 360px"/>
-              <n-button size="small" @click="pickLocal">选择目录</n-button>
+              <n-button key="pick-local" size="small" @click="pickLocal">选择目录</n-button>
             </n-space>
             <n-space align="center">
               <span class="lbl">远端目录</span>
@@ -266,8 +266,8 @@ onUnmounted(() => {
               <span class="lbl">名称/方向</span>
               <n-input v-model:value="form.name" placeholder="可选，默认用本地目录名" style="width: 200px"/>
               <n-select v-model:value="form.direction" :options="directionOptions" style="width: 150px"/>
-              <n-button type="primary" @click="handleSave">保存</n-button>
-              <n-button v-if="folder" quaternary @click="cancelEdit">取消</n-button>
+              <n-button key="save-folder" type="primary" @click="handleSave">保存</n-button>
+              <n-button v-if="folder" key="cancel-edit" quaternary @click="cancelEdit">取消</n-button>
             </n-space>
             <n-text depth="3" style="font-size: 12px">
               提示：账号下只有一个同步文件夹，远端目录/方向各终端共用；本地目录仅保存在本机，每台设备独立设置、互不影响。保存后需点「启动同步」才会开始监听。
@@ -294,8 +294,8 @@ onUnmounted(() => {
               <n-switch size="small" :value="folder.enabled" @update:value="handleToggleFolder"/>
             </n-space>
             <n-space>
-              <n-button size="small" @click="startEdit">编辑</n-button>
-              <n-button size="small" type="error" ghost @click="handleDeleteFolder">删除</n-button>
+              <n-button key="edit-folder" size="small" @click="startEdit">编辑</n-button>
+              <n-button key="delete-folder" size="small" type="error" ghost @click="handleDeleteFolder">删除</n-button>
             </n-space>
           </n-space>
         </template>
