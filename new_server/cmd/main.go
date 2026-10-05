@@ -188,7 +188,7 @@ func main() {
 	//越过阈值连续几次才告警，见 internal/monitor/resource_alert.go
 	monitor.StartResourceAlertWatcher()
 
-	//监控历史长期表降采样清理：1 个月以上降到按小时、1 年以上降到按天，
+	//监控历史长期表降采样清理：3 天以上降到按小时、1 年以上降到按天，
 	//不然 process_history 这类明细表会无限膨胀，见 internal/monitor/retention.go
 	monitor.StartRetentionCleaner()
 
