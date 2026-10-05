@@ -10,7 +10,7 @@ plugins {
 // 版本名是唯一需要手改的地方；versionCode 由它推出：主*10000 + 次*100 + 修订（1.3.1 → 10301）。
 // 应用更新靠 versionCode 比大小：桌面端发布页按同一规则从版本名算出版本号，两边必须一致，
 // 否则装上新包后读到的 versionCode 仍是旧值，会一直提示有更新，系统也会因版本号相同/更低拒绝覆盖安装。
-val appVersionName = "1.3.1"
+val appVersionName = "1.3.3"
 val appVersionCode = appVersionName.split(".").map { it.toInt() }.let { (major, minor, patch) ->
     major * 10000 + minor * 100 + patch
 }
