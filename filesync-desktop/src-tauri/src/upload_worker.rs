@@ -130,7 +130,12 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
     // 真冲突（同名不同内容）会被拒绝，交给上层冲突协议处理，好过静默删掉对方的数据。
 
     // 分片上传（blake3 + merkle + 乱序并发 + 断点续传 + 秒传 + SessionGone 重试一次）
-    let options = UploadOptions::new(device_id.clone());
+    // 覆盖式上传带上本机已知的基线：服务端据此区分「基于最新版本的修改（含离线编辑）」和「与其它设备分叉」，
+    // 前者快进为新版本，后者转入冲突待办——本地副本隔离到 .syncpending，由用户选保留哪个。
+    let base_for_cas = crate::base_store::get(task.folder_id, &task.relative_path)
+        .map(|b| b.hash)
+        .unwrap_or_default();
+    let options = UploadOptions::new(device_id.clone()).with_sync_base(base_for_cas);
     let on_progress: chunked_uploader::ProgressFn = Arc::new(|_, _| {});
 
     // 上传中途被切了节点时重来一次：那个错误是客户端自己掐的（见 net.rs 的世代号），
@@ -157,6 +162,12 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
                 );
                 let cfg = config.read();
                 client = ApiClient::new(&cfg.server_url, &cfg.token, &cfg.device_id);
+            }
+            Err(e) if e.contains(chunked_uploader::SYNC_CONFLICT) => {
+                // 服务端已登记冲突待办并经 WS 通知本机隔离本地副本，这里不重试
+                crate::logger::warn("upload", format!("与服务端版本冲突，已转入冲突待办: {}", path_str));
+                emit_progress(app, &path_str, "error", Some("与服务端版本冲突，请在冲突待办中选择保留哪个版本".into()));
+                return;
             }
             Err(e) => {
                 crate::logger::error("upload", format!("上传失败 {}: {}", path_str, e));

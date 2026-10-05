@@ -147,6 +147,26 @@ async fn do_download(
     let safe_rel = sanitize_rel(&relative_path);
     let final_str = local_root.join(&safe_rel).to_string_lossy().to_string();
 
+    // 本地有尚未同步的编辑（内容既不是基线、也不是要下载的版本）：不能覆盖，否则离线编辑直接丢了。
+    // 交给上传侧的版本检查裁决：基于最新版本的修改快进成为新版本；与其它设备分叉则转入冲突待办，
+    // 本地副本隔离到 .syncpending 让用户选保留哪个。
+    if let Some(exp) = expected_hash.as_deref().filter(|h| !h.is_empty()) {
+        let local = local_root.join(&safe_rel);
+        if local.is_file() {
+            if let Ok(cur) = crate::chunked_uploader::file_blake3_hex(&local) {
+                let base = base_store::get(folder_id, &relative_path).map(|b| b.hash);
+                if cur != exp && base.as_deref() != Some(cur.as_str()) {
+                    logger::warn(
+                        "download",
+                        format!("本地有未同步的修改，跳过下载以免覆盖: {}", relative_path),
+                    );
+                    sync_api::complete_task(&client, task_id, "").await.ok();
+                    return;
+                }
+            }
+        }
+    }
+
     crate::transfers::download_progress(&final_str, "downloading", Some(task_id), None);
 
     match download_and_publish(

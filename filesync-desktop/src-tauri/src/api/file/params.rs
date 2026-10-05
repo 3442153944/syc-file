@@ -61,6 +61,14 @@ pub struct UploadInitParams {
     #[serde(default)]
     #[serde(skip_serializing_if = "String::is_empty")]
     pub on_conflict: String,
+    /// 同步链路的覆盖式上传：目标已存在时服务端按 base_hash 做版本检查，
+    /// 一致则快进覆盖，不一致（或无基线）则返回 409 并转入冲突待办。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sync: bool,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub base_hash: String,
 }
 
 /// 分片上传完成。

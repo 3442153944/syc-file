@@ -140,6 +140,7 @@ func HandlerFuncUploadComplete(db *gorm.DB, _ *redis.Client, engine *sync.Engine
 			}
 		}
 		if !handled {
+			mirrorToTrunk(engine, userID, sess.TargetPath, sess.FileName, sess.TotalSize, fileHashHex)
 			id, ferr := upsertFileRecord(db, userID, sess.TargetPath, sess.FileName, sess.TotalSize, fileHashHex)
 			if ferr != nil {
 				logger.Logger.Error("写入文件记录失败", zap.String("path", sess.TargetPath), zap.Error(ferr))
@@ -168,6 +169,18 @@ func HandlerFuncUploadComplete(db *gorm.DB, _ *redis.Client, engine *sync.Engine
 			"file_id": fileID, "file_name": sess.FileName, "storage_path": sess.TargetPath,
 			"file_size": sess.TotalSize, "file_hash": fileHashHex, "synced": handled,
 		}})
+	}
+}
+
+// mirrorToTrunk 文件没落在 trunk 前缀下时，看它是不是服务端机器上某同步文件夹的本地镜像目录：
+// 是的话把新内容并进 trunk 并向各设备广播（否则这次上传/编辑永远传不到其它设备）。
+// 失败只记日志，不影响上传本身；文件记录仍按原样登记在镜像路径下。
+func mirrorToTrunk(engine *sync.Engine, userID uint, fullPath, name string, size int64, hash string) {
+	if engine == nil {
+		return
+	}
+	if _, err := engine.HandleMirrorEdit(userID, fullPath, name, size, hash); err != nil {
+		logger.Logger.Warn("镜像目录文件同步到 trunk 失败", zap.String("path", fullPath), zap.Error(err))
 	}
 }
 
