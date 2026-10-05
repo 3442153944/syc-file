@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "update": "pnpm update @tauri-apps/api @tauri-apps/plugin-dialog @tauri-apps/plugin-opener @tauri-apps/cli ; cargo update --manifest-path src-tauri/Cargo.toml -p tauri -p tauri-plugin-dialog -p tauri-plugin-opener -p tauri-plugin-global-shortcut -p keyring",
-    "build-exe": "tauri build"
+    "build-exe": "tauri build",
+    "test:unit": "node tests/run.mjs"
   },
   "dependencies": {
     "@noble/hashes": "^1.6.0",

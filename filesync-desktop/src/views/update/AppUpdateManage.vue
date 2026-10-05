@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 应用更新管理（Windows/Web）：上传 APK → 填版本信息 → 发布；下方管理已发布版本。
 // APK 上传复用 fileApi.uploadFile（Tauri 传本地路径 / Web 传 File），返回 storage_path+hash+size 供发布登记。
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { useMessage, useDialog } from 'naive-ui'
@@ -71,6 +71,21 @@ const form = ref({
 })
 const publishing = ref(false)
 
+// 版本号由版本名推出：主*10000 + 次*100 + 修订（1.3.1 → 10301）。
+// 必须与安卓 app/build.gradle.kts 里 versionCode 的算法一致：应用更新按版本号比大小，
+// 安装包里自带的 versionCode 和这里发布的不一致，装完仍会被判有更新、系统也会拒绝覆盖安装。
+function codeFromName(name: string): number | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(name.trim())
+  return m ? Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3]) : null
+}
+watch(
+  () => form.value.version_name,
+  (name) => {
+    const code = codeFromName(name)
+    if (code !== null) form.value.version_code = code
+  },
+)
+
 async function doPublish() {
   if (!uploaded.value) {
     message.warning('请先上传 APK')
@@ -83,7 +98,7 @@ async function doPublish() {
   // 服务端 version_code/min_version_code 都是 int64，小数会被 ShouldBindJSON 整个拒掉
   // （只回一句「参数解析失败」，很难查）。输入框已限整数，这里再兜一道。
   if (!Number.isInteger(form.value.version_code) || !Number.isInteger(form.value.min_version_code)) {
-    message.warning('版本号必须是整数（如 112），版本名才写 1.1.2')
+    message.warning('版本号必须是整数（如 10301），版本名才写 1.3.1')
     return
   }
   publishing.value = true
@@ -205,10 +220,10 @@ onMounted(refresh)
             :min="1"
             :precision="0"
             :step="1"
-            placeholder="整数 build 号，如 112"
+            placeholder="填版本名后自动生成"
             style="width:200px"
           />
-          <n-text depth="3" style="margin-left:8px">整数，只用于比大小；版本名填在下面</n-text>
+          <n-text depth="3" style="margin-left:8px">按版本名自动生成（1.3.1 → 10301），需与安装包自带的版本号一致</n-text>
         </n-form-item>
         <n-form-item label="版本名">
           <n-input v-model:value="form.version_name" placeholder="如 1.1.0" style="width:200px" />

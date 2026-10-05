@@ -208,10 +208,12 @@ const activeTaskCount = computed(
         <NCard size="small" title="服务器磁盘" :segmented="{ content: true }">
           <NSpace vertical size="small" v-if="disks.length">
             <div v-for="d in disks" :key="d.path">
-              <NSpace justify="space-between" align="center" style="margin-bottom: 2px">
-                <NText>{{ d.path }}</NText>
-                <NText depth="3" style="font-size: 12px">可用 {{ d.free_gb }} / 总计 {{ d.total_gb }}</NText>
-              </NSpace>
+              <!-- 不用 NSpace：它的子项不会收缩，Linux 上路径很长时会把「可用/总计」挤到换行。
+                   这里路径独占剩余宽度并省略，右侧容量信息保持一行 -->
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px">
+                <NText :title="d.path" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ d.path }}</NText>
+                <NText depth="3" style="font-size: 12px; flex-shrink: 0; white-space: nowrap">可用 {{ d.free_gb }} / 总计 {{ d.total_gb }}</NText>
+              </div>
               <NProgress type="line" :height="8" :percentage="Math.round(d.used_percent * 10) / 10"
                          :status="usageStatus(d.used_percent)" />
             </div>

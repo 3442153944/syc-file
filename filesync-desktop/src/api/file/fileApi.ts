@@ -1,5 +1,5 @@
 import {invoke, isTauri} from '@tauri-apps/api/core'
-import {httpPost, buildGetUrl} from '../http'
+import {httpPost, httpGet, buildGetUrl} from '../http'
 import {getDeviceId} from '../platform'
 import {uploadChunked as uploadChunkedWeb, DEFAULT_CHUNK_SIZE, DEFAULT_CONCURRENCY} from './chunkedUploader'
 import type {AvailableDisksData, TraverseDirectoryData, UploadCompleteData, DownloadHistoryData, CreateShareLinkData, ShareLinkListData} from './fileTypes'
@@ -56,6 +56,62 @@ export async function deleteFile(path: string, name: string): Promise<void> {
 export async function buildDownloadUrl(path: string, name: string, deviceId: string): Promise<string> {
     if (isTauri()) return invoke<string>('build_download_url', {path, name, deviceId})
     return buildGetUrl('/file/download', {path, name, ...(deviceId ? {device_id: deviceId} : {})})
+}
+
+/**
+ * 缩略图 URL（图片 / 视频封面 / 音频专辑封面），可直接放进 <img>。
+ * width 服务端只认 128 / 256 / 512；version 传文件大小：内容变了 URL 就变，
+ * 缩略图响应带 1 天缓存期，不带版本号的话文件刚被改动的一天内会一直看到旧图。
+ */
+export async function buildThumbnailUrl(path: string, name: string, width = 256, version = 0): Promise<string> {
+    if (isTauri()) return invoke<string>('build_thumbnail_url', {path, name, width, version})
+    return buildGetUrl('/file/thumbnail', {path, name, w: String(width), ...(version ? {v: String(version)} : {})})
+}
+
+/** 文本文件此刻的内容和版本。content 统一成 \n 换行、不含 BOM；换行风格和 BOM 单独给出，服务端保存时还原。 */
+export interface TextFileData {
+    content: string
+    /** 版本号（整文件 blake3），保存时作为 base_hash 交回，服务端据此发现别人改过 */
+    hash: string
+    size: number
+    mtime_ms: number
+    eol: 'lf' | 'crlf'
+    bom: boolean
+}
+
+export interface SaveTextResult {
+    saved: boolean
+    /** 保存时发现别人在此期间改过：没有覆盖，current 是对方的最新内容和版本号 */
+    conflict?: boolean
+    /** 内容没变，没有写盘 */
+    unchanged?: boolean
+    hash?: string
+    size?: number
+    mtime_ms?: number
+    /** 文件在同步文件夹内，已通知各设备拉取 */
+    synced?: boolean
+    current?: TextFileData
+}
+
+/** 读取文本文件（配置文件、TXT、日志、代码等；上限 2MB，非 UTF-8 / 二进制会被拒绝）。 */
+export async function readTextFile(path: string, name: string): Promise<TextFileData> {
+    if (isTauri()) return invoke<TextFileData>('api_request', {method: 'GET', path: '/file/text/read', body: null, query: {path, name}})
+    return httpGet<TextFileData>('/file/text/read', {path, name})
+}
+
+/**
+ * 保存文本文件。正常保存带 base_hash（读到时的版本号）；用户明确选择覆盖他人修改时传 force。
+ * 版本冲突不是异常，而是 saved=false + conflict=true 的正常返回，调用方据此合并。
+ */
+export async function saveTextFile(params: {
+    path: string
+    name: string
+    content: string
+    base_hash?: string
+    force?: boolean
+}): Promise<SaveTextResult> {
+    if (isTauri()) return invoke<SaveTextResult>('api_request', {method: 'POST', path: '/file/text/save', body: params, query: null})
+    return httpPost<SaveTextResult>('/file/text/save', params)
 }
 
 export async function getDownloadHistory(pageNum: number, pageSize: number): Promise<DownloadHistoryData> {

@@ -278,6 +278,7 @@ pub fn run() {
             commands::file::upload_file,
             commands::file::delete_file,
             commands::file::build_download_url,
+            commands::file::build_thumbnail_url,
             commands::file::get_download_history,
             commands::file::delete_download_history,
             // 同步域
