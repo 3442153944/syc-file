@@ -47,6 +47,30 @@ export interface AdminRoute extends RouteItem {
   min_level: number
   perm: string
   enabled: boolean
+  /** 来自服务端内置目录：不能删除，也不能改路径 / 组件 / 父级，只能停用或调整展示 */
+  builtin: boolean
+}
+
+/** 新增路由的请求体。component 为空 = 菜单分组 */
+export interface CreateRouteBody {
+  code: string
+  title: string
+  path?: string
+  name?: string
+  component?: string
+  parent_code?: string
+  icon?: string
+  sort?: number
+  hidden?: boolean
+  min_level?: number
+  perm?: string
+  enabled?: boolean
+}
+
+/** 游客接口分组（决定游客拿到某页面后额外放行哪些接口） */
+export interface RoutePerm {
+  key: string
+  label: string
 }
 
 export interface GuestRow {

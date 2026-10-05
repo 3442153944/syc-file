@@ -19,6 +19,9 @@ for (const [k, v] of Object.entries(modules)) {
 
 export const hasComponent = (component: string): boolean => !!registry[component]
 
+/** 客户端现有的全部页面组件 key（views/**.vue），「路由管理」新增路由时从这里选，不用手敲 */
+export const componentKeys = (): string[] => Object.keys(registry).sort()
+
 /** 动态路由挂在 Home 布局下（Home 的 path 是 "/"，子路由写相对路径） */
 export const HOME_ROUTE_NAME = 'Home'
 

@@ -157,8 +157,11 @@ func (h *Handler) AdminListRoutes(c *gin.Context) {
 	jsonOK(c, all)
 }
 
-// AdminUpdateRoute PUT /v1/admin/routes/:id —— 改标题 / 图标 / 排序 / 是否在菜单显示 / 最低级别 / 启停，仅超级管理员。
-// 路由集合本身（有哪些页面、path、component）由内置目录决定，不允许在线新增 / 删除。
+// AdminUpdateRoute PUT /v1/admin/routes/:id —— 仅超级管理员。
+//
+// 所有路由都能改：标题 / 图标 / 排序 / 是否在菜单显示 / 最低级别 / 启停。
+// 自定义路由（builtin=false）还能改：path / 页面组件 / 父级分组 / 路由名 / 游客接口分组。
+// 内置路由的这几项客户端依赖，不允许改。
 func (h *Handler) AdminUpdateRoute(c *gin.Context) {
 	if !requireLevel(c, model.LevelSuper) {
 		return
@@ -174,6 +177,12 @@ func (h *Handler) AdminUpdateRoute(c *gin.Context) {
 		Hidden   *bool   `json:"hidden"`
 		MinLevel *int8   `json:"min_level"`
 		Enabled  *bool   `json:"enabled"`
+		// 以下仅自定义路由可改
+		Path       *string `json:"path"`
+		Component  *string `json:"component"`
+		ParentCode *string `json:"parent_code"`
+		Name       *string `json:"name"`
+		Perm       *string `json:"perm"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		jsonErr(c, 400, "参数解析失败: "+err.Error())
@@ -185,6 +194,16 @@ func (h *Handler) AdminUpdateRoute(c *gin.Context) {
 		return
 	}
 	updates := map[string]interface{}{}
+	if req.Path != nil || req.Component != nil || req.ParentCode != nil || req.Name != nil || req.Perm != nil {
+		if r.Builtin {
+			jsonErr(c, 400, "内置路由不能修改 path / 页面组件 / 父级 / 路由名 / 接口分组（只能停用或调整展示）")
+			return
+		}
+		if msg := h.applyStructuralEdits(&r, req.Path, req.Component, req.ParentCode, req.Name, req.Perm, updates); msg != "" {
+			jsonErr(c, 400, msg)
+			return
+		}
+	}
 	if req.Title != nil {
 		if strings.TrimSpace(*req.Title) == "" {
 			jsonErr(c, 400, "标题不能为空")

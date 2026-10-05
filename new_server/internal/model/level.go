@@ -42,21 +42,24 @@ func (AppSetting) TableName() string { return "app_setting" }
 //
 // 表由内置目录（internal/system/catalog.go）按 Code「缺失才插入」播种，之后管理员的修改不会被覆盖。
 type Route struct {
-	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	Code       string    `gorm:"size:64;not null;uniqueIndex" json:"code"`
-	ParentCode string    `gorm:"size:64;not null;default:'';index" json:"parent_code"`
-	Path       string    `gorm:"size:200;not null" json:"path"`
-	Name       string    `gorm:"size:64;not null;default:''" json:"name"`       // vue-router 的路由名
-	Component  string    `gorm:"size:120;not null;default:''" json:"component"` // 空 = 纯菜单分组（目录）
-	Title      string    `gorm:"size:64;not null" json:"title"`
-	Icon       string    `gorm:"size:32;not null;default:''" json:"icon"`
-	Sort       int       `gorm:"not null;default:0" json:"sort"`
-	Hidden     bool      `gorm:"not null;default:false" json:"hidden"`    // true = 可进入但不在菜单里显示
-	MinLevel   int8      `gorm:"not null;default:1" json:"min_level"`     // 登录用户（level>=1）的最低可见级别
-	Perm       string    `gorm:"size:64;not null;default:''" json:"perm"` // 游客可访问该页面时放行的接口分组（见 system/guest_perm.go）
-	Enabled    bool      `gorm:"not null;default:true" json:"enabled"`
-	CreatedAt  time.Time `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt  time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+	ID         uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Code       string `gorm:"size:64;not null;uniqueIndex" json:"code"`
+	ParentCode string `gorm:"size:64;not null;default:'';index" json:"parent_code"`
+	Path       string `gorm:"size:200;not null" json:"path"`
+	Name       string `gorm:"size:64;not null;default:''" json:"name"`       // vue-router 的路由名
+	Component  string `gorm:"size:120;not null;default:''" json:"component"` // 空 = 纯菜单分组（目录）
+	Title      string `gorm:"size:64;not null" json:"title"`
+	Icon       string `gorm:"size:32;not null;default:''" json:"icon"`
+	Sort       int    `gorm:"not null;default:0" json:"sort"`
+	Hidden     bool   `gorm:"not null;default:false" json:"hidden"`    // true = 可进入但不在菜单里显示
+	MinLevel   int8   `gorm:"not null;default:1" json:"min_level"`     // 登录用户（level>=1）的最低可见级别
+	Perm       string `gorm:"size:64;not null;default:''" json:"perm"` // 游客可访问该页面时放行的接口分组（见 system/guest_perm.go）
+	Enabled    bool   `gorm:"not null;default:true" json:"enabled"`
+	// Builtin 来自代码内置目录的路由：不能删除，也不能改 path / component / 父级（客户端依赖这些），
+	// 只能停用或调整展示。管理员在「路由管理」里新增的自定义路由为 false，可以随意编辑和删除。
+	Builtin   bool      `gorm:"not null;default:false" json:"builtin"`
+	CreatedAt time.Time `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt time.Time `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
 func (Route) TableName() string { return "sys_route" }

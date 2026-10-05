@@ -92,11 +92,19 @@ const goPerson = () => router.push("/person/center")
 
 const userDropdownOptions: DropdownOption[] = [
   {label: '个人中心', key: 'center'},
+  // 桌面端：日志窗口。Linux 不挂原生顶部菜单栏（GNOME + Wayland 下会让 GTK 栈溢出崩溃），入口放在这里
+  ...(isTauri() ? [{label: '日志窗口', key: 'logs'}] : []),
   {label: '退出登录', key: 'logout'},
 ]
 
+const openLogWindow = async () => {
+  const {invoke} = await import('@tauri-apps/api/core')
+  await invoke('open_log_window_cmd')
+}
+
 const handleUserDropdown = (key: string) => {
   if (key === 'center') goPerson()
+  else if (key === 'logs') openLogWindow()
   else if (key === 'logout') handleLogout()
 }
 

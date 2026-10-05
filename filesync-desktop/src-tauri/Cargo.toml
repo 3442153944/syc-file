@@ -22,6 +22,9 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+# 单实例：再次启动（点 Dock 图标 / 应用菜单）时把已运行实例的主窗口叫出来，而不是再起一个进程。
+# 只在 release 构建里启用（见 lib.rs）：debug 与 release 的标识符相同，dev 启用会被已安装的实例"吃掉"。
+tauri-plugin-single-instance = "2"
 # 说明：曾经短暂把 tauri/tauri-plugin-dialog/tauri-plugin-global-shortcut 精确锁过版本，
 # 因为当时 cargo 解析出的 tauri-runtime-wry 2.10.1 + wry 0.54.2 这个组合编不过（缺
 # eval_script_with_callback 实现、闭包 Send+Sync 约束不满足）。后来验证过，那只是

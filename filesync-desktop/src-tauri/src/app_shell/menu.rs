@@ -4,6 +4,9 @@
 // 菜单栏是唯一「任何界面都在」的入口——包括还没登录的登录页，所以节点切换放在这里：
 // 打不开服务器的时候用户照样能换个节点再登录。
 // 节点表会变（增删改、自动灾备切过去），所以菜单是每次重建的，不是建一次就完事。
+// Linux 不挂原生菜单栏，下面的构建 / 刷新逻辑在 Linux 上不会被调用
+#![cfg_attr(target_os = "linux", allow(dead_code, unused_imports))]
+
 use crate::logger;
 use crate::net;
 
@@ -55,16 +58,25 @@ pub fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu
 /// 后台探测任务（都在别的线程），所以统一丢回主线程执行。
 /// 失败只记日志：菜单没刷新不影响功能，不值得把命令整体报错。
 pub fn refresh_app_menu(app: &tauri::AppHandle) {
-    let handle = app.clone();
-    let post = app.run_on_main_thread(move || match build_app_menu(&handle) {
-        Ok(menu) => {
-            if let Err(e) = handle.set_menu(menu) {
-                logger::warn("menu", format!("刷新菜单失败: {}", e));
+    // Linux 不挂原生菜单栏（见 lib.rs setup 里的说明：set_menu 在 GNOME + Wayland 下会让 GTK 无限递归、栈溢出），
+    // 节点状态变了也没有菜单可刷新。
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let handle = app.clone();
+        let post = app.run_on_main_thread(move || match build_app_menu(&handle) {
+            Ok(menu) => {
+                if let Err(e) = handle.set_menu(menu) {
+                    logger::warn("menu", format!("刷新菜单失败: {}", e));
+                }
             }
+            Err(e) => logger::warn("menu", format!("构建菜单失败: {}", e)),
+        });
+        if let Err(e) = post {
+            logger::warn("menu", format!("刷新菜单调度失败: {}", e));
         }
-        Err(e) => logger::warn("menu", format!("构建菜单失败: {}", e)),
-    });
-    if let Err(e) = post {
-        logger::warn("menu", format!("刷新菜单调度失败: {}", e));
     }
 }
