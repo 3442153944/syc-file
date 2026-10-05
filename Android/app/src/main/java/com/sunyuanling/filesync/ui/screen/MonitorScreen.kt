@@ -1,8 +1,13 @@
 package com.sunyuanling.filesync.ui.screen
 
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
@@ -11,16 +16,23 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
+import com.sunyuanling.filesync.AppConfig
+import com.sunyuanling.filesync.api.update.UpdateApi
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.router.MonitorListDestination
 import com.sunyuanling.filesync.router.PermissionDestination
 import com.sunyuanling.filesync.ui.viewModel.home.DevicesViewModel
 import com.sunyuanling.filesync.ui.viewModel.home.StorageViewModel
+import com.sunyuanling.filesync.update.UpdateController
+import com.sunyuanling.filesync.util.DeviceInfoUtil
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -208,6 +220,12 @@ fun AboutScreen(
     navController: NavController,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    val versionCode = remember { UpdateController.currentVersionCode(context) }
+    val deviceId = remember { DeviceInfoUtil.getDeviceId(context) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -224,8 +242,8 @@ fun AboutScreen(
             modifier = modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
-            verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Icon(
@@ -234,15 +252,107 @@ fun AboutScreen(
                 modifier = Modifier.size(80.dp),
                 tint = MaterialTheme.colorScheme.primary
             )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text("FileSync", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("v1.0.0", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(modifier = Modifier.height(12.dp))
+            Text("云梯", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "FileSync · 多端文件同步",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                "v${AppConfig.versionName}（Build $versionCode）",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(modifier = Modifier.height(24.dp))
-            Text("文件同步客户端", fontSize = 14.sp)
-            Text("基于 Jetpack Compose", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    AboutInfoRow("客户端", "Android")
+                    HorizontalDivider()
+                    AboutInfoRow("服务器", Request.baseUrl)
+                    HorizontalDivider()
+                    AboutInfoRow("设备 ID", deviceId)
+                    HorizontalDivider()
+                    AboutInfoRow("技术栈", "Kotlin · Jetpack Compose")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+            Button(
+                onClick = {
+                    if (checking) return@Button
+                    checking = true
+                    scope.launch {
+                        UpdateApi.check(UpdateController.currentVersionCode(context))
+                            .onSuccess { resp ->
+                                val data = resp.data
+                                if (data != null && data.hasUpdate && data.release != null) {
+                                    // 有新版本：交给统一的更新弹窗流程
+                                    UpdateController.checkForUpdate(context, manual = true)
+                                } else {
+                                    Toast.makeText(context, "已是最新版本", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .onFailure {
+                                Toast.makeText(context, "检查更新失败：${it.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        checking = false
+                    }
+                },
+                enabled = !checking
+            ) {
+                if (checking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(if (checking) "正在检查…" else "检查更新")
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
-            Text("服务器: ${Request.baseUrl}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "github.com/3442153944/syc-file",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable {
+                    runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/3442153944/syc-file"))
+                        )
+                    }
+                }
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                "© 2026 sunyuanling",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
+    }
+}
+
+@Composable
+private fun AboutInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(modifier = Modifier.width(16.dp))
+        Text(
+            value,
+            fontSize = 13.sp,
+            textAlign = TextAlign.End,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 

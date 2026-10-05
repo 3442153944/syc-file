@@ -79,6 +79,10 @@ class MainActivity : ComponentActivity() {
         }
         Request.init(this)
         TransferPathStore.init(this)
+        // 关于页/设置页展示的版本号：从 PackageManager 读真实值，别再停在 AppConfig 里的默认 1.0.0
+        runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { AppConfig.versionName = it }
 
 
         val config = PRDownloaderConfig.newBuilder()
