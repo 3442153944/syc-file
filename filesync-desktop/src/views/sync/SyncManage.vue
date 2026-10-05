@@ -77,7 +77,8 @@ function startEdit() {
   if (folder.value) {
     form.value = {
       name: folder.value.name,
-      localPath: folder.value.local_path,
+      // 本机还没设置过目录时（local_path 为空），预填默认同步根
+      localPath: folder.value.local_path || syncRoot.value,
       remotePath: folder.value.remote_path,
       direction: folder.value.direction,
     }
@@ -129,6 +130,10 @@ async function handleDeleteFolder() {
 }
 
 async function handleStart() {
+  if (folder.value && !folder.value.local_path) {
+    message.warning('本机尚未设置本地目录，请先点「编辑」选择')
+    return
+  }
   try {
     await invoke('start_sync')
     message.success('同步引擎已启动')
@@ -265,14 +270,18 @@ onUnmounted(() => {
               <n-button v-if="folder" quaternary @click="cancelEdit">取消</n-button>
             </n-space>
             <n-text depth="3" style="font-size: 12px">
-              提示：整个系统始终只保留一个同步文件夹。保存后需点「启动同步」才会开始监听。
+              提示：账号下只有一个同步文件夹，远端目录/方向各终端共用；本地目录仅保存在本机，每台设备独立设置、互不影响。保存后需点「启动同步」才会开始监听。
             </n-text>
           </n-space>
         </template>
         <template v-else-if="folder">
           <n-space vertical>
             <div class="folder-row"><span class="lbl">名称</span>{{ folder.name || '-' }}</div>
-            <div class="folder-row"><span class="lbl">本地目录</span><code>{{ folder.local_path }}</code></div>
+            <div class="folder-row">
+              <span class="lbl">本地目录</span>
+              <code v-if="folder.local_path">{{ folder.local_path }}</code>
+              <n-tag v-else size="small" type="warning" :bordered="false">本机未设置，点「编辑」选择</n-tag>
+            </div>
             <div class="folder-row"><span class="lbl">远端目录</span><code>{{ folder.remote_path }}</code></div>
             <div class="folder-row">
               <span class="lbl">方向</span>

@@ -303,15 +303,23 @@ pub async fn do_start_sync(
     let client = make_client(&config.read())?;
     let resp = sync_api::get_folder(&client).await?;
     if resp.is_ok() {
-        let mapping = resp
-            .data
-            .flatten()
-            .filter(|f| f.enabled)
-            .map(|f| FolderMapping {
-                local_path: f.local_path,
+        // 本地目录取本机自己的配置，不用服务端那份（那是最后一个保存的终端的路径）
+        let mapping = resp.data.flatten().filter(|f| f.enabled).and_then(|f| {
+            let local = config
+                .write()
+                .resolve_local_path(f.id, &f.owner_device_id, &f.local_path);
+            if local.is_none() {
+                logger::warn(
+                    "sync",
+                    "本机尚未设置同步目录，请在「同步管理」为本机选择本地目录后再启动同步。",
+                );
+            }
+            local.map(|local_path| FolderMapping {
+                local_path,
                 remote_path: f.remote_path,
                 folder_id: f.id,
-            });
+            })
+        });
         config.write().folder_mappings = mapping.into_iter().collect();
     }
 

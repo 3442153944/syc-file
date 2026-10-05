@@ -7,6 +7,7 @@ use crate::logger;
 use crate::net;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tauri::State;
 
@@ -18,6 +19,11 @@ pub struct SyncConfig {
     pub device_id: String,
     pub device_name: String,
     pub folder_mappings: Vec<FolderMapping>,
+    /// 本机的同步目录：folder_id → 本地路径。同步文件夹在服务端是账号共享的，
+    /// 但本地目录因设备/系统而异（Windows 与 Linux 路径不通用），必须各端独立存，
+    /// 不能放服务端——否则后保存的终端会覆盖其它终端。持久化到 config.yml。
+    #[serde(default)]
+    pub local_paths: BTreeMap<u64, String>,
     pub upload_workers: usize,
     pub download_workers: usize,
     pub debounce_ms: u64,
@@ -136,6 +142,8 @@ pub struct FileConfig {
     pub auto_failover: bool,
     #[serde(default = "default_health_interval")]
     pub health_interval_minutes: u64,
+    #[serde(default)]
+    pub local_paths: BTreeMap<u64, String>,
 }
 
 /// 日志配置，字段命名与后端 config.yaml 的 log 段一致。
@@ -209,6 +217,7 @@ impl Default for SyncConfig {
             device_id: device::generate_device_id(),
             device_name: device::hostname(),
             folder_mappings: vec![],
+            local_paths: BTreeMap::new(),
             upload_workers: 4,
             download_workers: 4,
             debounce_ms: 800,
@@ -255,6 +264,7 @@ impl SyncConfig {
             active_node_id: self.active_node_id.clone(),
             auto_failover: self.auto_failover,
             health_interval_minutes: self.health_interval_minutes,
+            local_paths: self.local_paths.clone(),
         };
         if let Ok(text) = serde_yaml::to_string(&fc) {
             let _ = std::fs::write(app_paths::config_file(), text);
@@ -291,6 +301,32 @@ impl SyncConfig {
         if fc.health_interval_minutes > 0 {
             self.health_interval_minutes = fc.health_interval_minutes;
         }
+        self.local_paths = fc.local_paths;
+    }
+
+    /// 记下本机为某个同步文件夹选的本地目录并落盘。
+    pub fn set_local_path(&mut self, folder_id: u64, path: &str) {
+        self.local_paths.insert(folder_id, path.to_string());
+        self.save();
+    }
+
+    /// 取本机的同步目录。本机没记录时，只在「服务端那份 local_path 正是本机上次保存的」
+    /// （owner_device_id == 本机 device_id）才认作旧版遗留并迁入本机配置；
+    /// 否则那是别的终端的路径，不能拿来用，返回 None。
+    pub fn resolve_local_path(
+        &mut self,
+        folder_id: u64,
+        owner_device_id: &str,
+        legacy_local_path: &str,
+    ) -> Option<String> {
+        if let Some(p) = self.local_paths.get(&folder_id).filter(|p| !p.is_empty()) {
+            return Some(p.clone());
+        }
+        if !legacy_local_path.is_empty() && owner_device_id == self.device_id {
+            self.set_local_path(folder_id, legacy_local_path);
+            return Some(legacy_local_path.to_string());
+        }
+        None
     }
 
     /// 让 nodes / active_node_id / server_url / ws_url 四者自洽。任何一处被改过之后都要调。

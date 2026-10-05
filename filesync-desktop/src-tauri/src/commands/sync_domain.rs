@@ -32,9 +32,11 @@ pub async fn save_sync_folder(
     let resp = sync_api::save_folder(&client, params).await?;
     let folder = api_data(resp, "save_sync_folder")?;
 
-    // 覆盖式更新内存缓存：全局只保留这一条映射
+    // 本地目录只记在本机（服务端那份仅作参考，不被其它终端采用），
+    // 同时覆盖式更新内存缓存：全局只保留这一条映射
     {
         let mut cfg = config.write();
+        cfg.set_local_path(folder.id, &local_path);
         cfg.folder_mappings = vec![FolderMapping {
             local_path: local_path.clone(),
             remote_path,
@@ -50,11 +52,19 @@ pub async fn save_sync_folder(
 }
 
 /// 取该账号唯一的同步文件夹配置，未配置时返回 null。
+/// 返回值里的 local_path 是「本机」的目录；本机还没设置时为空串（服务端存的是别的终端的路径）。
 #[tauri::command]
 pub async fn get_sync_folder(config: State<'_, SharedSyncConfig>) -> Result<Option<SyncFolder>, String> {
     let client = make_client(&config.read())?;
     let resp = sync_api::get_folder(&client).await?;
-    api_data(resp, "get_sync_folder")
+    let folder: Option<SyncFolder> = api_data(resp, "get_sync_folder")?;
+    Ok(folder.map(|mut f| {
+        f.local_path = config
+            .write()
+            .resolve_local_path(f.id, &f.owner_device_id, &f.local_path)
+            .unwrap_or_default();
+        f
+    }))
 }
 
 #[tauri::command]
