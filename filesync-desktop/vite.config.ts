@@ -27,7 +27,7 @@ export default defineConfig(async ({mode}) => {
             //     })
             // ] : []),
             VueDevTools({
-                launchEditor: 'webstorm' // 设置默认编辑器
+                // launchEditor: 'webstorm' // 设置默认编辑器
             }),
             VueSetupExtend()
         ],
