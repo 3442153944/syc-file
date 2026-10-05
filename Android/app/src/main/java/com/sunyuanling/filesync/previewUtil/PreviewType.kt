@@ -62,6 +62,23 @@ fun detectPreviewType(name: String, extension: String = ""): PreviewType {
     }
 }
 
+// 服务端（internal/thumb）可能有缩略图的扩展名，两边保持一致：
+// 图片；视频（内嵌封面，没有就取一帧）；音频（只取内嵌专辑封面，没有封面的服务端会返回 415，界面回退到图标）。
+// 刻意不含 ts：它更多是 TypeScript 源文件。
+private val THUMBNAIL_IMAGE_EXT = setOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff")
+private val THUMBNAIL_VIDEO_EXT = setOf("mp4", "mkv", "webm", "mov", "avi", "flv", "m4v", "wmv", "3gp", "mpg", "mpeg")
+private val THUMBNAIL_AUDIO_EXT = setOf("mp3", "flac", "m4a", "ogg", "opus", "wma")
+
+/** 是否可能有服务端缩略图（只看扩展名）。列表里据此决定先试缩略图还是直接显示类型图标。 */
+fun isThumbnailable(name: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return ext in THUMBNAIL_IMAGE_EXT || ext in THUMBNAIL_VIDEO_EXT || ext in THUMBNAIL_AUDIO_EXT
+}
+
+/** 是否是 Coil 能直接解码的本地图片：视频/音频的封面只能向服务端要，本地文件喂给 Coil 只会解码失败。 */
+fun isLocallyDecodableImage(name: String): Boolean =
+    name.substringAfterLast('.', "").lowercase() in THUMBNAIL_IMAGE_EXT
+
 /** 是否可在线预览（非 UNSUPPORTED）。文件列表据此决定点击是"预览"还是"下载"。 */
 fun isPreviewable(name: String, extension: String = ""): Boolean =
     detectPreviewType(name, extension) != PreviewType.UNSUPPORTED

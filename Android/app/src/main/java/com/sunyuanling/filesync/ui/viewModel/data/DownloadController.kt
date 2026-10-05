@@ -1,5 +1,6 @@
 package com.sunyuanling.filesync.ui.viewModel.data
 
+import com.sunyuanling.filesync.util.TransferPathStore
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -139,6 +140,8 @@ object DownloadController {
             updateTime = System.currentTimeMillis()
         )
         _downloads.value = _downloads.value + item
+        // 本机记下远端路径与落盘位置，传输列表的历史记录据此还原出可预览的文件
+        TransferPathStore.record(path, name, item.savePath)
         persistIfEnabled()
         File(item.savePath).parentFile?.mkdirs()
         ensureServiceRunning()

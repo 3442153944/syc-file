@@ -1,6 +1,8 @@
 // ui/viewModel/files/FileTransferListViewModel.kt
 package com.sunyuanling.filesync.ui.viewModel.files
 
+import com.sunyuanling.filesync.util.TransferPathStore
+import com.sunyuanling.filesync.util.parseServerTime
 import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.ViewModel
@@ -157,6 +159,7 @@ class FileTransferListViewModel : ViewModel() {
                                 DownloadStatus.Completed -> FileTransferStatus.COMPLETED
                                 DownloadStatus.Failed -> FileTransferStatus.FAILED
                             },
+                            sourcePath = download.filePath,
                             startTime = download.createTime,
                             sourceDownloadId = download.downloadId
                         )
@@ -364,6 +367,11 @@ class FileTransferListViewModel : ViewModel() {
         _errorMessage.value = null
     }
 
+    /** 供界面层提示一条错误（如点击没有路径的旧记录）。 */
+    fun showError(message: String) {
+        _errorMessage.value = message
+    }
+
     fun dismissSuccess() {
         _successMessage.value = null
     }
@@ -430,23 +438,7 @@ private fun mapDownloadStatus(status: String): FileTransferStatus {
 /**
  * ISO 时间字符串 → 毫秒时间戳
  */
-private fun parseTimeToMillis(timeStr: String?): Long {
-    if (timeStr.isNullOrBlank()) return 0L
-    return try {
-        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.getDefault())
-            .also { it.timeZone = java.util.TimeZone.getTimeZone("UTC") }
-            .parse(timeStr)?.time ?: 0L
-    } catch (e: Exception) {
-        try {
-            // 兼容带毫秒的格式
-            java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault())
-                .also { it.timeZone = java.util.TimeZone.getTimeZone("UTC") }
-                .parse(timeStr)?.time ?: 0L
-        } catch (e2: Exception) {
-            0L
-        }
-    }
-}
+private fun parseTimeToMillis(timeStr: String?): Long = parseServerTime(timeStr)
 
 /**
  * 后端 DownloadHistoryItem → 前端 FileTransferItem
@@ -462,6 +454,8 @@ private fun DownloadHistoryItem.toTransferItem(): FileTransferItem {
         progress = if (status == FileTransferStatus.COMPLETED) 1f else 0f,
         speed = downloadSpeed ?: 0L,
         status = status,
+        // 路径只在本机的映射表里，服务端历史不带路径；本机没发起过的记录（别的设备、旧记录）找不到
+        sourcePath = TransferPathStore.find(fileName ?: "", parseTimeToMillis(startedAt))?.remotePath ?: "",
         startTime = parseTimeToMillis(startedAt),
         endTime = parseTimeToMillis(completedAt).takeIf { it > 0 },
         errorMessage = if (status == FileTransferStatus.FAILED) "下载失败" else null

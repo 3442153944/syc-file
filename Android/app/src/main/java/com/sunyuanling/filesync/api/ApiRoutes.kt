@@ -38,6 +38,8 @@ object ApiRoutes {
 
     /** GET /v1/file/download */
     const val FILE_DOWNLOAD = "/file/download"
+    /** 图片缩略图（GET，二进制流；失败用真实 HTTP 状态码） */
+    const val FILE_THUMBNAIL = "/file/thumbnail"
 
     /** POST /v1/file/upload/init —— 分片上传：提交描述信息，建/续会话 */
     const val FILE_UPLOAD_INIT = "/file/upload/init"

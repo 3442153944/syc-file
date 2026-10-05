@@ -35,6 +35,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sunyuanling.filesync.AppConfig
 import com.sunyuanling.filesync.router.PreviewDestination
+import com.sunyuanling.filesync.ui.components.preview.OpenWithButton
+import com.sunyuanling.filesync.ui.components.preview.ZoomableImage
+import com.sunyuanling.filesync.util.ExternalOpener
 import com.sunyuanling.filesync.ui.viewModel.preview.PreviewUiState
 import com.sunyuanling.filesync.ui.viewModel.preview.PreviewViewModel
 import com.sunyuanling.filesync.ui.viewModel.transmission.DownloadListViewModel
@@ -69,11 +72,21 @@ fun PreviewScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = args.name,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column {
+                        Text(
+                            text = args.name,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        // 图片：标明这次看的是本机文件还是在线加载，用户一眼知道有没有走流量
+                        (state as? PreviewUiState.Image)?.let { img ->
+                            Text(
+                                text = if (img.localFile != null) "本地文件" else "在线预览",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
@@ -81,8 +94,19 @@ fun PreviewScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { triggerDownload() }) {
-                        Icon(Icons.Default.Download, contentDescription = "下载")
+                    val imageState = state as? PreviewUiState.Image
+                    // 图片：可交给其他应用查看（本地已有直接用，否则先下载到缓存）
+                    if (imageState != null) {
+                        OpenWithButton(
+                            resolveFile = { vm.fileForExternalOpen(args) },
+                            mimeType = ExternalOpener.mimeOf(args.name)
+                        )
+                    }
+                    // 本机已有同一份就没必要再下载一遍
+                    if (imageState?.localFile == null) {
+                        IconButton(onClick = { triggerDownload() }) {
+                            Icon(Icons.Default.Download, contentDescription = "下载")
+                        }
                     }
                 }
             )
@@ -96,7 +120,12 @@ fun PreviewScreen(
             when (val s = state) {
                 is PreviewUiState.Idle -> LoadingBox(progress = null, message = "加载中…")
                 is PreviewUiState.Loading -> LoadingBox(progress = s.progress, message = s.message)
-                is PreviewUiState.Image -> ImagePreview(url = s.url)
+                is PreviewUiState.Image -> ZoomableImage(
+                    model = s.localFile ?: s.url,
+                    placeholderModel = s.thumbUrl,
+                    contentDescription = args.name,
+                    onLoadError = { vm.fallbackImageToRemote() }
+                )
                 is PreviewUiState.Media -> MediaPreview(url = s.url, isVideo = s.isVideo)
                 is PreviewUiState.Pdf -> PdfPreview(file = s.file)
                 is PreviewUiState.Text -> TextPreview(text = s.text, truncated = s.truncated)

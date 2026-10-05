@@ -1,5 +1,6 @@
 package com.sunyuanling.filesync
 
+import com.sunyuanling.filesync.util.TransferPathStore
 import android.Manifest
 import android.content.Intent
 import android.os.Build
@@ -77,6 +78,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         Request.init(this)
+        TransferPathStore.init(this)
 
 
         val config = PRDownloaderConfig.newBuilder()

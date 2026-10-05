@@ -1,5 +1,7 @@
 package com.sunyuanling.filesync.ui.screen
 
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,6 +22,8 @@ import androidx.navigation.NavController
 import com.sunyuanling.filesync.router.FileDetailDestination
 import com.sunyuanling.filesync.router.FileSearchDestination
 import com.sunyuanling.filesync.router.FileUploadDestination
+import com.sunyuanling.filesync.router.PreviewDestination
+import com.sunyuanling.filesync.ui.components.preview.FileThumbnail
 import com.sunyuanling.filesync.router.SettingsDestination
 import com.sunyuanling.filesync.router.navigateToDetail
 import com.sunyuanling.filesync.ui.components.home.RunningModeBadge
@@ -54,6 +58,7 @@ fun HomeScreen(
     val onlineCount by devicesVM.onlineCount.collectAsState()
     val recentFiles by recentFilesVM.files.collectAsState()
     val syncStatus by syncVM.serverOnline.collectAsState()
+    val context = LocalContext.current
 
     LazyColumn(
         modifier = modifier
@@ -282,7 +287,20 @@ fun HomeScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
-                            navController.navigateToDetail(FileDetailDestination(file.id))
+                            if (file.path.isNotEmpty()) {
+                                // 与传输列表一致：进入在线预览（本机已有同一份会直接看本地的）
+                                navController.navigate(
+                                    PreviewDestination(
+                                        path = file.path,
+                                        name = file.name,
+                                        size = file.size,
+                                        extension = file.name.substringAfterLast('.', "")
+                                    )
+                                )
+                            } else {
+                                // 服务端历史不带路径，本机没发起过的记录（别的设备、旧记录）无法定位文件
+                                Toast.makeText(context, "这条记录没有保存文件路径，无法预览", Toast.LENGTH_SHORT).show()
+                            }
                         }
                 ) {
                     Row(
@@ -290,11 +308,19 @@ fun HomeScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
+                        // 图片显示缩略图（本机已有用本地的，否则取服务端缩略图），其余仍是文件图标
+                        FileThumbnail(
+                            path = file.path,
+                            name = file.name,
+                            size = file.size,
+                            thumbSize = 40.dp
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.InsertDriveFile,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = file.name,

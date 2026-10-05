@@ -3,6 +3,9 @@ package com.sunyuanling.filesync.ui.screen.files
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.annotation.RequiresApi
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,7 +22,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
 import androidx.navigation.NavController
+import com.sunyuanling.filesync.router.PreviewDestination
 import com.sunyuanling.filesync.ui.viewModel.transmission.FileTransferStatus
 import com.sunyuanling.filesync.ui.viewModel.files.FileTransferListViewModel
 import com.sunyuanling.filesync.ui.viewModel.files.SortBy
@@ -52,6 +57,10 @@ fun FileTransferListScreen(
     }
 
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+
+    // 记录无限下滑，往下翻过一屏后给出「回到顶部」
+    val showBackToTop by remember { derivedStateOf { listState.firstVisibleItemIndex > 4 } }
 
     val reachedBottom by remember {
         derivedStateOf {
@@ -78,6 +87,17 @@ fun FileTransferListScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        floatingActionButton = {
+            AnimatedVisibility(visible = showBackToTop, enter = fadeIn(), exit = fadeOut()) {
+                SmallFloatingActionButton(
+                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                ) {
+                    Icon(Icons.Default.KeyboardArrowUp, "回到顶部")
+                }
+            }
+        },
         topBar = {
             if (isMultiSelect) {
                 // 多选模式 TopBar
@@ -209,7 +229,23 @@ fun FileTransferListScreen(
                             isSelected = isSelected,
                             onLongClick = { viewModel.enterMultiSelect(item) },
                             onClick = {
-                                if (isMultiSelect) viewModel.toggleSelectItem(item)
+                                if (isMultiSelect) {
+                                    viewModel.toggleSelectItem(item)
+                                } else if (item.isDir) {
+                                    // 目录不能预览
+                                } else if (item.sourcePath.isNotEmpty()) {
+                                    // 单击 → 在线预览（与文件页一致；不支持的类型在预览页给下载入口）
+                                    navController.navigate(
+                                        PreviewDestination(
+                                            path = item.sourcePath,
+                                            name = item.name,
+                                            size = item.size,
+                                            extension = item.name.substringAfterLast('.', "")
+                                        )
+                                    )
+                                } else {
+                                    viewModel.showError("这条记录没有保存文件路径，无法预览")
+                                }
                             },
                             onRetry = { viewModel.retryTransfer(item.id) },
                             onCancel = { viewModel.cancelTransfer(item.id) },

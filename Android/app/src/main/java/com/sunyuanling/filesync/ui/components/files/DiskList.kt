@@ -3,7 +3,7 @@ package com.sunyuanling.filesync.ui.components.files
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
@@ -59,7 +59,8 @@ fun LazyListScope.diskItems(
     disks: List<DiskInfo>,
     onDiskClick: ((DiskInfo) -> Unit)? = null
 ) {
-    items(disks, key = { it.mountpoint }) { disk ->
+    // key 带上序号：Linux 上同一挂载点可以被叠加挂载而出现两次，重复 key 会让 LazyColumn 直接崩溃
+    itemsIndexed(disks, key = { index, disk -> "$index:${disk.mountpoint}" }) { _, disk ->
         DiskCard(
             disk = disk,
             onClick = onDiskClick?.let { { it(disk) } }

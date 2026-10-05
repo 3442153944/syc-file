@@ -16,6 +16,7 @@
 // 映射：同步文件夹由服务器（Windows 端创建）定义，本地目录映射是设备私有（SyncMappingStore）。
 package com.sunyuanling.filesync.sync
 
+import com.sunyuanling.filesync.util.TransferPathStore
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -56,6 +57,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Request as OkRequest
 import java.io.File
@@ -309,11 +313,16 @@ object SyncEngine {
             val actual = Blake3Util.toHex(hasher.digest())
             log("下载校验 url=$url actualHash=$actual size=$contentLength expectedHash=$expectedHash")
             if (!expectedHash.isNullOrEmpty() && !expectedHash.equals(actual, ignoreCase = true)) {
+                // 服务端拒绝（如未登录/设备不匹配）时返回的是 HTTP 200 + 一小段 JSON，
+                // 不是文件内容；直接报 hash 不匹配会把真实原因藏起来。
+                serverErrorOf(tmp)?.let { return Result.failure(Exception("服务端拒绝下载：$it")) }
                 return Result.failure(Exception("hash 不匹配 expected=$expectedHash actual=$actual"))
             }
 
             val final = File(localRoot, rel)
             final.parentFile?.mkdirs()
+            // 同步下载同样会进传输记录，记下映射以便从记录直接预览
+            TransferPathStore.record(remoteDir, fileName, final.absolutePath)
             // 发布产生的本地事件不能再被当作变更上报回环
             muteWatch(folderId, rel)
             if (!tmp.renameTo(final)) {
@@ -326,6 +335,17 @@ object SyncEngine {
         } finally {
             if (tmp.exists()) tmp.delete()
         }
+    }
+
+    /** 下载到的小文件若是服务端的错误 JSON（{"code":..,"message":..}），返回「code message」，否则 null。 */
+    private fun serverErrorOf(file: File): String? {
+        if (!file.exists() || file.length() > 1024) return null
+        return runCatching {
+            val obj = Request.json.parseToJsonElement(file.readText()).jsonObject
+            val code = obj["code"]?.jsonPrimitive?.intOrNull ?: return null
+            if (code == 200) return null
+            "$code ${obj["message"]?.jsonPrimitive?.contentOrNull.orEmpty()}".trim()
+        }.getOrNull()
     }
 
     // ------------------------------------------------------------------ 追赶（每次连上执行）

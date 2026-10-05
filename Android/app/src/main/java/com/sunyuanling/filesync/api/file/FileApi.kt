@@ -41,6 +41,20 @@ object FileApi {
     // ==================== 下载 ====================
 
     /**
+     * 构建图片缩略图 URL（GET /file/thumbnail），token 同样拼入 query（交给 Coil 加载时无法带 header 以外的鉴权）。
+     * @param width 长边上限，服务端只认 128 / 256 / 512，其它值归到最近一档
+     * @param version 缓存版本号，调用方传文件大小即可：文件内容变了 URL 就变，客户端缓存自然失效。
+     *                缩略图响应带 1 天的缓存期，不带版本号的话，文件刚被改动的一天内会一直看到旧图
+     */
+    suspend fun buildThumbnailUrl(path: String, name: String, width: Int = 256, version: Long = 0): String {
+        val base = "${AppConfig.getBaseUrl()}/v1${ApiRoutes.FILE_THUMBNAIL}"
+        val queryMap = linkedMapOf("path" to path, "name" to name, "w" to width.toString())
+        if (version > 0) queryMap["v"] = version.toString()
+        Request.getToken()?.takeIf { it.isNotEmpty() }?.let { queryMap["token"] = it }
+        return "$base?" + queryMap.entries.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
+    }
+
+    /**
      * 构建完整下载 URL，将 token 拼入 query string。
      * 此场景无法通过 header 携带 token（例如使用 PRDownloader 等第三方库直接下载），
      * 故将 token 作为 query 参数传递。
