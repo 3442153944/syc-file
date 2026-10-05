@@ -248,6 +248,17 @@ object SyncEngine {
             // 绝不能用 t.relativePath 原文——形式不一致会导致基线查不到，
             // 下载下来的文件被 watcher 当新文件回传，设备间打乒乓。
             "download" -> downloadSem.withPermit {
+                // 本地已有同内容时不再下载：服务端补派/追赶误派（同 hash 任务）时避免无谓的
+                // 全量拉取与下载记录。任务 hash 为空说明 trunk 还不知道内容，仍需下载。
+                val expected = t.fileHash.ifEmpty { null }
+                val target = File(localRoot, rel)
+                val cur = if (expected != null && target.isFile) computeFileHash(target) else null
+                if (expected != null && cur != null && cur.equals(expected, ignoreCase = true)) {
+                    SyncBaseStore.set(t.folderId, rel, cur, target.length(), target.lastModified() / 1000)
+                    SyncApi.completeTask(t.taskId, cur)
+                    log("本地已是最新，跳过下载 $rel")
+                    return@withPermit
+                }
                 log("下载 $rel")
                 downloadAndPublish(t.folderId, localRoot, rel, t.fileName, t.remoteDir, t.fileHash.ifEmpty { null })
                     .onSuccess { hash ->
