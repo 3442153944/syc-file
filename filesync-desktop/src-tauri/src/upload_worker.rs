@@ -9,8 +9,11 @@ use crate::api::{
 };
 use crate::chunked_uploader::{self, UploadOptions};
 use crate::config::SharedSyncConfig;
+use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::mpsc;
 
@@ -23,6 +26,31 @@ pub struct UploadTask {
     pub relative_path: String,
     /// create / modify（空串回退 "modify" 兼容旧调用方）
     pub action: String,
+}
+
+/// 正在上传的本地路径。
+static UPLOADING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+/// 持有期间该路径算「上传中」，drop 时自动登出。
+struct UploadGuard(PathBuf);
+
+impl UploadGuard {
+    /// 该路径已在上传中返回 None。
+    fn acquire(path: &PathBuf) -> Option<Self> {
+        UPLOADING
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .insert(path.clone())
+            .then(|| UploadGuard(path.clone()))
+    }
+}
+
+impl Drop for UploadGuard {
+    fn drop(&mut self) {
+        if let Some(set) = UPLOADING.get() {
+            set.lock().remove(&self.0);
+        }
+    }
 }
 
 pub fn start_upload_workers(
@@ -42,7 +70,18 @@ pub fn start_upload_workers(
                 let task = { rx.lock().await.recv().await };
                 match task {
                     None => break,
-                    Some(t) => upload_file(t, &config, &app).await,
+                    Some(t) => {
+                        // 启动时「首次全量同步」和 WS 连上后的追赶会把同一个文件各入队一次，
+                        // 同一路径不并发上传：等前一个传完再来，此时基线已更新，重复任务会被
+                        // 回声抑制直接跳过；而传输途中又被改动的文件仍会照常重传。
+                        let _guard = loop {
+                            match UploadGuard::acquire(&t.local_path) {
+                                Some(g) => break g,
+                                None => tokio::time::sleep(Duration::from_millis(300)).await,
+                            }
+                        };
+                        upload_file(t, &config, &app).await
+                    }
                 }
             }
         });
