@@ -39,6 +39,20 @@ var guestAPIs = map[string][]string{
 	"account.password": {"/v1/user/change-password"},
 }
 
+// guestPermLabels perm 的中文名，供「路由管理」新增 / 编辑路由时下拉选择（只能选这里有的，不能凭空编造分组）。
+var guestPermLabels = map[string]string{
+	"dashboard":        "首页（磁盘概览 / 监控 / 在线设备）",
+	"file.browse":      "浏览与下载文件",
+	"file.upload":      "上传文件",
+	"share":            "分享链接",
+	"share.quick":      "快速分享",
+	"sync":             "文件同步",
+	"clipboard":        "剪贴板同步",
+	"monitor":          "系统监控",
+	"transfers":        "传输列表",
+	"account.password": "修改密码",
+}
+
 // guestAlive 供 middleware.SetGuestAlive 使用：访客账号此刻是否仍有效（启用、未过期、仍是访客）。
 // 每个访客请求都查库——访客账号数量很少，换来「禁用 / 到期 / 删除立刻生效」，不必等 token 过期。
 func (h *Handler) guestAlive(userID int64) bool {

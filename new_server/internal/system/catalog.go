@@ -54,7 +54,7 @@ var defaultRoutes = []model.Route{
 	{Code: "person.quick-share", Path: "/person/quick-share", Name: "PersonQuickShareSettings", Component: "views/person/QuickShareSettings.vue", Title: "快传设置", Sort: 93, Hidden: true, MinLevel: 1, Perm: "share.quick"},
 }
 
-// seedRoutes 按 Code 缺失才插入。
+// seedRoutes 按 Code 缺失才插入（并保证内置条目带 builtin 标记）。
 func seedRoutes(db *gorm.DB) error {
 	added := 0
 	for _, r := range defaultRoutes {
@@ -63,9 +63,15 @@ func seedRoutes(db *gorm.DB) error {
 			return fmt.Errorf("检查路由 %s 失败: %w", r.Code, err)
 		}
 		if n > 0 {
+			// 升级前就已播种进库的条目没有 builtin 标记：补上，否则它们会被当成可删除的自定义路由
+			if err := db.Model(&model.Route{}).Where("code = ? AND builtin = ?", r.Code, false).
+				Update("builtin", true).Error; err != nil {
+				return fmt.Errorf("标记内置路由 %s 失败: %w", r.Code, err)
+			}
 			continue
 		}
 		r.Enabled = true
+		r.Builtin = true
 		if err := db.Create(&r).Error; err != nil {
 			return fmt.Errorf("播种路由 %s 失败: %w", r.Code, err)
 		}
