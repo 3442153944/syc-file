@@ -97,3 +97,14 @@ monitor:
 # 容器里不托管 frpc / ddns-go：内网穿透请放在宿主机或另起容器
 supervisor:
   enabled: false
+
+# 图片缩略图（ffmpeg，镜像已内置）：上传/同步落盘后异步生成，外网下列表只拉几 KB。
+# 整段可省略，默认就是开启；缓存存在 <数据卷>/file_sync/thumbs，随数据卷持久化。
+thumbnail:
+  disabled: false                # true = 关闭缩略图
+  workers: 8                     # 同时运行的 ffmpeg 数。解码一张 4000 万像素的原图可占数百 MB 内存，机器小就调低
+  default_width: 256             # 默认长边像素，只能是 128 / 256 / 512
+  no_backfill: false             # true = 启动时不回填同步目录里已有图片的缩略图
+  # 浏览磁盘上原有（非上传/同步）的图片时，为列表里的图片生成「临时缩略图」：存临时目录、
+  # 到期时间记在 Redis 里、后台定时销毁；被再次访问会顺延。
+  temp_ttl_minutes: 720          # 临时缩略图保留时长（分钟），默认 12 小时

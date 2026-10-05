@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"syc-file/internal/thumb"
 	"syc-file/pkg/logger"
 )
 
@@ -85,6 +86,7 @@ func HandlerFuncTraverseDirectory(db *gorm.DB, redisClient *redis.Client) gin.Ha
 				end = len(result.Items)
 			}
 			pagedItems := result.Items[start:end]
+			prewarmThumbnails(pagedItems)
 			totalPages := (result.TotalCount + req.PageSize - 1) / req.PageSize
 
 			c.JSON(http.StatusOK, gin.H{
@@ -108,8 +110,22 @@ func HandlerFuncTraverseDirectory(db *gorm.DB, redisClient *redis.Client) gin.Ha
 			return
 		}
 
+		prewarmThumbnails(result.Items)
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": result})
 	}
+}
+
+// prewarmThumbnails 前端要了哪些文件，就为其中的图片预生成临时缩略图（后台、低优先级、到期销毁）。
+// 磁盘上原本就有的文件既没上传也没同步，没有持久缩略图；这样用户翻到它们时多半已经生成好了，
+// 来不及的话缩略图接口会当场生成。非图片、功能未启用时无操作。
+func prewarmThumbnails(items []fileItem) {
+	paths := make([]string, 0, len(items))
+	for _, it := range items {
+		if !it.IsDir {
+			paths = append(paths, it.Path)
+		}
+	}
+	thumb.EnqueueTemp(paths...)
 }
 
 func traverseSingleLevel(path string) (*traverseResponse, error) {

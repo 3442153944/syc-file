@@ -59,6 +59,19 @@ object Request {
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        // 服务端的 token 绑定设备：请求必须带 Device-Id（头或 device_id 参数），否则当作未登录，
+        // 且文件下载这类接口是返回 HTTP 200 + {"code":401} 的 JSON，调用方很容易把它当文件内容。
+        // 在客户端层统一补上，下载/预览/同步等直接用 client 发请求的地方就不会漏。
+        .addInterceptor { chain ->
+            val req = chain.request()
+            if (req.header("Device-Id") == null) {
+                val id = deviceId()
+                if (id.isNotEmpty()) {
+                    return@addInterceptor chain.proceed(req.newBuilder().header("Device-Id", id).build())
+                }
+            }
+            chain.proceed(req)
+        }
         .build()
 
     val json = Json {

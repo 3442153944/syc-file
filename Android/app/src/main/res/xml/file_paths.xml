@@ -3,4 +3,10 @@
     <!-- 应用内更新下载的 APK：外部/内部缓存下的 update/ 目录 -->
     <external-cache-path name="update_ext" path="update/" />
     <cache-path name="update_int" path="update/" />
+
+    <!-- 「用其他应用打开」（util/ExternalOpener）：预览下载的缓存、不可直接共享时复制出的副本 -->
+    <cache-path name="preview_int" path="preview/" />
+    <cache-path name="external_open" path="external_open/" />
+    <!-- 同步目录、下载目录都在外部存储下；FileProvider 不可导出，只有应用主动交出的 URI 才会被授权读取 -->
+    <external-path name="external_storage" path="." />
 </paths>

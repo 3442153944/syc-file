@@ -80,6 +80,18 @@ object UpdateController {
         }
     }
 
+    /** 读安装包（未安装的 APK 文件）自带的 versionCode，解析失败返回 null。 */
+    private fun archiveVersionCode(context: Context, apk: File): Long? {
+        return try {
+            val info = context.packageManager.getPackageArchiveInfo(apk.absolutePath, 0) ?: return null
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode
+            else @Suppress("DEPRECATION") info.versionCode.toLong()
+        } catch (e: Exception) {
+            Log.w(TAG, "读取安装包 versionCode 失败: ${e.message}")
+            null
+        }
+    }
+
     /** 启动 WS app_update 监听（幂等）。发布事件到达即触发一次检查。 */
     fun startObserving(context: Context) {
         if (observing) return
@@ -156,6 +168,19 @@ object UpdateController {
                 }
             }
 
+            // 以安装包自带的 versionCode 为准再核对一次：发布页填的版本号只是服务端用来比较的标签，
+            // 包里的才是系统认的。包内版本号不高于已装版本时，装完仍会被判有更新（死循环），
+            // 非 root 安装还会被系统直接拒绝，这里提前讲清楚原因。
+            val installed = currentVersionCode(appContext)
+            val apkCode = archiveVersionCode(appContext, apk)
+            if (apkCode != null && apkCode <= installed) {
+                _downloadState.value = DownloadState.Error(
+                    "安装包自带的版本号是 $apkCode，不高于当前已装的 $installed，无法作为更新安装。" +
+                            "请重新打包：版本号需随版本名递增，并与发布时填写的版本号一致。"
+                )
+                return@launch
+            }
+
             _downloadState.value = DownloadState.ReadyToInstall
             // 优先 root 安装（pm install -r -d）：绕过"降级/同版本禁止安装"，并可处理签名冲突；
             // 无 root 时回退系统安装器（FileProvider + ACTION_VIEW）。
@@ -188,7 +213,10 @@ object UpdateController {
         // 成功=重装自身，系统会终止本进程（属正常，用户重开即新版本）。失败不会杀本进程，可读到原因。
         // `|| true` 保证退出码 0，从而拿到完整 stdout。
         val out = RootHelper.executeRootCommand(
-            "pm install -r -d \"$installPath\" 2>&1 || true"
+            // 成功时本进程会被系统终止，后面的 Kotlin 代码跑不到，所以暂存文件要在同一条 root 命令里清；
+            // 失败时不能删——下面的签名冲突回退还要用它重装。
+            "o=\$(pm install -r -d \"$installPath\" 2>&1); echo \"\$o\"; " +
+                    "echo \"\$o\" | grep -qi success && rm -f \"$staged\"; true"
         ).getOrDefault("")
 
         if (out.contains("Success", ignoreCase = true)) {

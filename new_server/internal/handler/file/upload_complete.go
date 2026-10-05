@@ -14,6 +14,7 @@ import (
 
 	"syc-file/internal/model"
 	"syc-file/internal/sync"
+	"syc-file/internal/thumb"
 	"syc-file/pkg/filecore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
@@ -156,6 +157,9 @@ func HandlerFuncUploadComplete(db *gorm.DB, _ *redis.Client, engine *sync.Engine
 
 		// 清理会话（临时文件已随 Move 消失）
 		_ = upload_store.Global.Delete(ctx, uploadID)
+
+		// 图片异步生成缩略图：用户在列表里看到这个文件时通常已经有了（非图片/未启用时无操作）
+		thumb.Enqueue(sess.TargetPath)
 
 		logger.Logger.Info("分片上传完成", zap.Uint("user_id", userID), zap.String("path", sess.TargetPath),
 			zap.Int64("size", sess.TotalSize), zap.Uint64("file_id", fileID), zap.Bool("synced", handled))

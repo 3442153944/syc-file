@@ -12,6 +12,9 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { useTransferStore } from "@/store/useTransferStore"
 import { getServerUrl } from "@/api/platform"
 import { copyText } from "@/utils/clipboard"
+import { previewKind } from "@/utils/fileKind"
+import FileThumb from "@/components/file/FileThumb.vue"
+import FilePreviewModal from "@/components/file/FilePreviewModal.vue"
 
 const route = useRoute()
 const router = useRouter()
@@ -34,10 +37,25 @@ const refresh = () => {
   if (currentPath.value) catalogStore.fetchDirectory(currentPath.value)
 }
 
+// 预览：当前目录里能预览的文件（图片/视频/音频）组成一个序列，弹窗里可以用 ←/→ 在其中切换
+const previewList = computed(() => items.value.filter((i) => !i.is_dir && previewKind(i.name) !== "none"))
+const previewOpen = ref(false)
+const previewIndex = ref(-1)
+const previewItem = computed(() => previewList.value[previewIndex.value] ?? null)
+
+const openPreview = (row: FileItem) => {
+  const idx = previewList.value.findIndex((i) => i.path === row.path)
+  if (idx < 0) return handleDownload(row)
+  previewIndex.value = idx
+  previewOpen.value = true
+}
+
 const handleRowClick = (row: FileItem) => {
   if (row.is_dir) {
     catalogStore.fetchDirectory(row.path)
     router.push({ query: { path: row.path } })
+  } else if (previewKind(row.name) !== "none") {
+    openPreview(row)
   } else {
     handleDownload(row)
   }
@@ -255,7 +273,12 @@ const columns: DataTableColumns<FileItem> = [
         style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
         onClick: () => handleRowClick(row),
       }, [
-        h("span", { style: { fontSize: "18px" } }, row.is_dir ? "📁" : "📄"),
+        // 图片/视频/有封面的音频显示缩略图，其余（含加载失败）仍是图标
+        row.is_dir
+          ? h("span", { style: { fontSize: "18px" } }, "📁")
+          : h(FileThumb, { path: row.path, name: row.name, size: row.size, boxSize: 32 }, {
+              default: () => h("span", { style: { fontSize: "18px" } }, "📄"),
+            }),
         h("span", { style: { fontWeight: row.is_dir ? "bold" : "normal" } }, row.name),
       ])
     },
@@ -264,7 +287,7 @@ const columns: DataTableColumns<FileItem> = [
   { title: "修改时间", key: "mod_time", width: 180, render: (row) => formatTime(row.mod_time) },
   { title: "包含项", key: "children_count", width: 90, render: (row) => (row.is_dir ? `${row.children_count} 项` : "-") },
   {
-    title: "操作", key: "actions", width: 200,
+    title: "操作", key: "actions", width: 260,
     render(row) {
       if (row.is_dir) {
         return h(NSpace, { size: 4 }, {
@@ -275,6 +298,9 @@ const columns: DataTableColumns<FileItem> = [
       }
       return h(NSpace, { size: 4 }, {
         default: () => [
+          previewKind(row.name) !== "none"
+            ? h(NButton, { size: "small", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); openPreview(row) } }, { default: () => "预览" })
+            : null,
           h(NButton, { size: "small", type: "primary", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleDownload(row) } }, { default: () => "下载" }),
           h(NButton, { size: "small", type: "info", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleCreateShareLink(row) } }, { default: () => "分享" }),
           h(NButton, { size: "small", type: "error", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleDelete(row) } }, { default: () => "删除" }),
@@ -319,6 +345,16 @@ const columns: DataTableColumns<FileItem> = [
         </template>
       </n-data-table>
     </div>
+
+    <file-preview-modal
+        v-model:show="previewOpen"
+        :item="previewItem"
+        :has-prev="previewIndex > 0"
+        :has-next="previewIndex >= 0 && previewIndex < previewList.length - 1"
+        @prev="previewIndex--"
+        @next="previewIndex++"
+        @download="previewItem && handleDownload(previewItem)"
+    />
 
     <!-- Web 模式上传输入 -->
     <input ref="webFileInput" type="file" multiple style="display:none" @change="onWebFiles" />

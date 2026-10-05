@@ -1,6 +1,6 @@
 // ui/screen/preview/PreviewRenderers.kt
 // 职责：各预览类型的具体渲染 Composable。
-//  - ImagePreview：Coil 加载 + 双指缩放/拖动
+//  - 图片：见 ui/components/preview/ZoomableImage（通用组件）
 //  - MediaPreview：Media3 ExoPlayer 流式播放（视频/音频，支持 Range 拖动）
 //  - PdfPreview：系统 PdfRenderer 按页懒渲染为位图
 //  - TextPreview：等宽可滚动文本
@@ -68,48 +68,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
-
-// ==================== 图片 ====================
-
-@Composable
-fun ImagePreview(url: String, modifier: Modifier = Modifier) {
-    var scale by remember { mutableStateOf(1f) }
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
-    val context = LocalContext.current
-
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black)
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 6f)
-                    if (scale > 1f) {
-                        offsetX += pan.x
-                        offsetY += pan.y
-                    } else {
-                        offsetX = 0f; offsetY = 0f
-                    }
-                }
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        AsyncImage(
-            model = ImageRequest.Builder(context).data(url).crossfade(true).build(),
-            contentDescription = "图片预览",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = offsetX,
-                    translationY = offsetY
-                )
-        )
-    }
-}
 
 // ==================== 视频 / 音频（Media3 ExoPlayer 流式） ====================
 

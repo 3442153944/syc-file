@@ -19,6 +19,8 @@ pub const FILE_AVAILABLE_DISKS: &str = "/file/available-disks";
 pub const FILE_TRAVERSE_DIRECTORY: &str = "/file/traverse-directory";
 /// GET，支持 Range，参数拼 query string
 pub const FILE_DOWNLOAD: &str = "/file/download";
+/// GET，图片/视频/音频缩略图（二进制流，失败用真实 HTTP 状态码），参数拼 query string
+pub const FILE_THUMBNAIL: &str = "/file/thumbnail";
 /// 分片上传：init/status/chunk/complete（替代旧 /file/upload 单缓冲 multipart）
 pub const FILE_UPLOAD_INIT: &str = "/file/upload/init";
 pub const FILE_UPLOAD_STATUS: &str = "/file/upload/status";

@@ -19,6 +19,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.FolderCopy
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
@@ -94,6 +96,8 @@ fun FileScreen(
     // 用 rememberSaveable：导航到预览页会销毁本界面的 composition，返回时需恢复
     // "正在浏览某磁盘"这一状态，否则会退回磁盘列表（文件主页）
     var currentDiskPath by rememberSaveable { mutableStateOf<String?>(null) }
+    // 「其他磁盘」默认折叠：Linux 服务器上是几十个 snap/overlay 挂载，且都不可点击，全展开会淹没真正可用的磁盘
+    var showOtherDisks by rememberSaveable { mutableStateOf(false) }
     var showDirectoryPicker by remember { mutableStateOf(false) }
 
     // 多选下载：长按进入多选模式，勾选后批量并发下载
@@ -351,18 +355,33 @@ fun FileScreen(
             val disabledDisks = diskData?.allDisks?.filter { !it.isAllowed } ?: emptyList()
             if (disabledDisks.isNotEmpty()) {
                 item {
-                    Text(
-                        text = "其他磁盘",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showOtherDisks = !showOtherDisks }
+                            .padding(top = 8.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "其他磁盘（${disabledDisks.size}）",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            imageVector = if (showOtherDisks) Icons.Default.KeyboardArrowUp
+                            else Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (showOtherDisks) "收起" else "展开"
+                        )
+                    }
                 }
 
-                diskItems(
-                    disks = disabledDisks,
-                    onDiskClick = null
-                )
+                if (showOtherDisks) {
+                    diskItems(
+                        disks = disabledDisks,
+                        onDiskClick = null
+                    )
+                }
             }
         }
     }

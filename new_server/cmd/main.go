@@ -24,6 +24,7 @@ import (
 	"syc-file/internal/supervisor"
 	"syc-file/internal/sync"
 	"syc-file/internal/system"
+	"syc-file/internal/thumb"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
@@ -202,6 +203,14 @@ func main() {
 
 	//启动分享链接清理器（30 分钟兜底扫描；每条链接另有独立协程到期自毁）
 	filehandler.StartShareLinkJanitor(db, redisClient)
+
+	//图片缩略图（ffmpeg）：上传/同步落盘后异步生成，请求时兜底生成；启动时在后台回填同步目录里已有的图片。
+	//找不到 ffmpeg 或配置关闭时 Init 返回 nil，功能静默关闭，不影响服务启动
+	if svc, terr := thumb.Init(config.Conf.Thumbnail, redisClient); terr != nil {
+		logger.Logger.Warn("缩略图服务初始化失败，功能不可用", zap.Error(terr))
+	} else if svc != nil && !config.Conf.Thumbnail.NoBackfill {
+		go svc.Backfill(config.Conf.Sync.SyncCatalogue)
+	}
 
 	//初始化文件同步引擎（Redis队列 + worker）
 	syncEngine := sync.InitSync(db, redisClient, config.Conf.Sync)

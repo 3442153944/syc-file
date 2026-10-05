@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sunyuanling.filesync.ui.viewModel.files.FileTransferItem
 import com.sunyuanling.filesync.ui.viewModel.transmission.FileTransferStatus
+import com.sunyuanling.filesync.ui.components.preview.FileThumbnail
 import com.sunyuanling.filesync.util.formatDate
 import com.sunyuanling.filesync.util.formatFileSize
 import com.sunyuanling.filesync.util.formatSpeed
@@ -90,16 +91,24 @@ fun TransferItemCard(
                         modifier = Modifier.size(40.dp)
                     )
                 } else {
-                    Icon(
-                        if (item.isDir) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile,
-                        contentDescription = null,
-                        modifier = Modifier.size(40.dp),
-                        tint = when (item.status) {
-                            FileTransferStatus.COMPLETED -> MaterialTheme.colorScheme.tertiary
-                            FileTransferStatus.FAILED -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.primary
-                        }
-                    )
+                    // 图片显示缩略图；没有路径映射（别的设备的记录等）或不是图片时仍是原来的图标
+                    FileThumbnail(
+                        path = if (item.isDir) "" else item.sourcePath,
+                        name = item.name,
+                        size = item.size,
+                        thumbSize = 40.dp
+                    ) {
+                        Icon(
+                            if (item.isDir) Icons.Default.Folder else Icons.AutoMirrored.Filled.InsertDriveFile,
+                            contentDescription = null,
+                            modifier = Modifier.size(40.dp),
+                            tint = when (item.status) {
+                                FileTransferStatus.COMPLETED -> MaterialTheme.colorScheme.tertiary
+                                FileTransferStatus.FAILED -> MaterialTheme.colorScheme.error
+                                else -> MaterialTheme.colorScheme.primary
+                            }
+                        )
+                    }
                 }
 
                 Spacer(Modifier.width(12.dp))

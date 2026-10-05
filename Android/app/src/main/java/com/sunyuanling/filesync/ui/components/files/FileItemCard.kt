@@ -18,6 +18,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sunyuanling.filesync.api.file.FileItem
+import com.sunyuanling.filesync.ui.components.preview.FileThumbnail
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -50,13 +51,20 @@ fun FileItemCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 图标
-            Icon(
-                imageVector = getFileIcon(item),
-                contentDescription = null,
-                tint = getFileIconColor(item),
-                modifier = Modifier.size(32.dp)
-            )
+            // 图片显示缩略图（本机已有就用本地的，否则取服务端几 KB 的缩略图），其余文件显示类型图标
+            FileThumbnail(
+                path = if (item.isDir) "" else item.path,
+                name = item.name,
+                size = item.size,
+                thumbSize = 40.dp
+            ) {
+                Icon(
+                    imageVector = getFileIcon(item),
+                    contentDescription = null,
+                    tint = getFileIconColor(item),
+                    modifier = Modifier.size(32.dp)
+                )
+            }
 
             // 文件信息
             Column(

@@ -9,16 +9,19 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sunyuanling.filesync.api.file.DownloadParams
 import com.sunyuanling.filesync.api.file.FileApi
+import com.sunyuanling.filesync.previewUtil.LocalFileResolver
 import com.sunyuanling.filesync.previewUtil.OfficeContent
 import com.sunyuanling.filesync.previewUtil.OfficeExtractor
 import com.sunyuanling.filesync.previewUtil.PreviewCache
 import com.sunyuanling.filesync.previewUtil.PreviewType
 import com.sunyuanling.filesync.previewUtil.detectPreviewType
 import com.sunyuanling.filesync.router.PreviewDestination
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /** 预览界面状态。 */
@@ -26,8 +29,16 @@ sealed interface PreviewUiState {
     data object Idle : PreviewUiState
     /** 缓存类下载中；[progress] 为 0..1，未知总大小时为 null。 */
     data class Loading(val progress: Float?, val message: String) : PreviewUiState
-    /** 图片：交给 Coil 从 [url] 加载。 */
-    data class Image(val url: String) : PreviewUiState
+    /**
+     * 图片：本机已有同一份时 [localFile] 非空，直接看本地的（不走网络）；
+     * 否则交给 Coil 从 [url] 在线加载。
+     */
+    data class Image(
+        val url: String,
+        val localFile: File? = null,
+        /** 在线加载时的占位缩略图（列表里通常已缓存，几乎立刻出来）；看本地文件时为 null */
+        val thumbUrl: String? = null,
+    ) : PreviewUiState
     /** 视频/音频：交给 ExoPlayer 从 [url] 流式播放。 */
     data class Media(val url: String, val isVideo: Boolean) : PreviewUiState
     /** PDF：已下载的本地文件，交给 PdfRenderer。 */
@@ -66,8 +77,16 @@ class PreviewViewModel(app: Application) : AndroidViewModel(app) {
         previewType = type
         viewModelScope.launch {
             when (type) {
-                PreviewType.IMAGE ->
-                    _state.value = PreviewUiState.Image(buildUrl(args))
+                PreviewType.IMAGE -> {
+                    // 本地优先：同步目录/下载记录里已有同一份就直接看本地的
+                    val local = withContext(Dispatchers.IO) {
+                        LocalFileResolver.resolve(args.path, args.name, args.size)
+                    }
+                    val thumb = if (local == null) {
+                        FileApi.buildThumbnailUrl(args.path, args.name, width = 512, version = args.size)
+                    } else null
+                    _state.value = PreviewUiState.Image(buildUrl(args), localFile = local, thumbUrl = thumb)
+                }
                 PreviewType.VIDEO ->
                     _state.value = PreviewUiState.Media(buildUrl(args), isVideo = true)
                 PreviewType.AUDIO ->
@@ -86,6 +105,29 @@ class PreviewViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value = PreviewUiState.Unsupported("暂不支持在线预览该类型文件")
             }
         }
+    }
+
+    /** 本地图片加载失败（文件损坏、被改动等）：回退到在线版本，不能让用户对着失败页干等。 */
+    fun fallbackImageToRemote() {
+        val cur = _state.value
+        if (cur is PreviewUiState.Image && cur.localFile != null) {
+            _state.value = PreviewUiState.Image(cur.url, localFile = null)
+        }
+    }
+
+    /**
+     * 取一个可交给其他应用的本地文件：本地已有就直接用，否则下载到预览缓存。
+     * 缓存文件不挂到 [cachedFile]：外部应用可能在本页退出后仍在读它，不能随 onCleared 删掉。
+     */
+    suspend fun fileForExternalOpen(args: PreviewDestination): Result<File> {
+        val cur = _state.value
+        if (cur is PreviewUiState.Image && cur.localFile != null) return Result.success(cur.localFile)
+        return PreviewCache.downloadToCache(
+            context = getApplication<Application>(),
+            path = args.path,
+            name = args.name,
+            deviceId = args.deviceId
+        )
     }
 
     private suspend fun buildUrl(args: PreviewDestination): String =

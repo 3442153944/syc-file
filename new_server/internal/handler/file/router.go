@@ -13,6 +13,11 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	f.POST("/available-disks", HandlerFuncAvailableDisks(db, redisClient))
 	f.POST("/traverse-directory", HandlerFuncTraverseDirectory(db, redisClient))
 	f.GET("/download", HandlerFuncDownload(db, redisClient))
+	// 图片缩略图：外网/流量下列表只拉几 KB，点进详情再拉原图（见 internal/thumb）
+	f.GET("/thumbnail", HandlerFuncThumbnail(db, redisClient))
+	// 文本文件在线查看/编辑：保存带版本号做乐观并发控制，多人同时编辑不会静默互相覆盖（见 text.go）
+	f.GET("/text/read", HandlerFuncTextRead(db, redisClient))
+	f.POST("/text/save", HandlerFuncTextSave(db, redisClient, engine))
 	f.POST("/upload", HandlerFuncUpload(db, redisClient))
 	// 分片上传（重写版）
 	f.POST("/upload/init", HandlerFuncUploadInit(db, redisClient, engine))

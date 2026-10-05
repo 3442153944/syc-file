@@ -113,6 +113,21 @@ pub async fn delete_file(
     ensure_ok(resp)
 }
 
+/// 构建带 token 的缩略图 URL，前端可直接放进 <img>（图片/视频封面/音频封面）
+#[tauri::command]
+pub fn build_thumbnail_url(
+    path: String,
+    name: String,
+    width: u32,
+    version: u64,
+    config: State<SharedSyncConfig>,
+) -> Result<String, String> {
+    let client = make_client(&config.read())?;
+    Ok(file_api::build_thumbnail_url(
+        &client, &path, &name, width, version,
+    ))
+}
+
 /// 构建带 token 的完整下载 URL，前端可直接用于下载
 #[tauri::command]
 pub fn build_download_url(

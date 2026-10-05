@@ -15,7 +15,7 @@ use crate::config::SharedSyncConfig;
 use crate::logger;
 use crate::sync_engine::should_ignore;
 use crate::upload_worker::UploadTask;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::AppHandle;
@@ -88,6 +88,9 @@ async fn catch_up_folder(
 
     // Phase 1：检测本地变更并上传，检测本地删除并上报
     let present: HashMap<String, bool> = files.iter().map(|(r, _)| (r.clone(), true)).collect();
+    // 本轮刚入队上传的新文件：上传是异步的，Phase 2 发清单时它们还不在 trunk 里，
+    // 若照常上报，服务端会按「trunk 无、本地有 → delete」把刚放进来的文件判成已删除并下发删除任务。
+    let mut pending_new: HashSet<String> = HashSet::new();
 
     for (rel, path) in &files {
         let base = base_store::get(folder_id, rel);
@@ -95,6 +98,7 @@ async fn catch_up_folder(
         match base {
             None => {
                 // 无基线：新文件，上传 + 上报 create
+                pending_new.insert(rel.clone());
                 let remote_dir = join_remote(remote_root, &dir_of(rel));
                 let _ = upload_tx
                     .send(UploadTask {
@@ -191,6 +195,9 @@ async fn catch_up_folder(
     }
 
     for (rel, path) in &files {
+        if pending_new.contains(rel) {
+            continue;
+        }
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

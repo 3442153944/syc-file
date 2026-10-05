@@ -21,6 +21,7 @@ import (
 	"syc-file/config"
 	"syc-file/internal/model"
 	"syc-file/internal/sync"
+	"syc-file/internal/thumb"
 	"syc-file/pkg/filecore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
@@ -275,6 +276,7 @@ func respondInstant(c *gin.Context, db *gorm.DB, engine *sync.Engine, userID uin
 		fileID, _ = upsertFileRecord(db, userID, fullPath, req.Name, req.TotalSize, req.FileHash)
 	}
 	writeUploadHistoryCompleted(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
+	thumb.Enqueue(fullPath)
 	logger.Logger.Info(message, zap.Uint("user_id", userID), zap.String("path", fullPath),
 		zap.Uint64("file_id", fileID), zap.Bool("synced", handled))
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": message, "data": gin.H{

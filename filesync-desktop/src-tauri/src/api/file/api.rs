@@ -33,6 +33,26 @@ pub fn build_download_url(client: &ApiClient, params: &DownloadParams) -> String
     client.build_url_with_token(routes::FILE_DOWNLOAD, map)
 }
 
+/// 构建缩略图 URL（token / device_id 由 build_url_with_token 补上，供 <img> 直接使用）。
+/// width 服务端只认 128/256/512；version 传文件大小即可作缓存版本号，内容变了 URL 就变，
+/// 缩略图响应带 1 天缓存期，不带版本号的话文件刚被改动的一天内会一直看到旧图。
+pub fn build_thumbnail_url(
+    client: &ApiClient,
+    path: &str,
+    name: &str,
+    width: u32,
+    version: u64,
+) -> String {
+    let mut map = HashMap::new();
+    map.insert("path", path.to_string());
+    map.insert("name", name.to_string());
+    map.insert("w", width.to_string());
+    if version > 0 {
+        map.insert("v", version.to_string());
+    }
+    client.build_url_with_token(routes::FILE_THUMBNAIL, map)
+}
+
 /// 删除远端文件（文件管理用 + 同步场景 delete-before-upload）
 pub async fn delete_file(
     client: &ApiClient,
