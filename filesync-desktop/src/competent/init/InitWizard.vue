@@ -129,7 +129,7 @@ const recheck = async () => {
             <n-input v-model:value="form.setupCode" placeholder="ABCD-2345" size="large" clearable
                      @keyup.enter="next"/>
           </n-form-item>
-          <n-button text type="primary" size="small" @click="recheck">换了服务器？重新检测</n-button>
+          <n-button key="recheck" text type="primary" size="small" @click="recheck">换了服务器？重新检测</n-button>
         </template>
 
         <template v-else-if="step === 2">
@@ -164,10 +164,10 @@ const recheck = async () => {
       </n-form>
 
       <n-space justify="space-between" class="init-actions">
-        <n-button v-if="step > 1" :disabled="submitting" @click="step--">上一步</n-button>
+        <n-button v-if="step > 1" key="prev" :disabled="submitting" @click="step--">上一步</n-button>
         <span v-else/>
-        <n-button v-if="step < 3" type="primary" @click="next">下一步</n-button>
-        <n-button v-else type="primary" :loading="submitting" @click="submit">完成初始化并登录</n-button>
+        <n-button v-if="step < 3" key="next" type="primary" @click="next">下一步</n-button>
+        <n-button v-else key="submit" type="primary" :loading="submitting" @click="submit">完成初始化并登录</n-button>
       </n-space>
     </div>
   </div>

@@ -182,14 +182,19 @@ function onKeydown(e: KeyboardEvent) {
   <div class="te">
     <div class="bar">
       <n-space align="center" size="small">
+        <!--
+          每个按钮必须有唯一 key。n-space 会把子节点拍平后按位置复用：没有 key 时，「编辑」按钮的实例
+          会被原地复用成「保存」按钮，而生产构建的编译器把 @click 当成静态属性不再比对，
+          结果「保存」上还挂着 startEdit——点保存实际执行的是「进入编辑」（dev 不做这个优化，所以只在打包后出现）。
+        -->
         <template v-if="!editing">
-          <n-button size="small" type="primary" :disabled="loading || !!loadError" @click="startEdit">编辑</n-button>
-          <n-button size="small" :disabled="loading" @click="load">重新加载</n-button>
+          <n-button key="edit" size="small" type="primary" :disabled="loading || !!loadError" @click="startEdit">编辑</n-button>
+          <n-button key="reload" size="small" :disabled="loading" @click="load">重新加载</n-button>
         </template>
         <template v-else>
-          <n-button size="small" type="primary" :loading="saving" :disabled="!dirty" @click="save()">保存 (Ctrl+S)</n-button>
-          <n-button size="small" :disabled="saving" @click="discard">放弃修改</n-button>
-          <n-tag v-if="dirty" size="small" type="warning" :bordered="false">未保存</n-tag>
+          <n-button key="save" size="small" type="primary" :loading="saving" :disabled="!dirty" @click="save()">保存 (Ctrl+S)</n-button>
+          <n-button key="discard" size="small" :disabled="saving" @click="discard">放弃修改</n-button>
+          <n-tag v-if="dirty" key="dirty-tag" size="small" type="warning" :bordered="false">未保存</n-tag>
         </template>
       </n-space>
       <n-space align="center" size="small">

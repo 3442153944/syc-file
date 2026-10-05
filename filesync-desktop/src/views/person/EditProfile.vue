@@ -96,7 +96,7 @@ async function handleSave() {
             <n-icon size="48"><UploadIcon /></n-icon>
           </template>
         </n-avatar>
-        <n-button v-if="inTauri" size="small" @click="pickAvatar" :disabled="saving">
+        <n-button v-if="inTauri" key="pick-avatar" size="small" @click="pickAvatar" :disabled="saving">
           更换头像
         </n-button>
       </n-space>
