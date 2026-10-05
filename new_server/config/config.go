@@ -41,6 +41,32 @@ type Config struct {
 	Sync       SyncConfig       `mapstructure:"sync"`
 	Supervisor supervisor.Config `mapstructure:"supervisor"`
 	Monitor    MonitorConfig    `mapstructure:"monitor"`
+	Thumbnail  ThumbnailConfig  `mapstructure:"thumbnail"`
+}
+
+// ThumbnailConfig 图片缩略图配置（见 internal/thumb）。整段缺省即可：默认开启，
+// 缩略图目录取 <首个 allowed_paths 所在盘>/<storage.base_path>/thumbs，ffmpeg 从 PATH 里找。
+type ThumbnailConfig struct {
+	// 关闭缩略图功能。默认 false（开启）；找不到 ffmpeg 时也会自动关闭，不影响服务启动。
+	Disabled bool `mapstructure:"disabled"`
+	// 持久缩略图目录（上传/同步的文件）；空则按上面的默认规则推导。
+	Dir string `mapstructure:"dir"`
+	// 临时缩略图目录（浏览磁盘上原本就有的图片时生成，到期销毁）；
+	// 空则取 <首个 allowed_paths 所在盘>/<storage.base_path>/<storage.temp_path>/thumbs。
+	TempDir string `mapstructure:"temp_dir"`
+	// 临时缩略图保留多久（分钟），每次被访问会顺延。<=0 时按 720（12 小时）处理。
+	TempTTLMinutes int `mapstructure:"temp_ttl_minutes"`
+	// ffmpeg 可执行文件；空则在 PATH 里找 "ffmpeg"。
+	FFmpeg string `mapstructure:"ffmpeg"`
+	// ffprobe 可执行文件；空则先找 ffmpeg 同目录、再找 PATH。视频/音频封面靠它，找不到只影响这两类。
+	FFprobe string `mapstructure:"ffprobe"`
+	// 同时运行的 ffmpeg 数量（上传后异步生成与请求时当场生成共用）。<=0 时按 8 处理。
+	// 注意内存：解码一张 4000 万像素的原图可占用数百 MB，机器小的话调低。
+	Workers int `mapstructure:"workers"`
+	// 默认宽度（长边上限，像素），只能是 128 / 256 / 512，其它值归到最近一档。<=0 时按 256。
+	DefaultWidth int `mapstructure:"default_width"`
+	// 不要在启动时回填同步目录里已有图片的缩略图。默认 false（回填）。
+	NoBackfill bool `mapstructure:"no_backfill"`
 }
 
 // MonitorConfig 系统明细监控配置（进程/端口 Top-N 采集，见 internal/monitor）。

@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
+	"syc-file/internal/thumb"
 	"syc-file/pkg/logger"
 )
 
@@ -88,6 +89,9 @@ func (e *Engine) ReconcileFolderFilesystem(folder model.SyncFolder) (adopted int
 	// 立即给所有在线设备派发，不等它们下次重连做 scan 比对
 	conns := e.hub.GetUserConnections(folder.UserID)
 	for _, f := range adoptedFiles {
+		if !f.IsDirectory {
+			thumb.Enqueue(f.FilePath) // 收编进来的已有图片同样预生成缩略图
+		}
 		rel := relFromPath(root, f.FilePath)
 		r := reportFromFolder(folder, f, rel)
 		for _, conn := range conns {

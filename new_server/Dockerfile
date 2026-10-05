@@ -28,7 +28,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive TZ=Asia/Shanghai LANG=C.UTF-8 SYC_MODE=prod
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        mysql-server redis-server supervisor openssl curl ca-certificates tzdata \
+        mysql-server redis-server supervisor openssl curl ca-certificates tzdata ffmpeg \
     && rm -rf /var/lib/mysql /var/lib/apt/lists/* \
     && mkdir -p /opt/syc /data
 

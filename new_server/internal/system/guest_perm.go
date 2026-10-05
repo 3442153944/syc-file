@@ -27,15 +27,15 @@ var guestAlways = []string{
 
 // guestAPIs perm → 接口路径前缀。
 var guestAPIs = map[string][]string{
-	"dashboard":        {"/v1/file/available-disks", "/v1/file/download-history", "/v1/monitor/system", "/v1/ws/connect", "/v1/ws/my-devices"},
-	"file.browse":      {"/v1/file/available-disks", "/v1/file/traverse-directory", "/v1/file/download"},
-	"file.upload":      {"/v1/file/upload"},
+	"dashboard":        {"/v1/file/available-disks", "/v1/file/download-history", "/v1/file/thumbnail", "/v1/monitor/system", "/v1/ws/connect", "/v1/ws/my-devices"},
+	"file.browse":      {"/v1/file/available-disks", "/v1/file/traverse-directory", "/v1/file/download", "/v1/file/thumbnail", "/v1/file/text/read"},
+	"file.upload":      {"/v1/file/upload", "/v1/file/text/save"},
 	"share":            {"/v1/file/share-link/"},
 	"share.quick":      {"/v1/file/quick-share/", "/v1/user/quick-share-settings"},
 	"sync":             {"/v1/sync/", "/v1/ws/connect"},
 	"clipboard":        {"/v1/clipboard/", "/v1/ws/connect"},
 	"monitor":          {"/v1/monitor/", "/v1/ws/connect"},
-	"transfers":        {"/v1/file/download-history"},
+	"transfers":        {"/v1/file/download-history", "/v1/file/thumbnail"},
 	"account.password": {"/v1/user/change-password"},
 }
 
