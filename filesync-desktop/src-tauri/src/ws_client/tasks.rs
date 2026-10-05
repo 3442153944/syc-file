@@ -154,8 +154,20 @@ async fn do_download(
         let local = local_root.join(&safe_rel);
         if local.is_file() {
             if let Ok(cur) = crate::chunked_uploader::file_blake3_hex(&local) {
+                // 本地内容与任务一致：无需重新下载（服务端补派/追赶误派时最常见），
+                // 直接刷新基线并完成任务。
+                if cur == exp {
+                    sync_api::complete_task(&client, task_id, &cur).await.ok();
+                    base_store::set_with_file(folder_id, &relative_path, &cur, &local);
+                    logger::info(
+                        "download",
+                        format!("本地已是最新，跳过下载: {}", relative_path),
+                    );
+                    crate::transfers::download_progress(&final_str, "done", Some(task_id), None);
+                    return;
+                }
                 let base = base_store::get(folder_id, &relative_path).map(|b| b.hash);
-                if cur != exp && base.as_deref() != Some(cur.as_str()) {
+                if base.as_deref() != Some(cur.as_str()) {
                     logger::warn(
                         "download",
                         format!("本地有未同步的修改，跳过下载以免覆盖: {}", relative_path),

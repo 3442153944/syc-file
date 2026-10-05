@@ -15,7 +15,7 @@ use crate::config::SharedSyncConfig;
 use crate::logger;
 use crate::sync_engine::should_ignore;
 use crate::upload_worker::UploadTask;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::AppHandle;
@@ -88,9 +88,6 @@ async fn catch_up_folder(
 
     // Phase 1：检测本地变更并上传，检测本地删除并上报
     let present: HashMap<String, bool> = files.iter().map(|(r, _)| (r.clone(), true)).collect();
-    // 本轮刚入队上传的新文件：上传是异步的，Phase 2 发清单时它们还不在 trunk 里，
-    // 若照常上报，服务端会按「trunk 无、本地有 → delete」把刚放进来的文件判成已删除并下发删除任务。
-    let mut pending_new: HashSet<String> = HashSet::new();
 
     for (rel, path) in &files {
         let base = base_store::get(folder_id, rel);
@@ -98,7 +95,6 @@ async fn catch_up_folder(
         match base {
             None => {
                 // 无基线：新文件，上传 + 上报 create
-                pending_new.insert(rel.clone());
                 let remote_dir = join_remote(remote_root, &dir_of(rel));
                 let _ = upload_tx
                     .send(UploadTask {
@@ -176,7 +172,10 @@ async fn catch_up_folder(
         logger::info("catch_up", format!("已上报删除: {}", rel));
     }
 
-    // Phase 2：全量清单交服务端比对（trunk 有本地无 → download；trunk 无本地有 → delete）
+    // Phase 2：全量清单交服务端比对（trunk 有本地无/不一致 → download；trunk 已软删本地还有 → delete）。
+    // 无基线文件照常上报当前真实 hash：服务端对从未登记过的路径不派 delete（等上传/notify 登记），
+    // 对已在 trunk 的同 hash 文件也不会补派 download——不能像以前那样把它们从清单里剔除，
+    // 否则服务端会按「trunk 有、本地无」给每个文件补派下载，造成同 hash 全量重下。
     let mut items: Vec<ScanItem> = Vec::with_capacity(files.len() + dirs.len());
 
     for rel in &dirs {
@@ -195,9 +194,6 @@ async fn catch_up_folder(
     }
 
     for (rel, path) in &files {
-        if pending_new.contains(rel) {
-            continue;
-        }
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())

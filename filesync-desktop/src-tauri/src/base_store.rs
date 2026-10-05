@@ -128,8 +128,17 @@ pub fn folder_snapshot(folder_id: u64) -> HashMap<String, BaseEntry> {
 }
 
 fn persist() {
-    let snapshot = cell().lock().clone();
-    if let Ok(text) = serde_json::to_string(&snapshot) {
-        let _ = std::fs::write(app_paths::state_file(), text);
+    // 持锁完成「序列化 + 落盘」：同一时刻只有一个写者，且先写临时文件再原子改名。
+    // 旧实现把快照 clone 出来后在锁外直接覆写 state.json——多个上传/下载 worker 并发
+    // set() 时互相截断，进程在写一半时退出也会留下坏文件，下次启动解析失败就静默丢掉
+    // 全部基线（表现为重连后全量重传 + 服务端补派下载风暴）。
+    let map = cell().lock();
+    let Ok(text) = serde_json::to_string(&*map) else {
+        return;
+    };
+    let path = app_paths::state_file();
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
     }
 }

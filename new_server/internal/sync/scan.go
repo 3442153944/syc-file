@@ -16,7 +16,12 @@ import (
 // HandleScan 处理离线重连后的全量扫描比对：以 trunk 为权威，给该设备补派缺失/过期/多余的任务。
 //   - trunk 有、本地无         → download / mkdir
 //   - trunk 有、本地 hash 不同  → download（trunk 为准）
-//   - trunk 无、本地有         → delete（trunk 已删除）
+//   - trunk 曾登记过且已软删、本地仍在 → delete
+//   - trunk 从未登记过的本地路径（新文件）→ 忽略，等客户端的 upload/notify 自行登记
+//
+// 注意最后一条：不能把「trunk 无记录」当成「trunk 已删除」。否则本地刚出现、上传还没登记
+// 的文件会被派 delete 删掉；客户端为规避它把待上传文件从清单里剔除，服务端又会按
+// 「trunk 有、本地无」补派 download，导致同 hash 内容全量重下。
 func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) error {
 	var folder model.SyncFolder
 	if err := e.db.First(&folder, report.FolderID).Error; err != nil {
@@ -75,10 +80,14 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 		}
 	}
 
-	// 本地侧：trunk 已删除的，派 delete 让设备删本地残留
+	// 本地侧：trunk 里曾登记过、现已被软删的，派 delete 让设备删本地残留。
+	// 从未登记过的路径（新文件）直接跳过，等上传/notify 登记。
 	for _, it := range items {
 		f, ok := relToFile[it.RelativePath]
-		if !ok || f.IsDeleted {
+		if !ok {
+			continue
+		}
+		if f.IsDeleted {
 			// 目录里还有未删除的文件，说明它没被删：上传子目录里的文件时 trunk 只登记文件、
 			// 不单独登记目录，这种目录没有自己的记录，不能因此判成「trunk 已删除」。
 			if it.IsDir && live[it.RelativePath] {
@@ -92,11 +101,7 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 				IsDir:        it.IsDir,
 				Action:       model.FileChangeDelete,
 			}
-			fileID := uint64(0)
-			if ok {
-				fileID = f.ID
-			}
-			e.createAndEnqueueTask(userID, SourceServer, deviceID, folder, r, fileID, model.TaskTypeDelete, "")
+			e.createAndEnqueueTask(userID, SourceServer, deviceID, folder, r, f.ID, model.TaskTypeDelete, "")
 		}
 	}
 	return nil
