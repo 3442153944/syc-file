@@ -2,6 +2,7 @@
 import { request } from '../request'
 import type {
   ServerStatus, InitParams, MyRoutes, AdminRoute, RouteItem, GuestRow, GuestCreated,
+  CreateRouteBody, RoutePerm,
 } from './systemTypes'
 
 // ── 初始化（免登录）──────────────────────────────────────────
@@ -15,10 +16,18 @@ export const getMyRoutes = () => request<MyRoutes>('GET', '/routes')
 
 // ── 路由管理（仅超级管理员）──────────────────────────────────
 export const adminListRoutes = () => request<AdminRoute[]>('GET', '/admin/routes')
+/** path / component / parent_code / name / perm 只有自定义路由能改，内置路由改这些会被服务端拒绝。 */
 export const adminUpdateRoute = (
   id: number,
-  patch: { title?: string; icon?: string; sort?: number; hidden?: boolean; min_level?: number; enabled?: boolean },
+  patch: {
+    title?: string; icon?: string; sort?: number; hidden?: boolean; min_level?: number; enabled?: boolean
+    path?: string; component?: string; parent_code?: string; name?: string; perm?: string
+  },
 ) => request<null>('PUT', `/admin/routes/${id}`, { body: patch })
+export const adminCreateRoute = (body: CreateRouteBody) => request<AdminRoute>('POST', '/admin/routes', { body })
+/** 只能删自定义路由，且其下不能还有子路由 */
+export const adminDeleteRoute = (id: number) => request<null>('DELETE', `/admin/routes/${id}`)
+export const adminRoutePerms = () => request<RoutePerm[]>('GET', '/admin/route-perms')
 
 // ── 访客（管理员及以上）──────────────────────────────────────
 export const listGuestRoutes = () => request<RouteItem[]>('GET', '/admin/guest-routes')
