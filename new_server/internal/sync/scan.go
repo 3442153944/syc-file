@@ -48,6 +48,7 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 	}
 
 	items := report.Items
+	live := liveDirs(relToFile)
 
 	// trunk 侧：补派本地缺失或过期的内容
 	for rel, f := range relToFile {
@@ -78,6 +79,11 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 	for _, it := range items {
 		f, ok := relToFile[it.RelativePath]
 		if !ok || f.IsDeleted {
+			// 目录里还有未删除的文件，说明它没被删：上传子目录里的文件时 trunk 只登记文件、
+			// 不单独登记目录，这种目录没有自己的记录，不能因此判成「trunk 已删除」。
+			if it.IsDir && live[it.RelativePath] {
+				continue
+			}
 			r := FileChangeReport{
 				FolderID:     folder.ID,
 				RelativePath: it.RelativePath,
@@ -94,6 +100,22 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 		}
 	}
 	return nil
+}
+
+// liveDirs 返回 trunk 中仍有未删除内容的目录（含各级祖先），键为相对路径（正斜杠）。
+func liveDirs(relToFile map[string]model.File) map[string]bool {
+	dirs := make(map[string]bool)
+	for rel, f := range relToFile {
+		if f.IsDeleted {
+			continue
+		}
+		for i := len(rel) - 1; i > 0; i-- {
+			if rel[i] == '/' {
+				dirs[rel[:i]] = true
+			}
+		}
+	}
+	return dirs
 }
 
 func findItem(items []ScanItem, rel string) (ScanItem, bool) {
