@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jni = "0.21"
+serde_json = "1"
 sync_core = { path = "../../new_server/sync_core" }
 
 # 依赖 crate 的 profile 由本（根）crate 决定，与 sync_core 自身配置保持一致

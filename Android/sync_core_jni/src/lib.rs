@@ -4,7 +4,10 @@
 //! 因此每个 JNI 函数第二个参数是实例 JObject。所有函数：
 //! - 包 catch_unwind（panic 不得跨 JNI 展开），失败一律返回 null/负值，
 //!   Kotlin 侧收到 null 即回退纯 Java blake3 实现（正确性不受影响，只慢）；
-//! - 直接调用 sync_core 的 C ABI 导出（同一实现，与服务端 fc_finalize 逐字节一致）。
+//! - 哈希/描述计算直接调用 sync_core 的 C ABI 导出（同一实现，与服务端 fc_finalize 逐字节一致）；
+//! - upload_planner（多路径自适应上传决策）直接调 sync_core 的 typed API（Planner/Task/Report
+//!   就在本 cdylib 依赖的 rlib 里，普通函数调用即可，与 nativeHashChunk 调 fc_hash_chunk
+//!   同一模式），不走 fc_planner_* 的 C ABI 声明——避免 cdylib 符号剥离问题。
 //!
 //! 构建：`./build.ps1`（cargo-ndk，产物进 app/src/main/jniLibs/<abi>/libsync_core_jni.so）。
 
@@ -145,4 +148,172 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeDescrib
         jnull()
     }))
     .unwrap_or_else(|_| jnull())
+}
+
+// ---------------------------------------------------------------- upload_planner JNI
+//
+// 多路径自适应上传决策核心（sync_core::upload_planner）的 JNI 包装，Kotlin 侧对应
+// com.sunyuanling.filesync.core.SyncPlanner。核心只做决策不发 HTTP：平台循环
+// next → 执行 → report 直到 Done/Failed；Task/Report/PersistedState 一律 JSON 字符串
+// 跨边界（与 fc_planner_* 的 C ABI 同构），句柄是 Box 指针存 jlong。
+
+use sync_core::upload_planner as planner_core;
+
+fn planner_ref(handle: jlong) -> Option<&'static mut planner_core::Planner> {
+    if handle == 0 {
+        return None;
+    }
+    Some(unsafe { &mut *(handle as *mut planner_core::Planner) })
+}
+
+fn jstring_of(env: &mut JNIEnv, s: &str) -> jni::sys::jstring {
+    env.new_string(s)
+        .map(|j| j.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+/// 创建 Planner。desc_json = PlannerInput JSON（节点池 + 上次持久化样本）。失败返回 0。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerNew(
+    mut env: JNIEnv,
+    _this: JObject,
+    desc_json: JString,
+) -> jlong {
+    catch_unwind(AssertUnwindSafe(|| {
+        let s: String = match env.get_string(&desc_json) {
+            Ok(v) => v.into(),
+            Err(_) => return 0,
+        };
+        match serde_json::from_str::<planner_core::PlannerInput>(&s) {
+            Ok(input) => match planner_core::Planner::new(input) {
+                Ok(p) => Box::into_raw(Box::new(p)) as jlong,
+                Err(_) => 0,
+            },
+            Err(_) => 0,
+        }
+    }))
+    .unwrap_or(0)
+}
+
+/// 取下一个任务（Task JSON）。终态返回 {"type":"done"} / {"type":"failed","reason":..}；
+/// 句柄无效/序列化失败也返回 failed 任务，绝不返回 null（Kotlin 循环靠它退出）。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerNext(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let task = match planner_ref(handle) {
+            Some(p) => p.next_task(),
+            None => planner_core::Task::Failed {
+                reason: "无效句柄".into(),
+            },
+        };
+        match serde_json::to_string(&task) {
+            Ok(s) => jstring_of(&mut env, &s),
+            Err(_) => jstring_of(&mut env, r#"{"type":"failed","reason":"serialize"}"#),
+        }
+    }));
+    r.unwrap_or_else(|_| jstring_of(&mut env, r#"{"type":"failed","reason":"panic"}"#))
+}
+
+/// 回传执行结果（Report JSON）。返回 0 成功，负数失败。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerReport(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    report_json: JString,
+) -> jint {
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<i32, i32> {
+        let p = planner_ref(handle).ok_or(-1)?;
+        let s: String = env.get_string(&report_json).map(|v| v.into()).map_err(|_| -2)?;
+        let rep: planner_core::Report = serde_json::from_str(&s).map_err(|_| -3)?;
+        p.report(rep);
+        Ok(0)
+    }));
+    r.unwrap_or(Err(-1)).unwrap_or(-1)
+}
+
+/// 接入/重接会话：首个 upload 与 404 后的重新 init 都用它（与 begin_transfer 同效，
+/// 选档在探测阶段已 finalize）。missing_json = [u32..]。返回 0 成功。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerResume(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    upload_id: JString,
+    missing_json: JString,
+) -> jint {
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<i32, i32> {
+        let p = planner_ref(handle).ok_or(-1)?;
+        let id: String = env.get_string(&upload_id).map(|v| v.into()).map_err(|_| -2)?;
+        let s: String = env.get_string(&missing_json).map(|v| v.into()).map_err(|_| -2)?;
+        let missing: Vec<u32> = serde_json::from_str(&s).map_err(|_| -3)?;
+        p.resume(&id, &missing);
+        Ok(0)
+    }));
+    r.unwrap_or(Err(-1)).unwrap_or(-1)
+}
+
+/// 探测选档完成后的分片大小（platform describe 要用）；0 = 未就绪/无效句柄。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerChunkSize(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jlong {
+    catch_unwind(AssertUnwindSafe(|| match planner_ref(handle) {
+        Some(p) => p.planned_chunk_size().unwrap_or(0) as jlong,
+        None => 0,
+    }))
+    .unwrap_or(0)
+}
+
+/// 每节点当前 AIMD 窗口（JSON 的 [["id",window],..]），窗口变化日志用；无效句柄返回 null。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerWindows(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let r = catch_unwind(AssertUnwindSafe(|| match planner_ref(handle) {
+        Some(p) => match serde_json::to_string(&p.windows()) {
+            Ok(s) => jstring_of(&mut env, &s),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }));
+    r.unwrap_or(std::ptr::null_mut())
+}
+
+/// 导出持久化测速样本（PersistedState JSON），平台落盘下次冷启动复用；失败返回 null。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerExport(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jni::sys::jstring {
+    let r = catch_unwind(AssertUnwindSafe(|| match planner_ref(handle) {
+        Some(p) => match serde_json::to_string(&p.export_state()) {
+            Ok(s) => jstring_of(&mut env, &s),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }));
+    r.unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerFree(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) {
+    if handle != 0 {
+        let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+            drop(Box::from_raw(handle as *mut planner_core::Planner));
+        }));
+    }
 }
