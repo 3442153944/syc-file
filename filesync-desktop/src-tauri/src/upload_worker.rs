@@ -150,6 +150,7 @@ async fn upload_file(task: UploadTask, config: &SharedSyncConfig, app: &AppHandl
             &task.remote_dir,
             &options,
             on_progress,
+            config,
         )
         .await
         {

@@ -47,4 +47,7 @@ serde_yaml = "0.9"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 arboard = "3.6.1"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
+# 多路径自适应上传决策核心（rlib 进程内调用：测速编排/父链折算/选片/AIMD 窗口/动态超时/多路调度）。
+# 它带 sysinfo/netstat2 依赖属正常；HTTP 发送仍归本平台（见 chunked_uploader.rs）。
+sync_core = { path = "../../new_server/sync_core" }
 

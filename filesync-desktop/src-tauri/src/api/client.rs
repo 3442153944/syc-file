@@ -193,6 +193,35 @@ impl ApiClient {
         self.exec(req).await
     }
 
+    /// POST 裸字节到**指定节点入口**（多路径上传专用：探测与分片必须落在 planner 指定的
+    /// 节点 URL 上，而不是当前激活节点的 base_url）。`node_url` 含 /file 后缀、不含 /v1，
+    /// 由本方法拼。token / device_id 头与统一出口（切节点作废、传输失败上报）都与普通
+    /// 请求一致。`timeout` 是 per-request 的，覆盖 client 默认 60s（分片超时由 planner
+    /// 按链路质量动态给）。
+    pub async fn post_bytes_to<T: DeserializeOwned>(
+        &self,
+        node_url: &str,
+        path: &str,
+        params: &[(&str, &str)],
+        body: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> Result<ApiResponse<T>, String> {
+        let mut req = self
+            .client
+            .post(format!("{}/v1{}", node_url.trim_end_matches('/'), path))
+            .header("Token", &self.token)
+            .header("Device-Id", &self.device_id)
+            .header("Content-Type", "application/octet-stream")
+            .body(body);
+        for (k, v) in params {
+            req = req.query(&[(*k, *v)]);
+        }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
+        }
+        self.exec(req).await
+    }
+
     /// 构建带 token 的完整 GET URL（用于下载、WS 等 token 需放 query string 的场景）
     pub fn build_url_with_token(&self, path: &str, mut params: HashMap<&str, String>) -> String {
         params.insert("token", self.token.clone());

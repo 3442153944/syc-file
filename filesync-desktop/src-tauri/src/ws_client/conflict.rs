@@ -185,6 +185,7 @@ async fn keep_local_reupload(config: &SharedSyncConfig, pc: PendingConflict, ser
         &pc.remote_dir,
         &options,
         on_progress,
+        config,
     )
     .await
     {

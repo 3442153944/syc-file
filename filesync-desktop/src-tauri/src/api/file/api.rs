@@ -106,6 +106,30 @@ pub async fn upload_chunk(
         .await
 }
 
+/// 上传单个分片到**指定节点入口**（多路径上传：task.url 指向的节点，可能不是激活节点）。
+/// `timeout_ms` 是 per-request 超时（planner 按链路质量动态给），覆盖 client 默认 60s。
+/// 业务码语义同 `upload_chunk`。
+pub async fn upload_chunk_to(
+    client: &ApiClient,
+    node_url: &str,
+    upload_id: &str,
+    index: i32,
+    data: Vec<u8>,
+    timeout_ms: u64,
+) -> Result<ApiResponse<UploadChunkData>, String> {
+    let index_str = index.to_string();
+    let params: [(&str, &str); 2] = [("upload_id", upload_id), ("index", index_str.as_str())];
+    client
+        .post_bytes_to(
+            node_url,
+            routes::FILE_UPLOAD_CHUNK,
+            &params,
+            data,
+            Some(std::time::Duration::from_millis(timeout_ms)),
+        )
+        .await
+}
+
 /// 完成分片上传：收齐后触发服务端校验落盘。
 pub async fn upload_complete(
     client: &ApiClient,

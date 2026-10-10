@@ -28,6 +28,8 @@ export interface ServerNode {
     server_url: string
     ws_url: string
     builtin: boolean
+    /** 父节点 id：本节点是父节点 nginx 的反代上游时填（带宽共享瓶颈，上传 planner 父链折算用）；缺省/null = 独立链路 */
+    parent?: string | null
 }
 
 /** 单个节点最近一次探测结果 */
@@ -80,7 +82,7 @@ const KEY_LEGACY_SERVER = 'filesync_server_url'
 /** 默认巡检间隔：15 分钟确认一次链路存活 */
 export const DEFAULT_INTERVAL_MINUTES = 15
 
-/** 两个内置节点，与 Rust config.rs 的 default_nodes() 保持一致 */
+/** 内置节点，与 Rust config.rs 的 default_nodes() 保持一致 */
 function builtinNodes(): ServerNode[] {
     return [
         {
@@ -89,6 +91,7 @@ function builtinNodes(): ServerNode[] {
             server_url: 'https://ddns.sunyuanling.cn/file',
             ws_url: 'wss://ddns.sunyuanling.cn/file',
             builtin: true,
+            parent: null,
         },
         {
             id: 'jp',
@@ -97,6 +100,16 @@ function builtinNodes(): ServerNode[] {
             server_url: 'https://jp.sunyuanling.cn:8443/file',
             ws_url: 'wss://jp.sunyuanling.cn:8443/file',
             builtin: true,
+            parent: null,
+        },
+        {
+            id: 'hk',
+            name: '备用节点 · 香港',
+            // hk 入口的 nginx 反代上游是 ddns（共享瓶颈，parent 参与上传 planner 父链折算）
+            server_url: 'https://hk.sunyuanling.cn:8443/file',
+            ws_url: 'wss://hk.sunyuanling.cn:8443/file',
+            builtin: true,
+            parent: 'ddns',
         },
     ]
 }
@@ -368,12 +381,13 @@ export async function switchNode(nodeId: string): Promise<NetStatus> {
     return netState
 }
 
-/** 新增（id 传 null）或修改节点；activate=true 时保存后立即切过去。 */
+/** 新增（id 传 null）或修改节点；activate=true 时保存后立即切过去。parent=父节点 id（可空）。 */
 export async function saveNode(input: {
     id?: string | null
     name: string
     serverUrl: string
     wsUrl?: string | null
+    parent?: string | null
     activate?: boolean
 }): Promise<NetStatus> {
     const serverUrl = input.serverUrl.trim().replace(/\/+$/, '')
@@ -385,21 +399,23 @@ export async function saveNode(input: {
             name: input.name,
             serverUrl,
             wsUrl: input.wsUrl ?? null,
+            parent: input.parent ?? null,
             activate: input.activate ?? false,
         }))
         return netState
     }
     const wsUrl = (input.wsUrl || '').trim() || deriveWsUrl(serverUrl)
     const name = input.name.trim() || serverUrl
+    const parent = input.parent ?? null
     const nodes = [...netState.nodes]
     let id = input.id || ''
     if (id) {
         const idx = nodes.findIndex(n => n.id === id)
         if (idx < 0) throw new Error('节点不存在')
-        nodes[idx] = {...nodes[idx], name, server_url: serverUrl, ws_url: wsUrl}
+        nodes[idx] = {...nodes[idx], name, server_url: serverUrl, ws_url: wsUrl, parent}
     } else {
         id = 'custom-' + (crypto.randomUUID?.() || Date.now().toString(36))
-        nodes.push({id, name, server_url: serverUrl, ws_url: wsUrl, builtin: false})
+        nodes.push({id, name, server_url: serverUrl, ws_url: wsUrl, builtin: false, parent})
     }
     netState.nodes = nodes
     saveWebNodes(nodes, netState.activeId)

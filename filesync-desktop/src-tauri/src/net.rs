@@ -595,12 +595,15 @@ pub fn switch_server_node(node_id: String) -> Result<NetStatus, String> {
 }
 
 /// 新增或修改节点。`id` 为空表示新增；`activate` 为 true 时保存完顺手切过去。
+/// `parent`：父节点 id（本节点是父节点的反代上游时填，供上传 planner 父链折算），
+/// None/空串 = 独立链路。
 #[tauri::command]
 pub fn save_server_node(
     id: Option<String>,
     name: String,
     server_url: String,
     ws_url: Option<String>,
+    parent: Option<String>,
     activate: Option<bool>,
     config: State<SharedSyncConfig>,
 ) -> Result<NetStatus, String> {
@@ -620,11 +623,42 @@ pub fn save_server_node(
     } else {
         name.trim().to_string()
     };
+    // 父节点归一化：空串视作无；不能是自己、必须存在、父链上不能成环
+    let parent = parent.and_then(|p| {
+        let p = p.trim().to_string();
+        (!p.is_empty()).then_some(p)
+    });
 
     // touched_active：改的是当前正在用的节点 → 地址变了就得掐断在途连接，
     // 否则 WS 会一直挂在老地址上直到它自己断开
     let (node_id, touched_active) = {
         let mut cfg = config.write();
+        if let Some(p) = parent.as_deref() {
+            if Some(p) == id.as_deref() {
+                return Err("父节点不能是自己".into());
+            }
+            if !cfg.nodes.iter().any(|n| n.id == p) {
+                return Err(format!("父节点不存在: {}", p));
+            }
+            // 沿父链从 p 往上走，能走回本节点就是环（planner 对环有保护，但配置不该留环）
+            if let Some(self_id) = id.as_deref() {
+                let mut cur = p.to_string();
+                for _ in 0..=cfg.nodes.len() {
+                    if cur == self_id {
+                        return Err("父节点会形成环".into());
+                    }
+                    match cfg
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == cur)
+                        .and_then(|n| n.parent.clone())
+                    {
+                        Some(next) => cur = next,
+                        None => break,
+                    }
+                }
+            }
+        }
         match id {
             Some(id) => {
                 let is_active = cfg.active_node_id == id;
@@ -637,6 +671,7 @@ pub fn save_server_node(
                 node.name = name;
                 node.server_url = server_url.clone();
                 node.ws_url = ws.clone();
+                node.parent = parent;
                 if is_active {
                     cfg.server_url = server_url.clone();
                     cfg.ws_url = ws.clone();
@@ -651,6 +686,7 @@ pub fn save_server_node(
                     server_url,
                     ws_url: ws,
                     builtin: false,
+                    parent,
                 });
                 (new_id, false)
             }
