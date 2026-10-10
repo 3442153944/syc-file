@@ -25,6 +25,10 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	v1.GET("/ping", HandlerPing())
 	v1.POST("/ping", HandlerPing())
 
+	// 测速：客户端多路径上传前按节点测带宽/RTT。数据即抛，零 DB/Redis 副作用。
+	v1.POST("/net/speedtest/upload", HandlerSpeedtestUpload())
+	v1.GET("/net/speedtest/download", HandlerSpeedtestDownload())
+
 	// 所有业务路由统一注册，白名单外的路由默认需要登录
 	user.RegisterUserRouter(v1, db, redisClient)
 	file.RegisterFileRouter(v1, db, redisClient, engine)
