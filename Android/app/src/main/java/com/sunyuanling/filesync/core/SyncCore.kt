@@ -1,8 +1,8 @@
-// core/FileCore.kt
-// filecore Rust 内核的 Kotlin 门面（JNI）。
+// core/SyncCore.kt
+// sync_core Rust 内核的 Kotlin 门面（JNI）。
 //
-// 底层 .so 由 Android/filecore_jni 构建（cargo-ndk，产物在 app/src/main/jniLibs/）,
-// 与服务端 file_lib 共用同一实现——叶子/树根/整文件哈希与 fc_finalize 逐字节一致，
+// 底层 .so 由 Android/sync_core_jni 构建（cargo-ndk，产物在 app/src/main/jniLibs/）,
+// 与服务端 sync_core 共用同一实现——叶子/树根/整文件哈希与 fc_finalize 逐字节一致，
 // 且 mmap+rayon 多核并行，大文件描述计算远快于纯 Java blake3。
 //
 // 可用性：.so 缺失（未跑 NDK 构建/不支持的 ABI）或加载失败时 available=false，
@@ -14,23 +14,23 @@ import com.sunyuanling.filesync.api.file.ChunkedUploader
 import com.sunyuanling.filesync.util.Blake3Util
 import java.io.File
 
-object FileCore {
+object SyncCore {
 
-    private const val TAG = "FileCore"
+    private const val TAG = "SyncCore"
     private const val HASH_SIZE = 32
 
     /** 原生库是否可用（加载成功且 ABI ≥ 3，即含 fc_describe）。 */
     val available: Boolean = try {
-        System.loadLibrary("filecore_jni")
+        System.loadLibrary("sync_core_jni")
         val v = nativeAbiVersion()
-        Log.i(TAG, "filecore 原生库已加载 (ABI v$v)")
+        Log.i(TAG, "sync_core 原生库已加载 (ABI v$v)")
         v >= 3
     } catch (t: Throwable) {
-        Log.w(TAG, "filecore 原生库不可用，回退纯 Java blake3: ${t.message}")
+        Log.w(TAG, "sync_core 原生库不可用，回退纯 Java blake3: ${t.message}")
         false
     }
 
-    // ---- JNI（实现见 Android/filecore_jni/src/lib.rs，失败返回 null）----
+    // ---- JNI（实现见 Android/sync_core_jni/src/lib.rs，失败返回 null）----
     private external fun nativeAbiVersion(): Int
     private external fun nativeHashChunk(data: ByteArray): ByteArray?
     private external fun nativeMerkleRoot(leaves: ByteArray): ByteArray?

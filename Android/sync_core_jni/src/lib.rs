@@ -1,12 +1,12 @@
-//! filecore 的 Android JNI 包装。
+//! sync_core 的 Android JNI 包装。
 //!
-//! 对应 Kotlin 侧 `com.sunyuanling.filesync.core.FileCore`（object，external 成员函数），
+//! 对应 Kotlin 侧 `com.sunyuanling.filesync.core.SyncCore`（object，external 成员函数），
 //! 因此每个 JNI 函数第二个参数是实例 JObject。所有函数：
 //! - 包 catch_unwind（panic 不得跨 JNI 展开），失败一律返回 null/负值，
 //!   Kotlin 侧收到 null 即回退纯 Java blake3 实现（正确性不受影响，只慢）；
-//! - 直接调用 filecore 的 C ABI 导出（同一实现，与服务端 fc_finalize 逐字节一致）。
+//! - 直接调用 sync_core 的 C ABI 导出（同一实现，与服务端 fc_finalize 逐字节一致）。
 //!
-//! 构建：`./build.ps1`（cargo-ndk，产物进 app/src/main/jniLibs/<abi>/libfilecore_jni.so）。
+//! 构建：`./build.ps1`（cargo-ndk，产物进 app/src/main/jniLibs/<abi>/libsync_core_jni.so）。
 
 use std::ffi::CString;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -22,16 +22,16 @@ fn jnull() -> jbyteArray {
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeAbiVersion(
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeAbiVersion(
     _env: JNIEnv,
     _this: JObject,
 ) -> jint {
-    catch_unwind(|| filecore::fc_abi_version()).unwrap_or(-1)
+    catch_unwind(|| sync_core::fc_abi_version()).unwrap_or(-1)
 }
 
 /// 计算一段数据的 blake3（32 字节）。失败返回 null。
 #[no_mangle]
-pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeHashChunk(
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeHashChunk(
     env: JNIEnv,
     _this: JObject,
     data: JByteArray,
@@ -42,7 +42,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeHashChu
             Err(_) => return jnull(),
         };
         let mut out = [0u8; HASH_SIZE];
-        if filecore::fc_hash_chunk(bytes.as_ptr(), bytes.len(), out.as_mut_ptr()) != filecore::FC_OK
+        if sync_core::fc_hash_chunk(bytes.as_ptr(), bytes.len(), out.as_mut_ptr()) != sync_core::FC_OK
         {
             return jnull();
         }
@@ -55,7 +55,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeHashChu
 
 /// 从拼接叶子（n*32 字节）构造 Merkle 树根。长度非 32 倍数或失败返回 null。
 #[no_mangle]
-pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeMerkleRoot(
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeMerkleRoot(
     env: JNIEnv,
     _this: JObject,
     leaves: JByteArray,
@@ -75,7 +75,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeMerkleR
         } else {
             bytes.as_ptr()
         };
-        if filecore::fc_merkle_root(ptr, count, out.as_mut_ptr()) != filecore::FC_OK {
+        if sync_core::fc_merkle_root(ptr, count, out.as_mut_ptr()) != sync_core::FC_OK {
             return jnull();
         }
         env.byte_array_from_slice(&out)
@@ -88,7 +88,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeMerkleR
 /// 一趟算出文件描述，打包返回 `[file_hash(32) || merkle_root(32) || leaves(n*32)]`。
 /// 失败（IO/参数/文件消失）返回 null，由 Kotlin 回退纯 Java 路径。
 #[no_mangle]
-pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeDescribeFile(
+pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeDescribeFile(
     mut env: JNIEnv,
     _this: JObject,
     path: JString,
@@ -117,7 +117,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeDescrib
             let mut leaves = vec![0u8; cap * HASH_SIZE];
             let mut root = [0u8; HASH_SIZE];
             let mut file_hash = [0u8; HASH_SIZE];
-            let n = filecore::fc_describe(
+            let n = sync_core::fc_describe(
                 c_path.as_ptr(),
                 cs,
                 leaves.as_mut_ptr(),
@@ -125,7 +125,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_FileCore_nativeDescrib
                 root.as_mut_ptr(),
                 file_hash.as_mut_ptr(),
             );
-            if n == filecore::FC_ERR_ARG as i64 {
+            if n == sync_core::FC_ERR_ARG as i64 {
                 cap *= 2; // 文件比 stat 时更大：扩容重试
                 continue;
             }

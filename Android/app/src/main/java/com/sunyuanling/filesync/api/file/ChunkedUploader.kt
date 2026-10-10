@@ -10,7 +10,7 @@
 //   （不会重算哈希；二次仍失败则原样抛出）。
 package com.sunyuanling.filesync.api.file
 
-import com.sunyuanling.filesync.core.FileCore
+import com.sunyuanling.filesync.core.SyncCore
 import com.sunyuanling.filesync.util.Blake3Util
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -60,11 +60,11 @@ object ChunkedUploader {
     )
 
     /**
-     * 计算上传描述：优先走 Rust 原生内核（FileCore/JNI，mmap+rayon 并行，
+     * 计算上传描述：优先走 Rust 原生内核（SyncCore/JNI，mmap+rayon 并行，
      * 与服务端 fc_finalize 逐字节一致）；原生不可用时回退纯 Java 单趟流式。
      */
     fun describe(file: File, chunkSize: Int = DEFAULT_CHUNK_SIZE): Description {
-        FileCore.describe(file, chunkSize)?.let { return it }
+        SyncCore.describe(file, chunkSize)?.let { return it }
         return describeJava(file, chunkSize)
     }
 

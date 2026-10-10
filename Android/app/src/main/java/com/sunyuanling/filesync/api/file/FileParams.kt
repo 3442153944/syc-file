@@ -61,7 +61,7 @@ data class DownloadParams(
 // ==================== 分片上传 ====================
 
 /**
- * 分片上传初始化描述信息。所有哈希均为 blake3 hex（与服务端 file_lib 一致）。
+ * 分片上传初始化描述信息。所有哈希均为 blake3 hex（与服务端 sync_core 一致）。
  */
 @Serializable
 data class UploadInitParams(

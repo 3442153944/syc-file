@@ -1,4 +1,4 @@
-# Build filecore_jni for Android and drop .so files into app/src/main/jniLibs/.
+# Build sync_core_jni for Android and drop .so files into app/src/main/jniLibs/.
 #
 # Prereqs (one-time):
 #   1) Android NDK (via Android Studio SDK Manager), and set ANDROID_NDK_HOME, e.g.
@@ -40,6 +40,6 @@ try {
 }
 
 Write-Host "==> packaged into $out" -ForegroundColor Green
-Get-ChildItem -Recurse $out -Filter "libfilecore_jni.so" | ForEach-Object {
+Get-ChildItem -Recurse $out -Filter "libsync_core_jni.so" | ForEach-Object {
     Write-Host ("    {0}  {1:N0} bytes" -f $_.FullName, $_.Length)
 }
