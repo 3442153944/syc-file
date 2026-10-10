@@ -16,13 +16,13 @@ import (
 	"go.uber.org/zap"
 
 	"syc-file/config"
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 )
 
 // 整文件哈希 == 对全部内容做一次 HashChunk：这是文本保存直接对内存字节算哈希的前提。
-// 与 filecore.Finalize（上传校验、同步 trunk 用的那一套）对拍，各种大小都要一致。
+// 与 synccore.Finalize（上传校验、同步 trunk 用的那一套）对拍，各种大小都要一致。
 func TestHashOfBytesEqualsFinalize(t *testing.T) {
 	dir := t.TempDir()
 	for _, n := range []int{0, 1, 100, 4096, 1 << 20, textMaxBytes} {
@@ -31,7 +31,7 @@ func TestHashOfBytesEqualsFinalize(t *testing.T) {
 		if err := os.WriteFile(p, data, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		want, _, err := filecore.Finalize(p, 4194304, uint64(n), nil, nil)
+		want, _, err := synccore.Finalize(p, 4194304, uint64(n), nil, nil)
 		if err != nil {
 			t.Fatalf("n=%d Finalize: %v", n, err)
 		}
@@ -254,8 +254,8 @@ func TestTextSaveRoundTrip(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != "v2\n" {
 		t.Errorf("磁盘内容应已更新，实际 %q", b)
 	}
-	// 返回的版本号必须与 filecore.Finalize 对磁盘文件算出的一致 —— 同步 trunk 用的就是这个值
-	want, _, err := filecore.Finalize(p, 4194304, 3, nil, nil)
+	// 返回的版本号必须与 synccore.Finalize 对磁盘文件算出的一致 —— 同步 trunk 用的就是这个值
+	want, _, err := synccore.Finalize(p, 4194304, 3, nil, nil)
 	if err != nil || res.Hash != hexStr(want) {
 		t.Errorf("返回的版本号应等于文件的 blake3：%s vs %s (%v)", res.Hash, hexStr(want), err)
 	}

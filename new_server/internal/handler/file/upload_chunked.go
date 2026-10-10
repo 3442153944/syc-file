@@ -22,7 +22,7 @@ import (
 	"syc-file/internal/model"
 	"syc-file/internal/sync"
 	"syc-file/internal/thumb"
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
@@ -117,11 +117,11 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			return
 		}
 		wantRoot, err := hex.DecodeString(req.MerkleRoot)
-		if err != nil || len(wantRoot) != filecore.HashSize {
+		if err != nil || len(wantRoot) != synccore.HashSize {
 			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "树根格式错误", "data": nil})
 			return
 		}
-		gotRoot, err := filecore.MerkleRoot(leavesBytes)
+		gotRoot, err := synccore.MerkleRoot(leavesBytes)
 		if err != nil || !bytes.Equal(gotRoot, wantRoot) {
 			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "描述信息树根不一致，请重新计算", "data": nil})
 			return
@@ -200,13 +200,13 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			}
 			// 描述对不上或临时文件已丢 → 丢弃旧会话，重新开始（客户端整份重传）
 			_ = upload_store.Global.Delete(ctx, id)
-			_ = filecore.Evict(sess.TempPath) // 先关 Rust 侧缓存句柄再删文件
+			_ = synccore.Evict(sess.TempPath) // 先关 Rust 侧缓存句柄再删文件
 			_ = os.Remove(sess.TempPath)
 		}
 
 		// 新建会话：预分配临时文件（与目标同盘，便于原子 rename）
 		tempPath := tempPathFor(fullPath, id)
-		if err := filecore.Preallocate(tempPath, uint64(req.TotalSize)); err != nil {
+		if err := synccore.Preallocate(tempPath, uint64(req.TotalSize)); err != nil {
 			logger.Logger.Error("预分配临时文件失败", zap.String("temp", tempPath), zap.Error(err))
 			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "预分配失败", "data": nil})
 			return
@@ -368,10 +368,10 @@ func tempPathFor(fullPath, id string) string {
 
 // decodeLeaves 把叶子哈希 hex 列表解码并拼成连续字节（每片 32B）。
 func decodeLeaves(hexes []string) ([]byte, error) {
-	out := make([]byte, 0, len(hexes)*filecore.HashSize)
+	out := make([]byte, 0, len(hexes)*synccore.HashSize)
 	for _, h := range hexes {
 		b, err := hex.DecodeString(h)
-		if err != nil || len(b) != filecore.HashSize {
+		if err != nil || len(b) != synccore.HashSize {
 			return nil, errors.New("invalid leaf hash")
 		}
 		out = append(out, b...)

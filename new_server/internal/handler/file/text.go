@@ -17,7 +17,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/sync"
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 )
@@ -84,10 +84,10 @@ type textSnapshot struct {
 }
 
 // hashOfBytes 整文件哈希（blake3）。内容不超过 textMaxBytes，不足一个分块，
-// 此时整文件哈希就是对全部内容做一次 HashChunk；这个等式由测试与 filecore.Finalize 对拍保证。
+// 此时整文件哈希就是对全部内容做一次 HashChunk；这个等式由测试与 synccore.Finalize 对拍保证。
 // 直接对内存里的字节算，既不用落临时文件，也避免了「读内容」和「算哈希」之间文件被改的竞态。
 func hashOfBytes(b []byte) (string, error) {
-	h, err := filecore.HashChunk(b)
+	h, err := synccore.HashChunk(b)
 	if err != nil {
 		return "", err
 	}
@@ -331,7 +331,7 @@ func writeFileAtomic(target string, data []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	if err := filecore.Move(tmp, target); err != nil {
+	if err := synccore.Move(tmp, target); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}

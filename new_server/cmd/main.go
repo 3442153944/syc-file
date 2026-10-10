@@ -180,7 +180,7 @@ func main() {
 	monitor.StartDailyArchiver()
 
 	//进程/端口明细采集：间隔见 config.monitor.sys_detail_interval_seconds（默认30s），
-	//Rust 侧 sysinfo+netstat2 采集（见 file_lib/src/sys_info.rs），存储策略同上
+	//Rust 侧 sysinfo+netstat2 采集（见 sync_core/src/sys_info.rs），存储策略同上
 	monitor.StartSysDetailRecorder()
 	monitor.StartSysDetailArchiver()
 

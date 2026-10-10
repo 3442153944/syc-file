@@ -1,11 +1,11 @@
 /*
- * filecore.h —— 文件同步上传 Rust 核心库的 C ABI 声明。
- * 供 Go 通过 cgo 静态链接 libfilecore.a 调用。
+ * sync_core.h —— 文件同步上传 Rust 核心库的 C ABI 声明。
+ * 供 Go 通过 cgo 静态链接 libsync_core.a 调用。
  *
  * 约定：所有哈希均为 32 字节 blake3；返回码见下方 FC_* 常量，负数为错误。
  */
-#ifndef FILECORE_H
-#define FILECORE_H
+#ifndef SYNC_CORE_H
+#define SYNC_CORE_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -88,4 +88,4 @@ void fc_free_string(char *s);
 }
 #endif
 
-#endif /* FILECORE_H */
+#endif /* SYNC_CORE_H */

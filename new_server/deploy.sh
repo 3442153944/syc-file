@@ -2,9 +2,9 @@
 # 后端非 Docker 部署（本机，由 systemd 的 syc-file.service 托管）：
 #   检查端口 → 构建 → 原子替换二进制 → 重启服务 → 健康检查，失败自动回滚到上一版。
 #
-# 用法：  bash deploy.sh [--build-only] [--no-filecore]
+# 用法：  bash deploy.sh [--build-only] [--no-sync_core]
 #   --build-only   只构建并校验能编译，不替换二进制、不重启服务
-#   --no-filecore  跳过 Rust 核心库（libfilecore.a）重建；file_lib 没改过时可加，省一点时间
+#   --no-sync_core  跳过 Rust 核心库（libsync_core.a）重建；sync_core 没改过时可加，省一点时间
 #
 # 说明：
 #   - 端口取自 config/config.yaml 的 server.port（默认 8991）。
@@ -61,8 +61,8 @@ fi
 
 # ── 1. 构建 ──────────────────────────────────────────────────
 if [ "$FILECORE" = 1 ]; then
-    step "构建 Rust 核心库 libfilecore.a"
-    bash file_lib/build.sh
+    step "构建 Rust 核心库 libsync_core.a"
+    bash sync_core/build.sh
 fi
 step "构建后端（go build）"
 CGO_ENABLED=1 CC=gcc go build -trimpath -o "$BIN.new" ./cmd

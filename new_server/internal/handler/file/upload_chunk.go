@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
@@ -22,7 +22,7 @@ import (
 // HandlerFuncUploadChunk 分片上传第二步：接收单个分片（乱序、可并发、可重传）。
 //
 // 传参：upload_id 与 index 走 query 或 header，分片二进制走请求 body（raw）。
-// 落盘：filecore.ChunkWrite 先用会话里该片的叶子哈希做 blake3 早校验，通过后按
+// 落盘：synccore.ChunkWrite 先用会话里该片的叶子哈希做 blake3 早校验，通过后按
 // offset = index*chunk_size 定位写；校验不过则拒绝且不置位，客户端重传该片即可。
 func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -84,8 +84,8 @@ func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 		}
 
 		// 取该片的期望叶子哈希（会话里存的是全部叶子的 hex 拼接）
-		leafHexStart := index * filecore.HashSize * 2
-		leafHexEnd := leafHexStart + filecore.HashSize*2
+		leafHexStart := index * synccore.HashSize * 2
+		leafHexEnd := leafHexStart + synccore.HashSize*2
 		if leafHexEnd > len(sess.Leaves) {
 			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "会话叶子哈希缺失", "data": nil})
 			return
@@ -97,9 +97,9 @@ func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 		}
 
 		offset := uint64(index) * uint64(sess.ChunkSize)
-		if err := filecore.ChunkWrite(sess.TempPath, offset, data, expectedLeaf); err != nil {
+		if err := synccore.ChunkWrite(sess.TempPath, offset, data, expectedLeaf); err != nil {
 			switch {
-			case errors.Is(err, filecore.ErrLeafMismatch):
+			case errors.Is(err, synccore.ErrLeafMismatch):
 				logger.Logger.Warn("分片校验失败", zap.String("upload_id", uploadID), zap.Int("index", index))
 				c.JSON(http.StatusOK, gin.H{"code": 422, "message": "分片校验失败，请重传该分片", "data": gin.H{"index": index}})
 			default:

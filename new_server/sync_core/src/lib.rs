@@ -1,4 +1,4 @@
-//! filecore：文件同步上传的 Rust 核心库（C ABI，对外无状态）。
+//! sync_core：文件同步上传的 Rust 核心库（C ABI，对外无状态）。
 //!
 //! 服务端（Go/cgo）与桌面端（Tauri/Rust）共用；后续还将接入安卓（NDK/cgo）与
 //! 鸿蒙（OHOS）。平台差异全部收敛在本文件的 cfg 分支：
@@ -30,12 +30,12 @@
 //!   服务端语义天然满足：收齐所有分片才 finalize，会话 id 绑定 total/chunk 大小。
 
 // C ABI 导出必然接收裸指针；空指针/长度均在入口显式校验，越界责任在调用方，
-// 契约随 filecore.h 一起约定。这是 FFI 库的固有形态，不逐个标 unsafe fn
+// 契约随 sync_core.h 一起约定。这是 FFI 库的固有形态，不逐个标 unsafe fn
 //（标了反而让 cbindgen/头文件失真，Go/C 调用方看不到任何差别）。
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 #[cfg(not(any(unix, windows)))]
-compile_error!("filecore 仅支持 unix 系（Linux/Android/macOS/OHOS）与 Windows 目标");
+compile_error!("sync_core 仅支持 unix 系（Linux/Android/macOS/OHOS）与 Windows 目标");
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};

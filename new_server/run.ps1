@@ -1,8 +1,8 @@
 # new_server launcher.
 #
-# This is now a cgo project (pkg/filecore statically links file_lib/lib/libfilecore.a),
+# This is now a cgo project (pkg/sync_core statically links sync_core/lib/libsync_core.a),
 # so CGO_ENABLED=1 and mingw-w64 gcc on PATH are REQUIRED. Otherwise you get:
-#   "build constraints exclude all Go files in .../pkg/filecore"
+#   "build constraints exclude all Go files in .../pkg/sync_core"
 #
 # Usage (run from the new_server dir):
 #   ./run.ps1            build and run
@@ -26,10 +26,10 @@ $env:CGO_ENABLED = "1"
 $env:CC = "gcc"
 
 # 3) Ensure the Rust core lib is built
-$lib = Join-Path $root "file_lib\lib\libfilecore.a"
+$lib = Join-Path $root "sync_core\lib\libsync_core.a"
 if (-not (Test-Path $lib)) {
-    Write-Host "==> libfilecore.a missing, building file_lib" -ForegroundColor Yellow
-    & (Join-Path $root "file_lib\build.ps1")
+    Write-Host "==> libsync_core.a missing, building sync_core" -ForegroundColor Yellow
+    & (Join-Path $root "sync_core\build.ps1")
 }
 
 # 4) Locate go (may not be on default PATH)
