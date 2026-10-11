@@ -20,15 +20,21 @@
 //! ```
 //!
 //! 设计要点：
-//! - 测序：主节点先测（tiny 微样本 → 吞吐样本），再按「父节点先于子节点」的顺序测其余
-//!   节点；新鲜（<10min）的持久化样本直接复用不重复测。
+//! - 边传边测：分片大小只由文件大小决定（pick_chunk_size_for），describe/init **不再等探测**，
+//!   首字节立即发出；探测与传输**并发**——传输期数据没派完就优先并发派探测（上限
+//!   MAX_CONCURRENT_PROBES），实测样本回来后把该节点纳入 DRR 池/调窗。这样慢节点/超时
+//!   不会阻塞其它节点测量，也不会出现"极快主链路把文件传完、其余节点还没测"的情况。
+//! - 启动窗口：主节点（init 锚点，已证明可达）没有新鲜样本时也先给 BOOTSTRAP_WINDOW 并发开传；
+//!   新鲜（<10min）的持久化样本直接复用不重复测。
 //! - 同后端校验：测速响应里的 node 名必须等于主节点，不一致的节点剔除出上传池
 //!   （用户自配节点可能指向了别的后端，多路径必须落在同一会话上）。
 //! - 父链折算：子节点有效带宽 = min(自身实测, 父节点有效带宽)，共享瓶颈在此体现。
+//! - 调度：DRR 赤字轮询，节点权重 = eff_bps^weight_exponent（默认 0.5=平方根，多链路更均衡；
+//!   1.0=严格按带宽，吞吐最优但会饿死慢链路）。
 //! - 运行时：每节点独立 AIMD 窗口（上限 MAX_PER_NODE_CONCURRENCY），超时/传输错误
 //!   减半，连续成功且延迟 <2×RTT 才加一；422 类数据错误不算拥塞。
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -70,6 +76,23 @@ pub const CHUNK_TIERS: [u64; 8] = [
 /// 能到 768MB。窗口上限 = max(1, 预算/分片)：8MB 片最多 8 路/节点，64K 片才放开到 32。
 pub const MEM_BUDGET_PER_NODE: u64 = 64 << 20;
 
+/// 自适应路径的默认分片（4MiB，与固定路径 DEFAULT_CHUNK_SIZE 对齐）。分片大小不再由带宽
+/// 决定：带宽自适应交给运行期 AIMD，这样 describe/init 无需等待探测即可立即开传；
+/// 超大文件再按 MAX_CHUNKS 逐档放大。
+pub const DEFAULT_UPLOAD_CHUNK: u64 = 4 << 20;
+
+/// 主节点在无实测样本时的启动窗口。init 已证明该节点可达，先给少量并发把首字节发出去，
+/// 实测样本回来后由 initial_window 接管，AIMD 再按实况修正（拥塞则减半）。
+pub const BOOTSTRAP_WINDOW: usize = 2;
+
+/// 传输期后台探测的并发上限。串行探测会被慢节点/超时拖住（一个 5s 超时就阻塞后面所有
+/// 节点的测量），本地回环这种极快链路往往在其它节点测完前就把传输跑完了——于是"只有一两条
+/// 链路参与"。放开并发后所有节点能在传输初期同时测完，一起并入 DRR 池。
+pub const MAX_CONCURRENT_PROBES: usize = 8;
+
+/// DRR 权重指数的默认值：按带宽平方根加权，多链路更均衡（见 PlannerInput.weight_exponent）。
+pub const DEFAULT_WEIGHT_EXPONENT: f64 = 0.5;
+
 // ---------------------------------------------------------------- 输入输出类型
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,13 +129,23 @@ pub struct PlannerInput {
     /// 窗口调整冷却（测试可设为 0）。
     #[serde(default = "default_adjust_cooldown")]
     pub adjust_cooldown_ms: u64,
+    /// DRR 权重指数：节点权重 = eff_bps^exponent，clamp 到 [0,1]。
+    /// 1.0 = 严格按带宽（吞吐最优，极快链路吃满，慢链路基本饿死）；
+    /// 0.5 = 按带宽平方根（多链路更均衡，推荐默认）；
+    /// 0.0 = 均分（最公平，牺牲总吞吐）。
+    #[serde(default = "default_weight_exponent")]
+    pub weight_exponent: f64,
 }
 
 fn default_adjust_cooldown() -> u64 {
     ADJUST_COOLDOWN_MS
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn default_weight_exponent() -> f64 {
+    DEFAULT_WEIGHT_EXPONENT
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
     /// 微样本（bytes=0 或极小体），测 RTT。
@@ -189,17 +222,11 @@ pub enum Report {
 
 // ---------------------------------------------------------------- 纯函数（可测）
 
-/// 按总带宽选分片档位：目标单流在途时长 ~3s，封顶 MAX_CHUNK；
-/// 片数超 MAX_CHUNKS 时逐档放大，档位用完（>128GiB）就放行超 cap。
-pub fn pick_chunk_size(bps_total: f64, total_size: u64) -> u64 {
-    let target = (bps_total * 3.0) as u64;
-    let mut pick = CHUNK_TIERS[0];
-    for t in CHUNK_TIERS {
-        if target >= t {
-            pick = t;
-        }
-    }
-    pick = pick.clamp(MIN_CHUNK, MAX_CHUNK);
+/// 分片大小只由文件大小决定：默认 DEFAULT_UPLOAD_CHUNK，片数超 MAX_CHUNKS 时逐档放大，
+/// 档位用完（>128GiB）就放行超 cap。不再依赖带宽——带宽自适应交给运行期 AIMD，
+/// 这样 describe/init 无需等待探测，可立即开传（见模块注释「边传边测」）。
+pub fn pick_chunk_size_for(total_size: u64) -> u64 {
+    let mut pick = DEFAULT_UPLOAD_CHUNK.clamp(MIN_CHUNK, MAX_CHUNK);
     while total_size.div_ceil(pick) > MAX_CHUNKS as u64 {
         match CHUNK_TIERS.iter().find(|&&t| t > pick) {
             Some(&next) => pick = next,
@@ -212,9 +239,9 @@ pub fn pick_chunk_size(bps_total: f64, total_size: u64) -> u64 {
 /// 每流目标吞吐：一条健康 HTTPS 流到 VPS 中继的典型可承载量（经验值）。
 /// 初始窗口 = ceil(有效带宽 / 该值)。
 ///
-/// 为什么不用教科书 BDP=带宽×RTT：分片按「3s 在途」选档后 BDP/分片 会退化成
-/// RTT/3——任何正常 RTT 下都算出 1 路，32 路上限形同虚设。管道真实填充交给
-/// 运行期 AIMD（它按实际成功/失败修正），这里只要给一个有区分度的起点。
+/// 为什么不用教科书 BDP=带宽×RTT：分片档位与带宽解耦后（见 pick_chunk_size_for），
+/// BDP/分片 只由 RTT 决定——任何正常 RTT 下都算出 1 路，32 路上限形同虚设。管道真实
+/// 填充交给运行期 AIMD（它按实际成功/失败修正），这里只要给一个有区分度的起点。
 pub const PER_STREAM_BPS: f64 = 8_000_000.0;
 
 pub fn initial_window(bps: f64, _rtt: Duration, _chunk: u64) -> usize {
@@ -225,10 +252,12 @@ pub fn initial_window(bps: f64, _rtt: Duration, _chunk: u64) -> usize {
 }
 
 /// 单片动态超时 = RTT + 2×(分片/带宽EMA)，clamp [15s, 120s]。
+/// 分片大小不再按带宽调档后，首次上传某节点时还没有吞吐 EMA：给足上限时间（TIMEOUT_MAX）
+/// 让首片自然完成，免得慢链路上的第一片被误判拥塞；EMA 建立后按 2×实际传输时间收紧。
 pub fn chunk_timeout(rtt: Duration, bps_ema: Option<f64>, chunk: u64) -> Duration {
     let transfer = match bps_ema {
         Some(b) if b > 0.0 => Duration::from_secs_f64(2.0 * chunk as f64 / b),
-        _ => Duration::from_secs(30),
+        _ => TIMEOUT_MAX,
     };
     (rtt + transfer).clamp(TIMEOUT_MIN, TIMEOUT_MAX)
 }
@@ -278,8 +307,8 @@ pub fn combine_effective(
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
-    Probing,
-    Ready,
+    /// 尚未 begin_transfer：平台可先取探测任务，队列派完返回 Wait。
+    Idle,
     Transfer,
     NeedReinit,
     Finished,
@@ -296,18 +325,20 @@ struct NodeRuntime {
     /// 探测失败（本次探测且没有新鲜持久化兜底）。
     probe_dead: bool,
     window: usize,
-    /// 内存预算钳制的窗口上限（finalize 时按分片大小算好），AIMD 加窗也不得越过。
+    /// 内存预算钳制的窗口上限（按分片大小算好），AIMD 加窗也不得越过。
     window_cap: usize,
     deficit: f64,
     streak: u32,
     last_adjust: Option<Instant>,
     /// 传输期 EMA（bytes/s），由成功分片持续更新。
     ema_bps: Option<f64>,
+    /// 父链折算后的有效带宽（DRR 权重/窗口依据）；0 = 出池（不可用）。
+    eff_bps: f64,
 }
 
 impl NodeRuntime {
     fn effective_bps(&self) -> f64 {
-        self.bps.unwrap_or(0.0)
+        self.eff_bps
     }
 }
 
@@ -322,11 +353,14 @@ pub struct Planner {
     adjust_cooldown: Duration,
     now_ms: i64,
     main_node: String,
+    /// DRR 权重指数（见 PlannerInput.weight_exponent），已 clamp [0,1]。
+    weight_exponent: f64,
     phase: Phase,
     nodes: Vec<NodeRuntime>,
     /// 探测队列：node id + kind，按测序顺序。
     probe_queue: VecDeque<(String, ProbeKind)>,
-    probing: Option<(u64, String, ProbeKind)>,
+    /// 在途探测集合（node, kind）：并发派发时按 (node,kind) 匹配回报，过期/乱序的忽略。
+    probing: HashSet<(String, ProbeKind)>,
     seq: u64,
     upload_id: String,
     /// index -> 剩余派发预算。
@@ -372,7 +406,7 @@ impl Planner {
                 None => (None, None),
             };
             if rtt.is_none() {
-                // 无新鲜样本：排两个探针任务（微样本 + 吞吐）
+                // 无新鲜样本：排两个探针任务（微样本 + 吞吐），传输期并发补测
                 probe_queue.push_back((id.clone(), ProbeKind::Tiny));
                 probe_queue.push_back((id.clone(), ProbeKind::Throughput));
             }
@@ -382,20 +416,15 @@ impl Planner {
                 bps,
                 backend_node: None,
                 probe_dead: false,
-                window: 1,
+                window: 0,
                 window_cap: MAX_PER_NODE_CONCURRENCY,
                 deficit: 0.0,
                 streak: 0,
                 last_adjust: None,
                 ema_bps: None,
+                eff_bps: 0.0,
             });
         }
-
-        let phase = if probe_queue.is_empty() {
-            Phase::Ready
-        } else {
-            Phase::Probing
-        };
 
         Ok(Planner {
             total_size: input.total_size,
@@ -403,10 +432,11 @@ impl Planner {
             adjust_cooldown: cooldown,
             now_ms: input.now_ms,
             main_node: main,
-            phase,
+            weight_exponent: input.weight_exponent.clamp(0.0, 1.0),
+            phase: Phase::Idle,
             nodes,
             probe_queue,
-            probing: None,
+            probing: HashSet::new(),
             seq: 0,
             upload_id: String::new(),
             pending: BTreeMap::new(),
@@ -417,11 +447,9 @@ impl Planner {
         })
     }
 
-    /// 选片结果：begin_transfer 之前可用（probe 完成后调用；若全部节点都有新鲜样本则立即可用）。
+    /// 选片结果：分片大小只由文件大小决定，`Planner::new` 之后即可用（无需等探测）。
     pub fn planned_chunk_size(&mut self) -> Option<u64> {
-        if self.chunk_size == 0 {
-            self.finalize_plan();
-        }
+        self.ensure_sized();
         (self.chunk_size != 0).then_some(self.chunk_size)
     }
 
@@ -430,11 +458,11 @@ impl Planner {
         self.nodes.iter().map(|n| (n.cfg.id.clone(), n.window)).collect()
     }
 
-    /// 探测+规划完成后，平台 describe/init 完成，开始传分片。
+    /// 平台 describe/init 完成，开始传分片。此时不要求探测已完成——主节点按启动窗口先开传，
+    /// 探测结果稍后经 report() 回来再并入调度。
     pub fn begin_transfer(&mut self, upload_id: &str, missing: &[u32]) {
-        if self.chunk_size == 0 {
-            self.finalize_plan();
-        }
+        self.ensure_sized();
+        self.recompute_windows();
         self.upload_id = upload_id.to_string();
         self.pending = missing
             .iter()
@@ -446,8 +474,11 @@ impl Planner {
         self.reinit_notified = false;
     }
 
-    /// 会话过期后重新接入。
+    /// 会话过期后重新接入（平台也可用它做首个会话接入，与 begin_transfer 同效：
+    /// 会在需要时按当前样本/bootstrap 重算窗口）。
     pub fn resume(&mut self, upload_id: &str, missing: &[u32]) {
+        self.ensure_sized();
+        self.recompute_windows();
         self.upload_id = upload_id.to_string();
         self.pending = missing.iter().map(|&i| (i, CHUNK_ATTEMPTS)).collect();
         self.dispatch_queue = missing.iter().copied().collect();
@@ -458,32 +489,53 @@ impl Planner {
 
     pub fn next_task(&mut self) -> Task {
         match self.phase {
-            Phase::Finished => match &self.fail_reason {
-                Some(r) => Task::Failed { reason: r.clone() },
-                None => Task::Done,
-            },
-            Phase::Probing => self.next_probe_task(),
-            Phase::Ready => {
-                self.finalize_plan();
-                Task::Wait
+            Phase::Finished => {
+                return match &self.fail_reason {
+                    Some(r) => Task::Failed { reason: r.clone() },
+                    None => Task::Done,
+                };
             }
             Phase::NeedReinit => {
                 if !self.reinit_notified {
                     self.reinit_notified = true;
-                    Task::Reinit
-                } else {
-                    Task::Wait
+                    return Task::Reinit;
                 }
+                // 已通知过、等平台 resume：其间仍可把剩余探测派出去
+                if let Some(t) = self.take_probe_task() {
+                    return Task::Probe(t);
+                }
+                return Task::Wait;
             }
-            Phase::Transfer => self.next_chunk_task(),
+            _ => {}
         }
+        self.ensure_sized();
+
+        // 传输期：数据没传完就先派探测（一次一个），探测在途时空出来的窗口交给分片——
+        // 这样多线路测速在传输一开始就并发跑起来（不阻塞首字节，也不被分派饿死），
+        // 探测结果回来即并入 DRR 池。数据一旦派完就收尾，不再补派探测。
+        if self.phase == Phase::Transfer {
+            if self.pending.is_empty() && self.inflight.is_empty() {
+                self.phase = Phase::Finished;
+                return Task::Done;
+            }
+            if let Some(t) = self.take_probe_task() {
+                return Task::Probe(t);
+            }
+            if let Some(t) = self.take_chunk_task() {
+                return Task::Chunk(t);
+            }
+            return Task::Wait;
+        }
+        if let Some(t) = self.take_probe_task() {
+            return Task::Probe(t);
+        }
+        Task::Wait
     }
 
     /// 平台循环的调试/日志辅助：当前所处阶段名。
     pub fn phase_name(&self) -> &'static str {
         match self.phase {
-            Phase::Probing => "probing",
-            Phase::Ready => "ready",
+            Phase::Idle => "idle",
             Phase::Transfer => "transfer",
             Phase::NeedReinit => "need_reinit",
             Phase::Finished => "finished",
@@ -532,16 +584,16 @@ impl Planner {
 
     // ---- 探测 ----
 
-    fn next_probe_task(&mut self) -> Task {
-        if self.probing.is_some() {
-            // 上一轮探测还没回结果：等 report 驱动，绝不重复派发同一探测
-            return Task::Wait;
+    fn take_probe_task(&mut self) -> Option<ProbeTask> {
+        // 并发派发但有上限：慢节点/超时不再阻塞其它节点的测量（见 MAX_CONCURRENT_PROBES）
+        if self.probing.len() >= MAX_CONCURRENT_PROBES {
+            return None;
         }
         match self.probe_queue.pop_front() {
             Some((node, kind)) => {
                 self.seq += 1;
-                self.probing = Some((self.seq, node.clone(), kind));
-                Task::Probe(ProbeTask {
+                self.probing.insert((node.clone(), kind));
+                Some(ProbeTask {
                     seq: self.seq,
                     node: node.clone(),
                     url: self.node_url(&node),
@@ -549,10 +601,7 @@ impl Planner {
                     bytes: probe_bytes(kind),
                 })
             }
-            None => {
-                self.finalize_plan();
-                Task::Wait
-            }
+            None => None,
         }
     }
 
@@ -564,45 +613,39 @@ impl Planner {
         elapsed_ms: u64,
         backend_node: &str,
     ) {
-        if let Some((_, pn, pk)) = &self.probing {
-            if pn != node || *pk != kind {
-                return; // 乱序/过期探测结果，忽略
-            }
-        } else {
-            return;
+        if !self.probing.remove(&(node.to_string(), kind)) {
+            return; // 乱序/过期探测结果，忽略
         }
-        self.probing = None;
-        let n = match self.node_mut(node) {
-            Some(n) => n,
-            None => return,
-        };
-        n.backend_node = Some(backend_node.to_string());
-        if backend_node.is_empty() {
-            n.probe_dead = true;
-            return;
-        }
-        let elapsed = Duration::from_millis(elapsed_ms.max(1));
-        match kind {
-            ProbeKind::Tiny => {
-                n.rtt = Some(elapsed);
-            }
-            ProbeKind::Throughput => {
-                if bytes > 0 {
-                    n.bps = Some(bytes as f64 / elapsed.as_secs_f64());
+        {
+            let n = match self.node_mut(node) {
+                Some(n) => n,
+                None => return,
+            };
+            n.backend_node = Some(backend_node.to_string());
+            if backend_node.is_empty() {
+                n.probe_dead = true;
+            } else {
+                let elapsed = Duration::from_millis(elapsed_ms.max(1));
+                match kind {
+                    ProbeKind::Tiny => {
+                        n.rtt = Some(elapsed);
+                    }
+                    ProbeKind::Throughput => {
+                        if bytes > 0 {
+                            n.bps = Some(bytes as f64 / elapsed.as_secs_f64());
+                        }
+                    }
                 }
             }
         }
+        // 样本变化即时并入调度：传输期新测出的节点借此进入 DRR 池、窗口按实测调整
+        self.recompute_windows();
     }
 
     fn on_probe_failed(&mut self, node: &str, kind: ProbeKind) {
-        if let Some((_, pn, pk)) = &self.probing {
-            if pn != node || *pk != kind {
-                return;
-            }
-        } else {
+        if !self.probing.remove(&(node.to_string(), kind)) {
             return;
         }
-        self.probing = None;
         // tiny 失败说明节点不可达：后续探测也没意义，清空队列里它的任务
         if kind == ProbeKind::Tiny {
             self.probe_queue.retain(|(id, _)| id != node);
@@ -610,79 +653,88 @@ impl Planner {
                 n.probe_dead = true;
             }
         }
+        self.recompute_windows();
     }
 
-    fn finalize_plan(&mut self) {
-        if self.chunk_size != 0 || self.phase == Phase::Finished {
-            return;
+    /// 分片大小只由文件大小决定，`new` 之后即可算（幂等）。
+    fn ensure_sized(&mut self) {
+        if self.chunk_size == 0 {
+            self.chunk_size = pick_chunk_size_for(self.total_size);
         }
+    }
+
+    /// 依据当前已知样本重算每节点的有效带宽/窗口/窗口上限，并做出池判定。
+    /// `begin_transfer` 调一次（此刻可能只有持久化样本甚至没有），此后每次探测回报再调，
+    /// 让后台补测出的线路逐步并入。已有窗口只增不减（保留 AIMD 已经涨上去的成果），
+    /// 除非该节点被判出池（同后端不符/探测死亡）。
+    fn recompute_windows(&mut self) {
+        self.ensure_sized();
+        let chunk = self.chunk_size;
+        let window_cap = ((MEM_BUDGET_PER_NODE / chunk).max(1) as usize)
+            .clamp(1, MAX_PER_NODE_CONCURRENCY);
+        let main_id = self.main_id();
         let main_backend = self
             .nodes
             .iter()
-            .find(|n| n.cfg.id == self.main_id())
+            .find(|n| n.cfg.id == main_id)
             .and_then(|n| n.backend_node.clone())
             .unwrap_or_default();
 
-        // 同后端校验：主节点有 backend_node 时，不一致的剔除
+        // 出池判定：探测死亡（且无新鲜样本）或同后端校验不符
         for n in &mut self.nodes {
-            if n.probe_dead && n.rtt.is_none() {
+            n.window_cap = window_cap;
+            n.eff_bps = 0.0;
+            let dead = n.probe_dead && n.rtt.is_none();
+            let mismatch = n
+                .backend_node
+                .as_deref()
+                .map(|b| !main_backend.is_empty() && b != main_backend)
+                .unwrap_or(false);
+            if dead || mismatch {
                 n.bps = None;
-                continue;
-            }
-            if let Some(b) = &n.backend_node {
-                if !main_backend.is_empty() && b != &main_backend {
-                    n.bps = None; // 指向了别的后端，出池
-                }
+                n.window = 0;
             }
         }
 
-        let cfgs: Vec<PlannerNodeConfig> =
-            self.nodes.iter().map(|n| n.cfg.clone()).collect();
+        let cfgs: Vec<PlannerNodeConfig> = self.nodes.iter().map(|n| n.cfg.clone()).collect();
         let measured: HashMap<String, f64> = self
             .nodes
             .iter()
             .filter(|n| n.rtt.is_some())
-            .map(|n| (n.cfg.id.clone(), n.effective_bps()))
+            .map(|n| (n.cfg.id.clone(), n.bps.unwrap_or(0.0)))
             .collect();
         let eff = combine_effective(&cfgs, &measured);
 
-        let total: f64 = eff.values().sum();
-        if total <= 0.0 {
-            self.phase = Phase::Finished;
-            self.fail_reason = Some("没有可用路径（全部节点测速失败）".into());
-            return;
-        }
-
-        self.chunk_size = pick_chunk_size(total, self.total_size);
-        let window_cap = ((MEM_BUDGET_PER_NODE / self.chunk_size).max(1) as usize)
-            .clamp(1, MAX_PER_NODE_CONCURRENCY);
         for n in &mut self.nodes {
-            match (eff.get(&n.cfg.id), n.rtt) {
-                (Some(&e), Some(rtt)) if e > 0.0 => {
-                    n.window_cap = window_cap;
-                    n.window = initial_window(e, rtt, self.chunk_size).min(window_cap);
-                    n.bps = Some(e);
-                }
-                _ => {
-                    n.window = 0; // 出池
+            if let (Some(&e), Some(rtt)) = (eff.get(&n.cfg.id), n.rtt) {
+                if e > 0.0 {
+                    n.eff_bps = e;
+                    let w = initial_window(e, rtt, chunk).min(window_cap);
+                    if w > n.window {
+                        n.window = w;
+                    }
                 }
             }
-            n.deficit = 0.0;
         }
-        self.phase = Phase::Ready;
+
+        // 主节点是 init 锚点（已证明可达）：没有任何实测先验时也给启动窗口，
+        // 保证首字节立即能发；全池都派不出分片时兜底给任意一个已配置节点。
+        if !self.nodes.iter().any(|n| n.window > 0) {
+            if let Some(n) = self.nodes.iter_mut().find(|n| n.cfg.id == main_id) {
+                n.window = BOOTSTRAP_WINDOW.min(window_cap);
+            } else if let Some(n) = self.nodes.first_mut() {
+                n.window = BOOTSTRAP_WINDOW.min(window_cap);
+            }
+        }
     }
 
     // ---- 传输 ----
 
-    fn next_chunk_task(&mut self) -> Task {
-        if self.pending.is_empty() && self.inflight.is_empty() {
-            self.phase = Phase::Finished;
-            return Task::Done;
-        }
+    fn take_chunk_task(&mut self) -> Option<ChunkTask> {
         // 从派发队列取还有预算的片
         let index = loop {
             match self.dispatch_queue.pop_front() {
-                None => return Task::Wait,
+                None => return None,
                 Some(i) => {
                     if self.pending.contains_key(&i) {
                         break i;
@@ -691,8 +743,11 @@ impl Planner {
             }
         };
         // DRR（赤字轮询）：deficit 最大且有空窗的节点胜出；
-        // 分派后 deficit += 自身权重 - 总权重（允许为负），带宽占比大的节点自然多拿。
-        let weight = |n: &NodeRuntime| n.effective_bps().max(1.0);
+        // 分派后 deficit += 自身权重 - 总权重（允许为负），权重占比大的节点自然多拿。
+        // 权重 = eff_bps^exponent：exponent=1 严格按带宽；0.5 平方根（默认，多链路更均衡）；
+        // 0 均分。慢节点不会因快节点极快而被完全饿死。
+        let exp = self.weight_exponent;
+        let weight = |n: &NodeRuntime| n.effective_bps().max(1.0).powf(exp);
         let total_weight: f64 = self.nodes.iter().filter(|n| n.window > 0).map(weight).sum();
         let mut best: Option<usize> = None;
         let mut best_deficit = f64::NEG_INFINITY;
@@ -717,7 +772,7 @@ impl Planner {
             Some(i) => i,
             None => {
                 self.dispatch_queue.push_front(index);
-                return Task::Wait; // 全部窗口占满
+                return None; // 全部窗口占满/无可用节点
             }
         };
         self.seq += 1;
@@ -735,7 +790,7 @@ impl Planner {
                 index,
             },
         );
-        Task::Chunk(ChunkTask {
+        Some(ChunkTask {
             seq,
             node: node.cfg.id.clone(),
             url: node.cfg.url.clone(),
@@ -819,7 +874,7 @@ impl Planner {
                 n.ema_bps,
             )
         };
-        if streak < STREAK_TO_INCREASE || window >= window_cap {
+        if streak < STREAK_TO_INCREASE || window == 0 || window >= window_cap {
             return;
         }
         let cooldown_ok = last_adjust
@@ -1049,6 +1104,7 @@ mod tests {
             nodes,
             state: PersistedState::default(),
             adjust_cooldown_ms: 0,
+            weight_exponent: DEFAULT_WEIGHT_EXPONENT,
         }
     }
 
@@ -1098,14 +1154,16 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_chunk_size_tiers() {
-        assert_eq!(pick_chunk_size(30e3, 500 << 20), MIN_CHUNK); // 极慢网 → 最低档
-        assert_eq!(pick_chunk_size(1e6, 500 << 20), 2 << 20); // 1MB/s×3s=3MB → 2MB档
-        assert_eq!(pick_chunk_size(10e6, 500 << 20), 8 << 20); // 30MB → 封顶
-        assert_eq!(pick_chunk_size(3e6, 500 << 20), 8 << 20); // 9MB → 8MB档
-        // 片数封顶：2GiB 文件在最低档会超 16384 片 → 自动抬档直到放得下
-        let c = pick_chunk_size(1e6, 2 << 30);
-        assert!((2u64 << 30) / c <= MAX_CHUNKS as u64 || c == MAX_CHUNK);
+    fn test_pick_chunk_size_by_size() {
+        // 默认 4MiB，与文件大小无关（带宽交给运行期 AIMD）
+        assert_eq!(pick_chunk_size_for(500 << 20), DEFAULT_UPLOAD_CHUNK);
+        assert_eq!(pick_chunk_size_for(1 << 20), DEFAULT_UPLOAD_CHUNK);
+        assert_eq!(pick_chunk_size_for(0), DEFAULT_UPLOAD_CHUNK);
+        // 片数封顶：100GiB 在默认档会超 MAX_CHUNKS → 自动抬档直到放得下
+        let total = 100u64 << 30;
+        let c = pick_chunk_size_for(total);
+        assert!(c > DEFAULT_UPLOAD_CHUNK);
+        assert!(total.div_ceil(c) <= MAX_CHUNKS as u64 || c == MAX_CHUNK);
     }
 
     #[test]
@@ -1122,13 +1180,13 @@ mod tests {
 
     #[test]
     fn test_mem_budget_caps_window() {
-        // 超大带宽探针（2MiB/5ms ≈ 420MB/s）→ 选片封顶 8MB，窗口需求 53 路
-        // → 必须被内存预算钳到 64MB/8MB=8，而不是 MAX_PER_NODE_CONCURRENCY
+        // 超大带宽探针（2MiB/5ms ≈ 419MB/s）→ 初始窗口需求巨大，
+        // 必须被内存预算钳到 64MB/4MB=16，而不是 MAX_PER_NODE_CONCURRENCY(32)
         let nodes = vec![node("main", None)];
         let p = Planner::new(input(nodes, "main", 1_000_000)).unwrap();
         let mut p = run_probes_with(p, &[], 5);
         let chunk = p.planned_chunk_size().unwrap();
-        assert_eq!(chunk, 8 << 20);
+        assert_eq!(chunk, DEFAULT_UPLOAD_CHUNK);
         let w = p.windows()[0].1;
         assert_eq!(w, (MEM_BUDGET_PER_NODE / chunk) as usize);
         assert!(w < MAX_PER_NODE_CONCURRENCY);
@@ -1146,6 +1204,11 @@ mod tests {
         );
         let t = chunk_timeout(Duration::from_millis(100), Some(400e3), 4 << 20);
         assert!(t > TIMEOUT_MIN && t < TIMEOUT_MAX);
+        // 无吞吐 EMA（首片）：给足上限时间，慢链路首片不被误判拥塞
+        assert_eq!(
+            chunk_timeout(Duration::from_millis(20), None, DEFAULT_UPLOAD_CHUNK),
+            TIMEOUT_MAX
+        );
     }
 
     #[test]
@@ -1226,6 +1289,122 @@ mod tests {
     }
 
     #[test]
+    fn test_probes_run_during_transfer() {
+        // 边传边测：不再需要先跑探测，begin_transfer 后主节点按启动窗口立即发片；
+        // 窗口占满时顺手把后台探测派出去。
+        let nodes = vec![node("main", None), node("hk", Some("main"))];
+        let mut p = Planner::new(input(nodes, "main", 1_000_000)).unwrap();
+        let chunk = p.planned_chunk_size().unwrap();
+        assert_eq!(chunk, DEFAULT_UPLOAD_CHUNK);
+
+        p.begin_transfer("u1", &(0..8).collect::<Vec<_>>());
+        let mut pending: Vec<ChunkTask> = Vec::new();
+        let mut chunks = 0;
+        let mut probes = 0;
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 1000, "死循环");
+            match p.next_task() {
+                Task::Chunk(t) => {
+                    chunks += 1;
+                    pending.push(t); // 先攒着不回报，模拟在途以逼出窗口占满
+                    if pending.len() >= 4 {
+                        let t = pending.remove(0);
+                        p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+                    }
+                }
+                Task::Probe(t) => {
+                    probes += 1;
+                    let (elapsed, bytes) = match t.kind {
+                        ProbeKind::Tiny => (20, 0u64),
+                        ProbeKind::Throughput => (1600, PROBE_THROUGHPUT_BYTES),
+                    };
+                    p.report(Report::ProbeOk {
+                        node: t.node,
+                        kind: t.kind,
+                        bytes,
+                        elapsed_ms: elapsed,
+                        backend_node: "backend-1".into(),
+                    });
+                }
+                Task::Done => break,
+                Task::Failed { reason } => panic!("不应失败: {}", reason),
+                Task::Reinit => panic!("不应重 init"),
+                Task::Wait => {
+                    let t = pending
+                        .first()
+                        .cloned()
+                        .expect("Wait 时既无任务又无在途分片");
+                    pending.remove(0);
+                    p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+                }
+            }
+        }
+        assert_eq!(chunks, 8);
+        assert!(probes >= 1, "传输期应把后台探测也派出去");
+    }
+
+    #[test]
+    fn test_drr_weight_exponent_balances_links() {
+        // 两节点带宽悬殊（main ≈21MB/s、hk ≈0.5MB/s），验证 weight_exponent 对分片分配的影响。
+        let run = |exp: f64| -> (usize, usize) {
+            let nodes = vec![node("main", None), node("hk", Some("main"))];
+            let mut inp = input(nodes, "main", 1_000_000);
+            inp.weight_exponent = exp;
+            let mut p = Planner::new(inp).unwrap();
+            loop {
+                match p.next_task() {
+                    Task::Probe(t) => {
+                        let (elapsed, bytes) = if t.kind == ProbeKind::Throughput {
+                            (if t.node == "main" { 100 } else { 4000 }, PROBE_THROUGHPUT_BYTES)
+                        } else {
+                            (20, 0u64)
+                        };
+                        p.report(Report::ProbeOk {
+                            node: t.node,
+                            kind: t.kind,
+                            bytes,
+                            elapsed_ms: elapsed,
+                            backend_node: "backend-1".into(),
+                        });
+                    }
+                    Task::Wait => break,
+                    other => panic!("探测阶段意外: {:?}", other),
+                }
+            }
+            p.begin_transfer("u1", &(0..60).collect::<Vec<_>>());
+            let mut counts: HashMap<String, usize> = HashMap::new();
+            let mut guard = 0;
+            loop {
+                guard += 1;
+                assert!(guard < 100000, "死循环");
+                match p.next_task() {
+                    Task::Chunk(t) => {
+                        *counts.entry(t.node.clone()).or_default() += 1;
+                        p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 50 });
+                    }
+                    Task::Done => break,
+                    Task::Failed { reason } => panic!("不应失败: {}", reason),
+                    Task::Reinit => panic!("不应 reinit"),
+                    Task::Probe(t) => panic!("探测已在 begin 前派完: {:?}", t),
+                    Task::Wait => panic!("每派即报不应 Wait"),
+                }
+            }
+            (
+                counts.get("main").copied().unwrap_or(0),
+                counts.get("hk").copied().unwrap_or(0),
+            )
+        };
+        let (_, h0) = run(0.0);
+        let (_, h1) = run(1.0);
+        // exponent=0（均分）：慢链路也拿到接近一半
+        assert!(h0 >= 24, "exponent=0 慢链路应接近均分: hk={}", h0);
+        // exponent=1（严格按带宽）：慢链路只拿到零头
+        assert!(h1 <= 8, "exponent=1 慢链路应被压缩: hk={}", h1);
+    }
+
+    #[test]
     fn test_congestion_halves_window_and_requeues() {
         // 大吞吐探针（2MiB/100ms ≈ 21MB/s → 初始窗口 ≥2）才能测出减半
         let nodes = vec![node("main", None)];
@@ -1284,21 +1463,22 @@ mod tests {
     }
 
     #[test]
-    fn test_all_probe_failed() {
+    fn test_all_probe_failed_bootstraps_main() {
+        // 探测全失败也不再直接判死：主节点（init 锚点，已证明可达）先给启动窗口，
+        // 靠运行期 AIMD/重试兜底；其余测不出/不符的节点出池。
         let nodes = vec![node("main", None), node("hk", Some("main"))];
         let p = Planner::new(input(nodes, "main", 1_000_000)).unwrap();
-        let mut p = run_probes(p, &["main", "hk"]);
-        match p.next_task() {
-            Task::Failed { reason } => assert!(reason.contains("没有可用路径")),
-            other => panic!("应失败: {:?}", other),
-        }
+        let p = run_probes(p, &["main", "hk"]);
+        let w = |id: &str| p.windows().into_iter().find(|(x, _)| x == id).unwrap().1;
+        assert!(w("main") >= 1, "主节点应 bootstrap 出启动窗口");
+        assert_eq!(w("hk"), 0, "探测失败的子节点应出池");
     }
 
     #[test]
     fn test_backend_mismatch_excluded() {
         let nodes = vec![node("main", None), node("hk", Some("main"))];
         let p = Planner::new(input(nodes, "main", 1_000_000)).unwrap();
-        let mut p = run_probes(p, &[]);
+        let p = run_probes(p, &[]);
         // 人为制造不一致：把 hk 的吞吐结果换成另一个 backend_node
         // （run_probes 已跑完，直接重新构造场景：main 有新鲜状态、hk 现场探测）
         let mut inp = input(vec![node("main", None)], "main", 2_000_000);
