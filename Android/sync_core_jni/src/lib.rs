@@ -236,8 +236,8 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlan
     r.unwrap_or(Err(-1)).unwrap_or(-1)
 }
 
-/// 接入/重接会话：首个 upload 与 404 后的重新 init 都用它（与 begin_transfer 同效，
-/// 选档在探测阶段已 finalize）。missing_json = [u32..]。返回 0 成功。
+/// 接入/重接会话：首个 upload 与 404 后的重新 init 都用它（与 begin_transfer 同效：
+/// 按当前样本/bootstrap 重算窗口）。missing_json = [u32..]。返回 0 成功。
 #[no_mangle]
 pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerResume(
     mut env: JNIEnv,
@@ -257,7 +257,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlan
     r.unwrap_or(Err(-1)).unwrap_or(-1)
 }
 
-/// 探测选档完成后的分片大小（platform describe 要用）；0 = 未就绪/无效句柄。
+/// 分片大小（按文件大小定档，platform describe 要用）；0 = 无效句柄。
 #[no_mangle]
 pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerChunkSize(
     _env: JNIEnv,

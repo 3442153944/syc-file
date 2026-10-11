@@ -2,12 +2,13 @@
 // 分片上传编排：算描述信息（叶子/树根/整文件哈希）→ init →（秒传则完成）→ 乱序并发补传缺失分片 → complete。
 //
 // 两条路径：
-// - 自适应（默认，chunkSize=null）：先跑 sync_core upload_planner 的探测循环（每节点微样本
-//   测 RTT + 吞吐样本测带宽，10min 内有新鲜持久化样本则跳过），按总带宽选分片档位；传输期由
-//   planner 做多路径调度（父链折算共享瓶颈、per-node AIMD 窗口、动态超时、重排重试
-//   CHUNK_ATTEMPTS=3 全部由 planner 负责，本端不做分片级内部重试）。Chunk 任务带明确
-//   node url，必须打到该 URL（多路径必须落在同一会话上，由 planner 做同后端校验）。
-// - 固定覆盖（chunkSize 显式值）：跳过探测，init/chunk 全走激活节点的旧单路径行为，可预期。
+// - 自适应（默认，chunkSize=null）：分片大小只由文件大小决定，describe→init 立即开始（不等探测，
+//   首字节即时发出）；传输期由 planner 做多路径调度（父链折算共享瓶颈、per-node AIMD 窗口、动态
+//   超时、重排重试 CHUNK_ATTEMPTS=3 全部由 planner 负责，本端不做分片级内部重试）。后台探测以
+//   「闲时补测」方式与传输并发：planner 只在派不出分片时顺手给探测，用富余带宽补测其它线路
+//   （10min 内有新鲜持久化样本则跳过）。Chunk 任务带明确 node url，必须打到该 URL（多路径必须
+//   落在同一会话上，由 planner 做同后端校验）。
+// - 固定覆盖（chunkSize 显式值）：跳过 planner，init/chunk 全走激活节点的旧单路径行为，可预期。
 //
 // 设计要点：
 // - 进度：字节级，基于已成功分片累计字节数回调；init 阶段先置「已落盘分片」估算基线。
@@ -68,7 +69,7 @@ object ChunkedUploader {
 
     private const val TAG = "ChunkedUploader"
 
-    /** 固定路径的默认分片 4MiB（自适应路径由 planner 探测选档）。 */
+    /** 固定路径的默认分片 4MiB（自适应路径按文件大小定档）。 */
     const val DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024
 
     /** 固定路径的默认并发分片数（自适应路径用 planner 的 per-node AIMD 窗口）。 */
@@ -84,7 +85,7 @@ object ChunkedUploader {
     private const val PLANNER_ADJUST_COOLDOWN_MS = 2_000L
 
     data class UploadOptions(
-        /** 分片大小：null=自适应（planner 探测选档 + 多路径调度，默认）；
+        /** 分片大小：null=自适应（planner 按大小定档 + 多路径调度 + 传输期后台探测，默认）；
          *  显式值=固定分片，走激活节点的旧单路径行为。 */
         val chunkSize: Int? = null,
         /** 并发覆盖：null=planner 的 per-node AIMD 窗口；显式值=固定路径的 Semaphore 并发数。 */
@@ -169,7 +170,7 @@ object ChunkedUploader {
                 onProgress(0, desc.totalSize)
                 runFixedWithRetry(desc, file, remoteDir, options, onProgress)
             } else {
-                // 自适应路径（默认）：planner 探测选档 + 多路径调度
+                // 自适应路径（默认）：按大小定档 + 多路径调度（后台探测并发补测）
                 runPlanned(file, remoteDir, options, onProgress)
             }
             Result.success(data)
@@ -293,7 +294,7 @@ object ChunkedUploader {
     private val plannerJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     /**
-     * 自适应路径：planner 探测选档 → describe（用选出的档位）→ init → 多路径传输 → complete。
+     * 自适应路径：按大小定档（不等探测）→ describe → init → 多路传输（后台探测并发）→ complete。
      * 原生 planner 不可用时退回固定分片单路径，保证能传。
      */
     private suspend fun runPlanned(
@@ -374,7 +375,7 @@ object ChunkedUploader {
         }.toString()
     }
 
-    /** 探测 → 选档 → describe → init → 传输。planner 句柄由调用方负责释放。 */
+    /** 按大小定档 → describe → init → 传输（后台探测并发）。planner 句柄由调用方负责释放。 */
     private suspend fun CoroutineScope.runPlannerLoop(
         handle: Long,
         pool: List<PlannerNode>,
@@ -383,29 +384,12 @@ object ChunkedUploader {
         options: UploadOptions,
         onProgress: (Long, Long) -> Unit
     ): UploadCompleteData {
-        // ── 探测阶段：planner 一次只派一个探测，inline 执行回结果后再拿下一个 ──
-        // 聚合每个节点的 rtt/bps 样本，finalize 后统一打一行探测日志。
-        val probeRtt = HashMap<String, Long>()
-        val probeBps = HashMap<String, Double>()
-        while (true) {
-            when (val task = nextTask(handle)) {
-                is PlannerTask.Probe -> {
-                    val (reportJson, rtt, bps) = runProbe(task)
-                    rtt?.let { probeRtt[task.node] = it }
-                    bps?.let { probeBps[task.node] = it }
-                    reportOrThrow(handle, reportJson)
-                }
-                // 探测 inline 执行，不会有未决探测：Wait = 队列探完、规划完成
-                PlannerTask.Wait -> break
-                is PlannerTask.Failed -> throw Exception(task.reason)
-                else -> throw Exception("上传规划异常任务: $task")
-            }
-        }
+        // 分片大小只由文件大小决定，不再等探测：describe/init 立即开始，首字节即时发出。
+        // 探测改为传输期后台补测（见 runTransfer），样本回来后经 report 并入调度。
         val chunkSize = SyncPlanner.chunkSize(handle)
-        if (chunkSize <= 0L) throw Exception("上传规划失败：没有可用路径（全部节点测速失败）")
-        logPlan(handle, pool, probeRtt, probeBps, chunkSize)
+        if (chunkSize <= 0L) throw Exception("上传规划失败：无法确定分片大小")
 
-        // describe 依赖分片档位，探测选档完成后再算哈希（一趟顺序读，叶子+树根+整文件）
+        // describe 与文件大小档位对应（一趟顺序读，叶子+树根+整文件）
         val desc = describe(file, chunkSize.toInt())
         onProgress(0, desc.totalSize)
 
@@ -424,12 +408,13 @@ object ChunkedUploader {
             )
         }
 
-        return runTransfer(handle, desc, init, file, remoteDir, options, onProgress)
+        return runTransfer(handle, pool, desc, init, file, remoteDir, options, onProgress)
     }
 
-    /** 传输阶段：每拿到 Chunk 任务就 async 发送，结果经 Channel 喂回循环；Wait 挂在 Channel 上。 */
+    /** 传输阶段：每拿到 Chunk/Probe 任务就 async 发送，结果经 Channel 喂回循环；Wait 挂 Channel。 */
     private suspend fun CoroutineScope.runTransfer(
         handle: Long,
+        pool: List<PlannerNode>,
         desc: Description,
         init: UploadInitData,
         file: File,
@@ -442,12 +427,15 @@ object ChunkedUploader {
         val bytesSent = AtomicLong((desc.chunkCount - missing.size).toLong() * desc.chunkSize)
         onProgress(minOf(bytesSent.get(), desc.totalSize), desc.totalSize)
 
-        // 首个会话接入：begin_transfer 与 resume 同效（选档已在探测后 finalize），统一走 resume
+        // 首个会话接入：begin_transfer 与 resume 同效（启动窗口已在 begin 时按样本/bootstrap 算好），统一走 resume
         resumeOrThrow(handle, init.uploadId, missing)
 
         val channel = Channel<ChunkOutcome>(capacity = 64)
         var uploadId = init.uploadId
         var winSnapshot = SyncPlanner.windows(handle)
+        // 传输期后台探测的样本聚合，结束时统一打一行规划日志
+        val probeRtt = HashMap<String, Long>()
+        val probeBps = HashMap<String, Double>()
         while (true) {
             when (val task = nextTask(handle)) {
                 is PlannerTask.Chunk -> {
@@ -464,22 +452,44 @@ object ChunkedUploader {
                         channel.send(outcome)
                     }
                 }
+                // 边传边测：planner 只在派不出分片时顺手给探测，用富余带宽补测其它线路
+                is PlannerTask.Probe -> {
+                    val t = task
+                    launch {
+                        // 只把 Report 送进 channel；样本聚合统一在下面的消费侧做（单协程，避免并发写 Map）
+                        val (reportJson, _, _) = runProbe(t)
+                        channel.send(ChunkOutcome.Report(reportJson))
+                    }
+                }
                 PlannerTask.Wait -> {
-                    // 全部窗口占满/队列派空：等在途分片的回报；停滞保护防挂死
+                    // 全部窗口占满/队列派空：等在途分片/探测的回报；停滞保护防挂死
                     val outcome = withTimeoutOrNull(STALL_TIMEOUT_MS) { channel.receive() }
                         ?: throw Exception("上传调度停滞：在途分片长时间无响应")
                     when (outcome) {
                         is ChunkOutcome.Fatal -> throw Exception(outcome.message)
                         is ChunkOutcome.Report -> {
                             val type = outcome.json["type"]?.jsonPrimitive?.content ?: "unknown"
-                            if (type == "chunk_ok") {
-                                val bytes = outcome.json["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
-                                val now = minOf(bytesSent.addAndGet(bytes), desc.totalSize)
-                                onProgress(now, desc.totalSize)
+                            when (type) {
+                                "chunk_ok" -> {
+                                    val bytes = outcome.json["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                                    val now = minOf(bytesSent.addAndGet(bytes), desc.totalSize)
+                                    onProgress(now, desc.totalSize)
+                                }
+                                "probe_ok" -> {
+                                    val node = outcome.json["node"]?.jsonPrimitive?.content
+                                    val elapsed = outcome.json["elapsed_ms"]?.jsonPrimitive?.longOrNull
+                                    val bytes = outcome.json["bytes"]?.jsonPrimitive?.longOrNull ?: 0L
+                                    if (node != null && elapsed != null) {
+                                        when (outcome.json["kind"]?.jsonPrimitive?.content) {
+                                            "tiny" -> probeRtt[node] = elapsed
+                                            "throughput" ->
+                                                if (elapsed > 0) probeBps[node] = bytes.toDouble() / (elapsed / 1000.0)
+                                        }
+                                    }
+                                }
                             }
                             reportOrThrow(handle, outcome.json)
-                            logWindowChanges(handle, winSnapshot, reportReason(type))
-                                .also { winSnapshot = it }
+                            winSnapshot = logWindowChanges(handle, winSnapshot, reportReason(type))
                         }
                     }
                 }
@@ -504,9 +514,11 @@ object ChunkedUploader {
                     onProgress(minOf(bytesSent.get(), desc.totalSize), desc.totalSize)
                     resumeOrThrow(handle, uploadId, missing2)
                 }
-                PlannerTask.Done -> return completeUpload(uploadId, options.deviceId)
+                PlannerTask.Done -> {
+                    logPlan(handle, pool, probeRtt, probeBps, desc.chunkSize.toLong())
+                    return completeUpload(uploadId, options.deviceId)
+                }
                 is PlannerTask.Failed -> throw Exception(task.reason)
-                is PlannerTask.Probe -> throw Exception("上传规划异常：传输阶段出现探测任务")
             }
         }
     }
