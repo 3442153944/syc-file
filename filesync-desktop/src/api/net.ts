@@ -508,3 +508,53 @@ function loadWebFailover(): { auto: boolean; minutes: number } {
     }
     return {auto: true, minutes: DEFAULT_INTERVAL_MINUTES}
 }
+
+// ── 节点测速（多路径核心并发探测） ───────────────────────────────────────────
+
+/** 单节点测速结果（对应 Rust speedtest.rs 的 NodeSpeed，camelCase） */
+export interface NodeSpeed {
+    id: string
+    name: string
+    serverUrl: string
+    /** 父节点 id：有效带宽按父链折算（None/null = 独立链路） */
+    parent?: string | null
+    reachable: boolean
+    /** 微样本往返时延（ms） */
+    rttMs: number
+    /** 实测上行带宽（B/s） */
+    uploadBps: number
+    /** 父链折算后的有效带宽（B/s）：min(自身, 父链) */
+    effectiveBps: number
+    /** 核心给出的初始并发窗口 */
+    window: number
+    /** 测速响应里的后端节点名（各入口指向不同后端时不一致） */
+    backendNode: string
+    /** 实际发出的吞吐样本字节数 */
+    probeBytes: number
+    /** 失败/降级原因（成功为空串） */
+    message: string
+}
+
+export interface SpeedtestResult {
+    testedAt: number
+    activeId: string
+    /** 所有可达节点是否指向同一后端 */
+    sameBackend: boolean
+    nodes: NodeSpeed[]
+}
+
+/** 测速是否可用：依赖桌面端多路径核心（sync_core），Web 端没有。 */
+export function speedtestSupported(): boolean {
+    return isTauri()
+}
+
+/**
+ * 对全部节点并发测速：Rust 侧给每个节点各起一个单节点 upload_planner，
+ * 执行核心生成的微样本（RTT）+ 2MiB 吞吐样本，父链折算后返回；
+ * 结果同时写回 config.upload_planner_state（10 分钟内上传免探测）。
+ */
+export async function runSpeedtest(): Promise<SpeedtestResult> {
+    if (!isTauri()) throw new Error('测速依赖桌面端多路径核心，Web 端暂不支持')
+    const {invoke} = await import('@tauri-apps/api/core')
+    return invoke<SpeedtestResult>('speedtest_nodes')
+}
