@@ -11,8 +11,9 @@ import (
 )
 
 // 内置路由目录：与桌面端 / Web 端「页面注册表」里的 component key 一一对应
-// （key = 相对 src/ 的 .vue 路径）。新增页面时在这里加一行，启动时按 Code 缺失才插入，
-// 已有条目（可能被超级管理员改过标题 / 级别 / 开关）不会被覆盖。
+// （key = 相对 src/ 的 .vue 路径）。它只在路由表为空时（首次安装）做一次性全量初始化，
+// 之后目录完全由管理员在「系统管理 → 路由管理」里维护——升级不再按缺失补插，
+// 管理员删掉 / 改过的条目不会被版本静默复活；新页面上线 = 前端发版 + 管理员手动加一行。
 //
 // Component 为空表示纯菜单分组（目录）。目录本身不做权限判定：只在其下至少有一个可见页面时才出现。
 // MinLevel 是登录用户（level>=1）的最低可见级别；游客(0)只能看到被明确授权的页面，与 MinLevel 无关。
@@ -54,31 +55,23 @@ var defaultRoutes = []model.Route{
 	{Code: "person.quick-share", Path: "/person/quick-share", Name: "PersonQuickShareSettings", Component: "views/person/QuickShareSettings.vue", Title: "快传设置", Sort: 93, Hidden: true, MinLevel: 1, Perm: "share.quick"},
 }
 
-// seedRoutes 按 Code 缺失才插入（并保证内置条目带 builtin 标记）。
+// seedRoutes 只在路由表为空时做一次性全量初始化（首次安装）。
+// 之后目录由管理员在「路由管理」维护，启动不再按缺失补插。
 func seedRoutes(db *gorm.DB) error {
-	added := 0
+	var n int64
+	if err := db.Model(&model.Route{}).Count(&n).Error; err != nil {
+		return fmt.Errorf("检查路由表失败: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
 	for _, r := range defaultRoutes {
-		var n int64
-		if err := db.Model(&model.Route{}).Where("code = ?", r.Code).Count(&n).Error; err != nil {
-			return fmt.Errorf("检查路由 %s 失败: %w", r.Code, err)
-		}
-		if n > 0 {
-			// 升级前就已播种进库的条目没有 builtin 标记：补上，否则它们会被当成可删除的自定义路由
-			if err := db.Model(&model.Route{}).Where("code = ? AND builtin = ?", r.Code, false).
-				Update("builtin", true).Error; err != nil {
-				return fmt.Errorf("标记内置路由 %s 失败: %w", r.Code, err)
-			}
-			continue
-		}
 		r.Enabled = true
 		r.Builtin = true
 		if err := db.Create(&r).Error; err != nil {
-			return fmt.Errorf("播种路由 %s 失败: %w", r.Code, err)
+			return fmt.Errorf("初始化内置路由 %s 失败: %w", r.Code, err)
 		}
-		added++
 	}
-	if added > 0 {
-		logger.Logger.Info("已播种内置路由", zap.Int("added", added))
-	}
+	logger.Logger.Info("路由表为空，已写入内置目录（此后由管理员维护）", zap.Int("routes", len(defaultRoutes)))
 	return nil
 }
