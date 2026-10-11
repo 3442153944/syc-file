@@ -58,6 +58,12 @@ export function useQuickPaste(onResult?: (result: QuickPasteResult | null, error
     event.preventDefault()
     const file = files[0]
 
+    // WebView2 对剪贴板文件是临时文件垫底的 File：事件派发后只要先做别的
+    // await（下面的 beginUpload 就有 IPC 往返），临时文件就可能被回收，之后再读会抛
+    // NotReadableError「The requested file could not be read...」。所以拿到 file
+    // 的第一时间（还在同步段）就发起读取，之后的 await 与它并行。
+    const bytesPromise = file.arrayBuffer()
+
     const store = useTransferStore()
     currentUrl.value = ''
     uploading.value = true
@@ -76,9 +82,16 @@ export function useQuickPaste(onResult?: (result: QuickPasteResult | null, error
     }
 
     try {
+      let bytes: Uint8Array
+      try {
+        bytes = new Uint8Array(await bytesPromise)
+      } catch (e) {
+        // 剪贴板临时文件已被回收等场景：给出可操作的提示而不是原生英文报错
+        throw new Error('读取剪贴板文件失败，请重新复制该文件后再粘贴（或改用上传管理页）')
+      }
       const data = await quickSharePaste(file, (sent, total) => {
         if (taskId) store.reportUploadProgress(taskId, sent, total)
-      })
+      }, bytes)
       const url = buildShareUrl(data)
       if (currentTaskId.value === taskId) currentUrl.value = url
       // 先复制链接再报完成：桌面端主窗口若在上传期间被关闭（隐藏着等上传结束），

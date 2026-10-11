@@ -19,6 +19,7 @@ import type {CreateShareLinkData, QuickShareQuota} from '../file/fileTypes'
 export async function quickSharePaste(
     file: File,
     onProgress?: (sent: number, total: number) => void,
+    bytes?: Uint8Array,
 ): Promise<CreateShareLinkData> {
     const name = file.name || 'pasted-file'
     if (isTauri()) {
@@ -27,9 +28,12 @@ export async function quickSharePaste(
             onProgress?.(e.payload.sent, e.payload.total)
         })
         try {
-            // Vec<u8> 经 JSON 数组传参（number[]），Uint8Array 直接传会序列化成对象
-            const bytes = Array.from(new Uint8Array(await file.arrayBuffer()))
-            return await invoke<CreateShareLinkData>('quick_share_upload', {name, bytes})
+            // Vec<u8> 经 JSON 数组传参（number[]），Uint8Array 直接传会序列化成对象。
+            // 调用方应预读好 bytes 传进来：WebView2 对剪贴板文件用临时文件垫底，
+            // 事件处理里若先做了别的 await（IPC 往返），临时文件可能已被回收，
+            // 再 arrayBuffer() 会抛 NotReadableError「The requested file could not be read」。
+            const payload = bytes ?? new Uint8Array(await file.arrayBuffer())
+            return await invoke<CreateShareLinkData>('quick_share_upload', {name, bytes: Array.from(payload)})
         } finally {
             unlisten()
         }

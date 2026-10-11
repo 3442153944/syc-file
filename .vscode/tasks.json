@@ -2,9 +2,9 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "filecore: build (linux)",
+            "label": "sync_core: build (linux)",
             "type": "shell",
-            "command": "bash file_lib/build.sh",
+            "command": "bash sync_core/build.sh",
             "options": {
                 "cwd": "${workspaceFolder}/new_server"
             },
@@ -51,13 +51,13 @@
         },
         {
             "label": "后端: prepare",
-            "dependsOn": ["filecore: build (linux)", "后端: 停系统服务（释放 8991）"],
+            "dependsOn": ["sync_core: build (linux)", "后端: 停系统服务（释放 8991）"],
             "dependsOrder": "sequence",
             "problemMatcher": []
         },
         {
             "label": "后端: 构建并重启服务",
-            "dependsOn": ["filecore: build (linux)", "后端: build (linux)", "后端: 重启系统服务"],
+            "dependsOn": ["sync_core: build (linux)", "后端: build (linux)", "后端: 重启系统服务"],
             "dependsOrder": "sequence",
             "problemMatcher": []
         }
