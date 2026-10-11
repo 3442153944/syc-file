@@ -3,7 +3,7 @@
 use crate::config::SharedSyncConfig;
 use crate::hotkey_codec;
 use crate::logger;
-use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 /// 打开（或聚焦）粘贴快传悬浮窗，label = "quick-paste"，渲染前端 QuickPaste.vue（见
 /// App.vue 按 label 的硬分支，和 "logs" 窗口同款处理，不走 vue-router）。
@@ -65,4 +65,67 @@ pub fn set_quick_paste_hotkey(
     cfg.quick_share_hotkey = Some(hotkey);
     cfg.save();
     Ok(())
+}
+
+/// 粘贴快传上传（Tauri 侧）：内容写临时文件 → 走多路分片上传核心（quick_share 模式，
+/// h1.1 多连接 + DRR 调度，绕开 WebView2 h2 单连接 64KB 流控窗口的 ~880KB/s 限速）→
+/// 删临时文件。进度经 "quick-share-progress" 事件推给调用窗口。
+/// 返回分享记录（与旧单发快传接口同一形状），前端直接当 CreateShareLinkData 用。
+#[tauri::command]
+pub async fn quick_share_upload(
+    name: String,
+    bytes: Vec<u8>,
+    window: tauri::Window,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    use crate::chunked_uploader::{quick_share_upload as upload_inner, ProgressFn, UploadOptions};
+    use std::sync::Arc;
+    if bytes.is_empty() {
+        return Err("内容为空".into());
+    }
+    // 临时文件放 <uuid 目录>/<原始文件名>：分片上传的 init 以路径末段作为展示/分享文件名，
+    // 原始名（含扩展名）必须留住；uuid 目录保证同名并发不打架。
+    let base = std::path::Path::new(&name)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "pasted-file".into());
+    let tmp = std::env::temp_dir()
+        .join(format!("syc-quick-share-{}", uuid::Uuid::new_v4()))
+        .join(base);
+    if let Err(e) = std::fs::create_dir_all(tmp.parent().expect("临时目录")) {
+        return Err(format!("创建临时目录失败: {}", e));
+    }
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return Err(format!("写入临时文件失败: {}", e));
+    }
+    let result = async {
+        let (client, device_id) = {
+            let cfg = config.read();
+            (
+                crate::commands::support::make_client(&cfg)?,
+                cfg.device_id.clone(),
+            )
+        };
+        let options = UploadOptions::new(device_id).with_quick_share();
+        let window = window.clone();
+        let on_progress: ProgressFn = Arc::new(move |sent, total| {
+            let _ = window.emit(
+                "quick-share-progress",
+                serde_json::json!({ "sent": sent, "total": total }),
+            );
+        });
+        let data = upload_inner(&client, &tmp, "", &options, on_progress, &config).await?;
+        serde_json::to_value(&data).map_err(|e| format!("序列化分享结果失败: {}", e))
+    }
+    .await;
+    if let Some(dir) = tmp.parent() {
+        if let Err(e) = std::fs::remove_dir_all(dir) {
+            logger::warn(
+                "quick-share",
+                format!("删除临时文件失败: {} ({})", dir.display(), e),
+            );
+        }
+    }
+    result
 }

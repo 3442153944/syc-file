@@ -236,6 +236,7 @@ pub fn run() {
             transfers::transfer_clear_finished,
             // 粘贴快传
             app_shell::quick_paste::set_quick_paste_hotkey,
+            app_shell::quick_paste::quick_share_upload,
             // 记住密码
             commands::credential::save_remembered_credential,
             commands::credential::get_remembered_credential,

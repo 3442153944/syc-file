@@ -121,6 +121,27 @@ pub struct UploadStatusData {
     pub total_size: i64,
 }
 
+/// 分片上传 complete 的粘贴快传响应：服务端 finalizeShareLink 的 data 原样，
+/// 与旧单发快传接口（/file/quick-share/upload）响应形状一致，前端直接当 CreateShareLinkData 用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuickShareCompleteData {
+    #[serde(rename = "share_code")]
+    pub share_code: String,
+    #[serde(rename = "temp_name")]
+    pub temp_name: String,
+    #[serde(rename = "file_name")]
+    pub file_name: String,
+    #[serde(rename = "file_size")]
+    pub file_size: i64,
+    #[serde(rename = "is_dir")]
+    #[serde(default)]
+    pub is_dir: bool,
+    #[serde(rename = "expire_time")]
+    pub expire_time: String,
+    #[serde(rename = "url_path")]
+    pub url_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadCompleteData {
     #[serde(rename = "file_id")]

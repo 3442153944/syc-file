@@ -66,6 +66,9 @@ pub struct UploadOptions {
     /// 同步链路的覆盖式上传：Some(base_hash) 表示带基线上传（"" = 本机没有基线），
     /// 服务端目标已存在时据此判断是快进还是与其它设备分叉；None = 普通上传。
     pub sync_base: Option<Arc<str>>,
+    /// 粘贴快传：init 带 quick_share=true（服务端自算目标路径、按快传配额预检），
+    /// complete 返回分享记录（QuickShareCompleteData）而非文件记录。
+    pub quick_share: bool,
 }
 
 /// init 被服务端以版本冲突拒绝时，错误信息里带的标记。服务端已把冲突登记为待办并通知本机隔离本地副本，
@@ -80,12 +83,19 @@ impl UploadOptions {
             device_id: Arc::from(device_id.into().into_boxed_str()),
             on_conflict: Arc::from(""),
             sync_base: None,
+            quick_share: false,
         }
     }
 
     /// 标记为同步链路的覆盖式上传，并带上本机已知的基线 hash（没有基线传空串）。
     pub fn with_sync_base(mut self, base_hash: impl AsRef<str>) -> Self {
         self.sync_base = Some(Arc::from(base_hash.as_ref()));
+        self
+    }
+
+    /// 粘贴快传模式：complete 返回分享记录，目标路径/配额由服务端按 quick_share 规则处理。
+    pub fn with_quick_share(mut self) -> Self {
+        self.quick_share = true;
         self
     }
 
@@ -206,6 +216,35 @@ pub async fn upload(
     on_progress: ProgressFn,
     config: &SharedSyncConfig,
 ) -> Result<UploadCompleteData, String> {
+    let v = upload_inner(client, file, remote_dir, options, on_progress, config).await?;
+    serde_json::from_value(v).map_err(|e| format!("解析上传结果失败: {}", e))
+}
+
+/// 粘贴快传上传：与 upload() 同一条多路管道，complete 返回分享记录
+/// （服务端 finalizeShareLink 的 data 原样，与旧单发快传接口形状一致）。
+pub async fn quick_share_upload(
+    client: &ApiClient,
+    file: &Path,
+    remote_dir: &str,
+    options: &UploadOptions,
+    on_progress: ProgressFn,
+    config: &SharedSyncConfig,
+) -> Result<QuickShareCompleteData, String> {
+    let v = upload_inner(client, file, remote_dir, options, on_progress, config).await?;
+    serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))
+}
+
+/// upload() / quick_share_upload() 共用的传输主线：探测选档 → describe → init →
+/// 多路调度传片 → complete，返回 complete 响应的原始 JSON，由调用方按模式解析。
+/// quick_share 时 init 带 quick_share=true，complete 的 data 是分享记录结构。
+async fn upload_inner(
+    client: &ApiClient,
+    file: &Path,
+    remote_dir: &str,
+    options: &UploadOptions,
+    on_progress: ProgressFn,
+    config: &SharedSyncConfig,
+) -> Result<serde_json::Value, String> {
     if let Some(chunk_size) = options.chunk_size {
         // 固定覆盖路径：完全走旧单路径行为（describe→init→激活节点并发补传→complete，
         // 含 SessionGone 重 init 一次），不探测、不多路径。
@@ -308,7 +347,7 @@ async fn run_planned(
     options: &UploadOptions,
     on_progress: ProgressFn,
     config: &SharedSyncConfig,
-) -> Result<UploadCompleteData, String> {
+) -> Result<serde_json::Value, String> {
     let total = file
         .metadata()
         .map_err(|e| format!("读取文件信息失败: {}", e))?
@@ -422,6 +461,7 @@ async fn run_planned(
         &options.device_id,
         &options.on_conflict,
         options.sync_base.as_deref(),
+        options.quick_share,
     )
     .await
     {
@@ -436,6 +476,9 @@ async fn run_planned(
     // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
     // 不能调 complete（会 404 会话不存在），结果就地合成。
     if init.instant {
+        if options.quick_share {
+            return Err("快传收到意外的秒传响应".into());
+        }
         on_progress(desc.total_size, desc.total_size);
         // 名字/路径以**服务端返回的**为准：同名冲突加了时间戳、或服务端另有落盘规则时，
         // 本地拼出来的是错的。缺字段才回退本地推断。
@@ -450,14 +493,16 @@ async fn run_planned(
             init.storage_path.clone()
         };
         persist_planner_state(config, &p);
-        return Ok(UploadCompleteData {
+        let data = UploadCompleteData {
             file_id: 0,
             file_name: name,
             storage_path: path,
             file_size: desc.total_size,
             file_hash: desc.file_hash_hex.clone(),
             synced: true,
-        });
+        };
+        return serde_json::to_value(&data)
+            .map_err(|e| format!("序列化上传结果失败: {}", e));
     }
 
     let missing: Vec<u32> = if !init.missing.is_empty() {
@@ -480,7 +525,7 @@ async fn run_planned(
     let (tx, mut rx) = mpsc::channel::<Outcome>(64);
     let mut tasks: JoinSet<()> = JoinSet::new();
     let mut win_snapshot: Vec<(String, usize)> = p.windows();
-    let result: Result<UploadCompleteData, String> = loop {
+    let result: Result<serde_json::Value, String> = loop {
         match p.next_task() {
             planner::Task::Chunk(t) => {
                 let tx = tx.clone();
@@ -546,6 +591,7 @@ async fn run_planned(
                     &options.device_id,
                     &options.on_conflict,
                     options.sync_base.as_deref(),
+                    options.quick_share,
                 )
                 .await
                 {
@@ -553,6 +599,9 @@ async fn run_planned(
                     Err(e) => break Err(e),
                 };
                 if init2.instant {
+                    if options.quick_share {
+                        break Err("快传收到意外的秒传响应".into());
+                    }
                     // 重传期间已由其它设备传完同一内容：按完成处理（不能再走 complete）
                     on_progress(desc.total_size, desc.total_size);
                     let name = if init2.file_name.is_empty() {
@@ -565,14 +614,16 @@ async fn run_planned(
                     } else {
                         init2.storage_path.clone()
                     };
-                    break Ok(UploadCompleteData {
+                    let data = UploadCompleteData {
                         file_id: 0,
                         file_name: name,
                         storage_path: path,
                         file_size: desc.total_size,
                         file_hash: desc.file_hash_hex.clone(),
                         synced: true,
-                    });
+                    };
+                    break serde_json::to_value(&data)
+                        .map_err(|e| format!("序列化上传结果失败: {}", e));
                 }
                 upload_id = init2.upload_id.clone();
                 let missing2: Vec<u32> = if !init2.missing.is_empty() {
@@ -789,7 +840,7 @@ async fn run_once(
     desc: &Description,
     options: &UploadOptions,
     on_progress: ProgressFn,
-) -> Result<UploadCompleteData, UploadError> {
+) -> Result<serde_json::Value, UploadError> {
     let file_name = file
         .file_name()
         .ok_or_else(|| UploadError::Other("无效路径".into()))?
@@ -804,6 +855,7 @@ async fn run_once(
         &options.device_id,
         &options.on_conflict,
         options.sync_base.as_deref(),
+        options.quick_share,
     )
     .await
     .map_err(UploadError::Other)?;
@@ -811,6 +863,9 @@ async fn run_once(
     // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
     // 不能调 complete（会 404 会话不存在），结果就地合成。
     if init.instant {
+        if options.quick_share {
+            return Err(UploadError::Other("快传收到意外的秒传响应".into()));
+        }
         on_progress(desc.total_size, desc.total_size);
         let name = if init.file_name.is_empty() {
             file_name
@@ -822,14 +877,16 @@ async fn run_once(
         } else {
             init.storage_path.clone()
         };
-        return Ok(UploadCompleteData {
+        let data = UploadCompleteData {
             file_id: 0,
             file_name: name,
             storage_path: path,
             file_size: desc.total_size,
             file_hash: desc.file_hash_hex.clone(),
             synced: true,
-        });
+        };
+        return serde_json::to_value(&data)
+            .map_err(|e| UploadError::Other(format!("序列化上传结果失败: {}", e)));
     }
 
     let missing: Vec<i32> = if !init.missing.is_empty() {
@@ -905,9 +962,11 @@ async fn call_init(
     device_id: &str,
     on_conflict: &str,
     sync_base: Option<&str>,
+    quick_share: bool,
 ) -> Result<UploadInitData, String> {
     let params = UploadInitParams {
-        path: remote_dir.to_string(),
+        // 快传模式下服务端自算目标路径，path 传空即可（普通模式仍须为目标目录）
+        path: if quick_share { String::new() } else { remote_dir.to_string() },
         name: name.to_string(),
         total_size: desc.total_size,
         chunk_size: desc.chunk_size,
@@ -919,6 +978,7 @@ async fn call_init(
         on_conflict: on_conflict.to_string(),
         sync: sync_base.is_some(),
         base_hash: sync_base.unwrap_or("").to_string(),
+        quick_share,
     };
     let resp = file_api::upload_init(client, params).await?;
     if resp.is_ok() {
@@ -934,12 +994,14 @@ async fn complete_upload(
     client: &ApiClient,
     upload_id: &str,
     device_id: &str,
-) -> Result<UploadCompleteData, String> {
+) -> Result<serde_json::Value, String> {
     let params = UploadCompleteParams {
         upload_id: upload_id.to_string(),
         device_id: device_id.to_string(),
     };
-    let resp = file_api::upload_complete(client, params).await?;
+    // data 原样返回（serde_json::Value），由 upload()/quick_share_upload() 按模式解析：
+    // 普通上传是文件记录，快传是分享记录——服务端保证两者各自形状稳定。
+    let resp: ApiResponse<serde_json::Value> = file_api::upload_complete(client, params).await?;
     if resp.is_ok() {
         resp.data.ok_or_else(|| "complete 响应为空".into())
     } else {

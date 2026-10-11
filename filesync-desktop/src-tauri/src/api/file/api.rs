@@ -131,9 +131,11 @@ pub async fn upload_chunk_to(
 }
 
 /// 完成分片上传：收齐后触发服务端校验落盘。
-pub async fn upload_complete(
+/// complete 的 data 形状按上传模式不同：普通上传是文件记录，快传是分享记录——
+/// 调用方以类型参数指明解析目标（T 只影响 data 段的反序列化）。
+pub async fn upload_complete<T: serde::de::DeserializeOwned>(
     client: &ApiClient,
     params: UploadCompleteParams,
-) -> Result<ApiResponse<UploadCompleteData>, String> {
+) -> Result<ApiResponse<T>, String> {
     client.post(routes::FILE_UPLOAD_COMPLETE, &params).await
 }
