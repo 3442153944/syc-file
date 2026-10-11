@@ -9,12 +9,12 @@
 
 | 端 | 技术 | 同步角色 |
 |---|---|---|
-| 后端 `new_server/` | Go 1.25 + Gin + GORM；Rust 静态库 `file_lib`（cgo） | 编排：接收上报 → 冲突检测 → 派发任务 |
+| 后端 `new_server/` | Go 1.25 + Gin + GORM；Rust 静态库 `sync_core`（cgo） | 编排：接收上报 → 冲突检测 → 派发任务 |
 | 桌面端 `filesync-desktop/` | Tauri 2 + Vue 3 + Naive UI + Rust；Windows 为主，Linux（deb）可构建 | 双向（notify watcher） |
-| Android `Android/` | Kotlin + Compose；Rust JNI（`filecore_jni`） | 双向（inotify 递归 watcher） |
+| Android `Android/` | Kotlin + Compose；Rust JNI（`sync_core_jni`） | 双向（inotify 递归 watcher） |
 | 鸿蒙 `harmony/` | ArkTS + ArkUI；Rust NAPI（`libfilecore.so`） | 仅下行 download_only（无 root、无监听） |
 
-同步核心已闭环（三端真机验证）：base CAS、冲突保留两者、scan 离线追赶、同内容幂等吸收 / 回声抑制、物理文件缺失自愈。四端统一用 **blake3 分片上传协议**，哈希由同一份 `file_lib` 实现（cgo / 原生 / JNI / NAPI），均有纯语言回退。
+同步核心已闭环（三端真机验证）：base CAS、冲突保留两者、scan 离线追赶、同内容幂等吸收 / 回声抑制、物理文件缺失自愈。四端统一用 **blake3 分片上传协议**，哈希由同一份 `sync_core` 实现（cgo / 原生 / JNI / NAPI），均有纯语言回退。
 
 ---
 
@@ -37,7 +37,7 @@
 
 **关键配置**（`new_server/config/config.yaml`，含密码，不入库）：`file.allowed_paths: ["/mnt/data"]`、`storage.base_path: file_sync`、`sync.sync_catalogue`、`share.temp_path`、`quick_share.base_path` 均指向 `/mnt/data/file_sync/*`；`supervisor.enabled: true`。
 
-**开发工作流**（`.vscode/`）：后端 F5 = 构建 filecore → 停系统服务释放 8991 → 调试，结束自动恢复服务；发布 = `new_server/deploy.sh`（构建 → 原子替换 `syc-file`，上一版留作 `syc-file.prev` → `systemctl restart syc-file` → 健康检查，失败自动回滚；端口被 F5 调试进程占着时直接中止；运行配置「部署: 后端 (本机 systemd)」），仅需要原地编译时用 `build.sh`；Web 前端 `filesync-desktop/scripts/deploy-web.sh`（构建后拷进 nginx 站点目录），Linux 桌面端 `scripts/install-linux-desktop.sh`（构建 deb 并 apt 安装）；filecore 构建 `new_server/file_lib/build.sh`（Linux）/ `build.ps1`（Windows）。Linux 前置：Rust + gcc，Go 在 `/usr/local/go/bin`，GOPROXY=goproxy.cn。桌面端 CI：`.github/workflows/desktop-build.yml`（Win/mac/Linux 矩阵）。
+**开发工作流**（`.vscode/`）：后端 F5 = 构建 sync_core → 停系统服务释放 8991 → 调试，结束自动恢复服务；发布 = `new_server/deploy.sh`（构建 → 原子替换 `syc-file`，上一版留作 `syc-file.prev` → `systemctl restart syc-file` → 健康检查，失败自动回滚；端口被 F5 调试进程占着时直接中止；运行配置「部署: 后端 (本机 systemd)」），仅需要原地编译时用 `build.sh`；Web 前端 `filesync-desktop/scripts/deploy-web.sh`（构建后拷进 nginx 站点目录），Linux 桌面端 `scripts/install-linux-desktop.sh`（构建 deb 并 apt 安装）；sync_core 构建 `new_server/sync_core/build.sh`（Linux）/ `build.ps1`（Windows）。Linux 前置：Rust + gcc，Go 在 `/usr/local/go/bin`，GOPROXY=goproxy.cn。桌面端 CI：`.github/workflows/desktop-build.yml`（Win/mac/Linux 矩阵）。
 
 **一体镜像（Docker，开发中，暂不用于线上）**：`new_server/Dockerfile` 把 Go 后端 + MySQL 8.0 + Redis 打进一个镜像（不含 nginx），构建统一用 `bash new_server/docker/build.sh`（VS Code 运行配置「构建: 后端 Docker 镜像」）。首次启动由 `docker/entrypoint.sh` 生成随机 DB / Redis 密码并从范例生成 `/data/config/config.yaml`，之后改配置只需编辑数据卷再重启；默认端口 9999（改 `server.port` + `-p`）；`SYC_MODE=prod` 固定在镜像里（Gin release、不读旧 key.yaml、不托管 frpc/ddns-go），开发直接启动默认 `dev`，行为不变。
 
@@ -79,7 +79,7 @@ flowchart LR
 |---|---|---|---|---|
 | 网络 | reqwest + tokio-tungstenite（Web 模式 fetch 回退） | OkHttp 5（手写 `Request`） | `@kit.NetworkKit` | Gin + gorilla/websocket |
 | 序列化 | serde / TS interface | kotlinx-serialization | JSON.parse + interface | encoding/json |
-| 哈希 | blake3 crate / `@noble/hashes` | JNI→`file_lib`，回退 Java blake3 | NAPI→`file_lib`，回退 ArkTS blake3 | cgo→`file_lib` |
+| 哈希 | blake3 crate / `@noble/hashes` | JNI→`sync_core`，回退 Java blake3 | NAPI→`sync_core`，回退 ArkTS blake3 | cgo→`sync_core` |
 | 持久化 | `config.yml` + `state.json`，凭据进 OS 凭据管理器 | DataStore + `config.conf` + JSON 文件 | preferences + JSON 文件 | MySQL(GORM) + Redis |
 | 下载 | 前端 fetch Range | PRDownloader | `http` Range + `fs` 定位写 | HTTP Range / 206 |
 
@@ -93,7 +93,7 @@ flowchart LR
 cmd/main.go            入口
 config/                Viper：config.yaml（不入库）+ config.example.yaml
 deploy/                frpc / ddns-go 配置模板（真实配置不入库）
-file_lib/              Rust 静态库 libfilecore.a（C ABI v4）
+sync_core/              Rust 静态库 libsync_core.a（C ABI v4）
 internal/
   handler/ {user,file}/  胖 Handler（file/ 含分片上传、下载、分享链接、快传、版本）
   sync/                  同步引擎 + worker + REST
@@ -107,7 +107,7 @@ internal/
   middleware/            auth.go  logger.go  operation_log.go  jwt.go(死代码)
   model/                 GORM 模型（main.go AutoMigrate 24 个）
   repository/ service/ internal_config/   [空目录]
-pkg/ token/(文件名 toekn.go；secret.go 管 JWT 密钥) password/ logger/ device_store/ sync_store/ filecore/(cgo)
+pkg/ token/(文件名 toekn.go；secret.go 管 JWT 密钥) password/ logger/ device_store/ sync_store/ synccore/(cgo)
      upload_store/ volroot/(盘根判定) procpriority/(提权 / 降级) e/ jwtutil/ response/ [后三者空]
 SYNC_PROTOCOL.md       同步 WS/REST 契约（权威）
 venv/key.yaml          旧版 JWT 密钥文件（已弃用；dev 模式首次启动会把它导入数据库 app_secret，之后不再读取）
@@ -174,7 +174,7 @@ sql/                   参考 DDL / 手工迁移脚本（share_link.sql、sync_f
 - `version.go`：文件版本；`upload_bridge.go`：分片上传完成后桥接到同步派发（秒传也走）。
 - 契约见 `SYNC_PROTOCOL.md`。
 
-**分片上传**（`file_lib` + `pkg/filecore` + `pkg/upload_store`，哈希统一 blake3）：
+**分片上传**（`sync_core` + `pkg/synccore` + `pkg/upload_store`，哈希统一 blake3）：
 - 客户端先发**文件描述**（总大小、分片大小 / 数、叶子哈希、Merkle 树根、整文件哈希）→ `init` 校验自洽 + 秒传查重 + 预分配（`fc_preallocate`）；
 - 分片乱序并发，每片 `fc_chunk_write` **早校验 + 按 offset 定位写**；位图标记已落盘（幂等 + 断点续传）；HTTP 码 404=会话过期、422=分片校验失败；
 - `complete`：`fc_finalize` 单趟校验 + `fc_move` 原子落盘 → 写 File 表 → 同步派发；
@@ -182,7 +182,7 @@ sql/                   参考 DDL / 手工迁移脚本（share_link.sql、sync_f
 - 会话过期（任一 chunk 404）客户端自动重新 init 一次；`upload_janitor` 回收会话；
 - 同步上传一律 **delete-before-upload**（先删远端旧文件再 init），解决「已存在被拒」。
 
-**file_lib ABI v4**：`fc_preallocate/chunk_write/hash_chunk/merkle_root/finalize/describe/move/evict` + `fc_sys_snapshot`（sysinfo + netstat2 的进程 / 端口采集，供 monitor）+ `fc_free_string`；`crate-type` 含 rlib 供 JNI/NAPI 复用。构建踩坑与 LDFLAGS 见 `file_lib/README.md`（cgo LDFLAGS 已按平台拆分）。
+**sync_core ABI v4**：`fc_preallocate/chunk_write/hash_chunk/merkle_root/finalize/describe/move/evict` + `fc_sys_snapshot`（sysinfo + netstat2 的进程 / 端口采集，供 monitor）+ `fc_free_string`；`crate-type` 含 rlib 供 JNI/NAPI 复用。构建踩坑与 LDFLAGS 见 `sync_core/README.md`（cgo LDFLAGS 已按平台拆分）。
 
 **下载**：路径经 `allowed_paths` 前缀校验（`pkg/volroot` 判盘根；比较大小写不敏感）→ 先写 `DownloadHistory` → 全量 `io.Copy` 流式 / Range `206`。
 
@@ -231,7 +231,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
   - 追赶（每次 WS Connected）：Phase1 上传离线变更 + Phase2 `scan`；stat 缓存避免重算；上传 / 下载各 Semaphore(2)；`syncOnWifiOnly` 门控；
   - 冲突：本地分叉隔离 `.syncpending/<conflictId>_<name>`；`keep_local` 以 server_hash 为 base 回放重传；自写路径 10s 抑制回环。
 - **保活**：`SyncKeepAliveService`（dataSync 前台服务，30s 守护重连，`forceKeepAliveEnabled`）；root 设备进程级守护（LSPosed 看门狗）在 app 外部维护；持久化续传（`persistentDownloadEnabled`）仅 root 可见。
-- **Rust 内核**：`filecore_jni`（cdylib，`build.ps1` 需 NDK + cargo-ndk）→ `core/FileCore`（`describe` / `hashChunk` / `merkleRoot`），缺 .so 回退纯 Java。
+- **Rust 内核**：`sync_core_jni`（cdylib，`build.ps1` 需 NDK + cargo-ndk）→ `core/SyncCore`（`describe` / `hashChunk` / `merkleRoot`；多路径上传决策走 `core/SyncPlanner`），缺 .so 回退纯 Java。
 - **其它能力**：文件在线预览（`previewUtil/` + `ui/screen/preview/`：图 / 视频 / 音频 / PDF / 文本 / Office，Office 经 POI，**需真机验证**）；应用更新（`update/UpdateController`：check + WS 推送 + 复用下载 + FileProvider 安装 + 强制更新）；设备监控（`DevicesList`，admin 多一个「所有在线设备」分区）；同步列表分页（每页 10 条）。
 - 底部四标签：Home / Files / Monitor / Personal；导航为 Navigation-Compose 类型安全路由（`router/AppRoute.kt` 为死代码）。
 
@@ -244,6 +244,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 - **存储（鸿蒙手机的血泪结论，详见 `harmony/README.md`）**：手机不支持公共固定目录（`getUserDownloadDir`、选文件夹均不可用）。当前方案 `CloudLadderStorage`：`picker.save()` + `DOWNLOAD` 模式无弹框拿到 `Download/<bundleName>` 授权 → `FileUri` 转真实 path → `fs` 读写；目录 `同步/<folder>`、`下载`。⚠ **授权是临时的，退后台即失效**，后台同步先落沙盒暂存（`SyncStagingStore`），回前台重新授权后 flush；文件 IO 一律异步，避免主线程 appfreeze。
 - **台账与数据同生共死**：清单权威 = `SyncBaseStore` 基线台账，写沙盒 + 公共目录镜像 `.yt_baseline.json` 双份；每个 folder 根有哨兵 `.ytsync`，清单为空且枚举不出哨兵时**跳过本轮 scan**（宁可不报，绝不报空），否则服务端会全量重派。
 - 差距：无文件预览 / 搜索 / 多文件批量上传；`router.back()` 已废弃待迁 `Navigation`；`common/` + `features/` 为 DevEco 模板残留待清理。
+- **合规/权限（2026-10）**：当前公共目录方案（picker `DOWNLOAD` 模式）是取巧，**未合规、仅限侧载，上架审核必拒**；正式权限申请清单、理由与降级方案见 `harmony/README.md` 文末「权限申请清单与理由」（**未申请，优先级低**）。悬浮窗为"快速共享"所需，已在清单内。
 
 ---
 
