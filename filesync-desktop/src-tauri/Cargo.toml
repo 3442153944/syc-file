@@ -51,3 +51,12 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 # 它带 sysinfo/netstat2 依赖属正常；HTTP 发送仍归本平台（见 chunked_uploader.rs）。
 sync_core = { path = "../../new_server/sync_core" }
 
+
+# 剪贴板文件路径读取（CF_HDROP）：粘贴快传对大文件走原路径零拷贝上传。
+# 仅 Windows 需要；其它平台 clipboard_file_paths 返回空，前端回退字节路径。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_UI_Shell",
+] }

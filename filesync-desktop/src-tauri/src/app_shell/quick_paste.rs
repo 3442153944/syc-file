@@ -78,8 +78,6 @@ pub async fn quick_share_upload(
     window: tauri::Window,
     config: State<'_, SharedSyncConfig>,
 ) -> Result<serde_json::Value, String> {
-    use crate::chunked_uploader::{quick_share_upload as upload_inner, ProgressFn, UploadOptions};
-    use std::sync::Arc;
     if bytes.is_empty() {
         return Err("内容为空".into());
     }
@@ -99,26 +97,7 @@ pub async fn quick_share_upload(
     if let Err(e) = std::fs::write(&tmp, &bytes) {
         return Err(format!("写入临时文件失败: {}", e));
     }
-    let result = async {
-        let (client, device_id) = {
-            let cfg = config.read();
-            (
-                crate::commands::support::make_client(&cfg)?,
-                cfg.device_id.clone(),
-            )
-        };
-        let options = UploadOptions::new(device_id).with_quick_share();
-        let window = window.clone();
-        let on_progress: ProgressFn = Arc::new(move |sent, total| {
-            let _ = window.emit(
-                "quick-share-progress",
-                serde_json::json!({ "sent": sent, "total": total }),
-            );
-        });
-        let data = upload_inner(&client, &tmp, "", &options, on_progress, &config).await?;
-        serde_json::to_value(&data).map_err(|e| format!("序列化分享结果失败: {}", e))
-    }
-    .await;
+    let result = run_quick_share(&tmp, &window, &config).await;
     if let Some(dir) = tmp.parent() {
         if let Err(e) = std::fs::remove_dir_all(dir) {
             logger::warn(
@@ -128,4 +107,101 @@ pub async fn quick_share_upload(
         }
     }
     result
+}
+
+/// 从原始文件路径做粘贴快传（零拷贝路径）：剪贴板里是资源管理器复制的文件时，
+/// Windows 剪贴板只保存路径引用（CF_HDROP）而 WebView2 给的 File 是它物化的临时副本——
+/// 大文件读字节等于先整拷一遍再过 IPC 序列化，GB 级必然崩。本命令直接读原文件上传。
+#[tauri::command]
+pub async fn quick_share_upload_path(
+    path: String,
+    window: tauri::Window,
+    config: State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    let p = std::path::PathBuf::from(&path);
+    let meta = std::fs::metadata(&p).map_err(|e| format!("读取剪贴板文件失败: {e}"))?;
+    if !meta.is_file() {
+        return Err("剪贴板指向的不是普通文件".into());
+    }
+    if meta.len() == 0 {
+        return Err("内容为空".into());
+    }
+    run_quick_share(&p, &window, &config).await
+}
+
+/// 快传公共执行段：多路分片上传（quick_share 模式），进度经事件推送。
+async fn run_quick_share(
+    file: &std::path::Path,
+    window: &tauri::Window,
+    config: &State<'_, SharedSyncConfig>,
+) -> Result<serde_json::Value, String> {
+    use crate::chunked_uploader::{quick_share_upload as upload_inner, ProgressFn, UploadOptions};
+    use std::sync::Arc;
+    let (client, device_id) = {
+        let cfg = config.read();
+        (
+            crate::commands::support::make_client(&cfg)?,
+            cfg.device_id.clone(),
+        )
+    };
+    let options = UploadOptions::new(device_id).with_quick_share();
+    let window = window.clone();
+    let on_progress: ProgressFn = Arc::new(move |sent, total| {
+        let _ = window.emit(
+            "quick-share-progress",
+            serde_json::json!({ "sent": sent, "total": total }),
+        );
+    });
+    let data = upload_inner(&client, file, "", &options, on_progress, config).await?;
+    serde_json::to_value(&data).map_err(|e| format!("序列化分享结果失败: {}", e))
+}
+
+/// 读取当前剪贴板的文件路径列表（Windows CF_HDROP）。剪贴板里是复制的文件时返回
+/// 原始绝对路径（可含多个）；是图片/文本等内容时返回空数组。拿不到（非 Windows、
+/// 剪贴板被占用）也返回空，调用方据此回退字节路径。
+#[tauri::command]
+pub fn clipboard_file_paths() -> Vec<String> {
+    clipboard_paths_impl()
+}
+
+#[cfg(windows)]
+fn clipboard_paths_impl() -> Vec<String> {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, OpenClipboard,
+    };
+    use windows_sys::Win32::UI::Shell::DragQueryFileW;
+    const CF_HDROP: u32 = 15;
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return vec![];
+        }
+        let hdrop = GetClipboardData(CF_HDROP);
+        if hdrop.is_null() {
+            CloseClipboard();
+            return vec![];
+        }
+        let count = DragQueryFileW(hdrop as _, 0xFFFFFFFF, std::ptr::null_mut(), 0);
+        let mut out = Vec::new();
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop as _, i, std::ptr::null_mut(), 0);
+            if len == 0 {
+                continue;
+            }
+            let mut buf = vec![0u16; len as usize + 1];
+            let got = DragQueryFileW(hdrop as _, i, buf.as_mut_ptr(), buf.len() as u32);
+            if got > 0 {
+                let s = String::from_utf16_lossy(&buf[..got as usize]);
+                if !s.is_empty() {
+                    out.push(s);
+                }
+            }
+        }
+        CloseClipboard();
+        out
+    }
+}
+
+#[cfg(not(windows))]
+fn clipboard_paths_impl() -> Vec<String> {
+    vec![]
 }

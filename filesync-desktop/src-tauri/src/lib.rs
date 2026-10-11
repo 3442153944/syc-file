@@ -237,6 +237,8 @@ pub fn run() {
             // 粘贴快传
             app_shell::quick_paste::set_quick_paste_hotkey,
             app_shell::quick_paste::quick_share_upload,
+            app_shell::quick_paste::quick_share_upload_path,
+            app_shell::quick_paste::clipboard_file_paths,
             // 记住密码
             commands::credential::save_remembered_credential,
             commands::credential::get_remembered_credential,
