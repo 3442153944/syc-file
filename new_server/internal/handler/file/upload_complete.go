@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,8 +17,8 @@ import (
 	"syc-file/internal/model"
 	"syc-file/internal/sync"
 	"syc-file/internal/thumb"
-	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
 )
@@ -27,7 +29,7 @@ import (
 //	→ synccore.Move：临时文件原子 rename 到目标
 //	→ 写 file 表 / upload_history completed
 //	→ 删 Redis 会话（临时文件已随 Move 消失）
-func HandlerFuncUploadComplete(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gin.HandlerFunc {
+func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *sync.Engine) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
@@ -122,6 +124,26 @@ func HandlerFuncUploadComplete(db *gorm.DB, _ *redis.Client, engine *sync.Engine
 		if err := synccore.Move(sess.TempPath, sess.TargetPath); err != nil {
 			logger.Logger.Error("落盘失败", zap.String("upload_id", uploadID), zap.String("dst", sess.TargetPath), zap.Error(err))
 			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "落盘失败", "data": nil})
+			return
+		}
+
+		// 粘贴快传：文件已落到 quickshare 目标路径，这里不建 file 记录、不交同步引擎，
+		// 直接生成分享记录。响应 data 用 finalizeShareLink 的原值，形状与旧单发快传接口一致。
+		if sess.QuickShare {
+			expireMinutes := quickShareExpireMinutesFor(db, userID)
+			_, respData, serr := finalizeShareLink(db, redisClient, userID, sess.TargetPath, sess.FileName,
+				filepath.Base(sess.TargetPath), "disk", sess.TotalSize, expireMinutes, false, true)
+			// 删会话（临时文件已随 Move 消失）
+			_ = upload_store.Global.Delete(ctx, uploadID)
+			if serr != nil {
+				_ = os.Remove(sess.TargetPath)
+				logger.Logger.Error("写入快传分享记录失败", zap.String("upload_id", uploadID), zap.Error(serr))
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入分享记录失败", "data": nil})
+				return
+			}
+			logger.Logger.Info("快传分片上传完成", zap.Uint("user_id", userID), zap.String("path", sess.TargetPath),
+				zap.Int64("size", sess.TotalSize))
+			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": respData})
 			return
 		}
 

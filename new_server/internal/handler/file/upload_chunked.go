@@ -13,7 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"strconv"
+
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -22,8 +25,8 @@ import (
 	"syc-file/internal/model"
 	"syc-file/internal/sync"
 	"syc-file/internal/thumb"
-	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
 	"syc-file/pkg/volroot"
@@ -44,7 +47,8 @@ const (
 
 // uploadInitReq 前端上传前提交的“描述信息”。
 type uploadInitReq struct {
-	Path string `json:"path" binding:"required"`
+	// Path 目标目录（name 已是 path 末段则直接用）。QuickShare 模式下服务端自算目标路径，可为空。
+	Path string `json:"path"`
 	Name string `json:"name" binding:"required"`
 	// OnConflict 目标已存在时怎么办：reject（默认）/ timestamp（自动加时间戳）。
 	OnConflict string   `json:"on_conflict"`
@@ -61,6 +65,10 @@ type uploadInitReq struct {
 	// 是基于最新版本的修改（含离线编辑），允许覆盖；不一致或没有基线说明与其它设备分叉，走冲突待办。
 	Sync     bool   `json:"sync"`
 	BaseHash string `json:"base_hash"`
+
+	// QuickShare 粘贴快传模式：目标路径由服务端算（quick_share.base_path/<userID>/<uuid><ext>），
+	// 跳过普通路径的目录权限/扩展名/同名检查；complete 时不建 file 记录，直接生成分享记录。
+	QuickShare bool `json:"quick_share"`
 }
 
 // HandlerFuncUploadInit 分片上传第一步：校验描述信息 → 秒传查重 → 建/续会话 → 预分配临时文件。
@@ -79,24 +87,59 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			return
 		}
 
-		fullPath := resolveUploadPath(req.Path, req.Name)
+		var fullPath string
+		if req.QuickShare {
+			// 快传：目标由服务端自算（可信），独立于普通路径的 resolveUploadPath/IsPathAllowed。
+			target, terr := quickShareTargetPath(userID, req.Name)
+			if terr != nil {
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": terr.Error(), "data": nil})
+				return
+			}
+			fullPath = target
+		} else {
+			if req.Path == "" {
+				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少目标路径", "data": nil})
+				return
+			}
+			fullPath = resolveUploadPath(req.Path, req.Name)
+		}
 
-		// 基础校验：路径、扩展名、文件名长度、大小
-		if !isPathAllowedDownload(fullPath) {
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
-			return
+		// 基础校验：路径、扩展名、文件名长度、大小（快传跳过前两项——它不进普通存储树，
+		// 落地目录与配额由 quick_share 配置独立约束）
+		if !req.QuickShare {
+			if !isPathAllowedDownload(fullPath) {
+				c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
+				return
+			}
+			if !config.Conf.IsExtensionAllowed(filepath.Ext(req.Name)) {
+				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "不允许上传该类型的文件", "data": nil})
+				return
+			}
+			if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
+				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件名过长", "data": nil})
+				return
+			}
 		}
-		if !config.Conf.IsExtensionAllowed(filepath.Ext(req.Name)) {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "不允许上传该类型的文件", "data": nil})
-			return
-		}
-		if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件名过长", "data": nil})
-			return
-		}
-		if req.TotalSize <= 0 || req.TotalSize > config.Conf.File.Upload.MaxFileSize {
+		if req.TotalSize <= 0 || (!req.QuickShare && req.TotalSize > config.Conf.File.Upload.MaxFileSize) {
 			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件大小超出限制", "data": nil})
 			return
+		}
+		if req.QuickShare {
+			// 按 total_size 预检剩余配额（与旧单发快传接口同一套口径），不足直接拒，省得白传。
+			remaining, qerr := quickShareRemainingBytes(db, userID)
+			if qerr != nil {
+				logger.Logger.Error("查询快传配额失败", zap.Error(qerr))
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询配额失败", "data": nil})
+				return
+			}
+			if remaining <= 0 {
+				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "快速共享空间已满，请等待旧分享过期或前往分享管理提前清理", "data": nil})
+				return
+			}
+			if req.TotalSize > remaining {
+				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "超出剩余配额", "data": nil})
+				return
+			}
 		}
 
 		// 分片参数一致性：chunk_count 须等于 ceil(total/chunk)，叶子数须匹配
@@ -131,51 +174,59 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 
 		// 目标已存在时怎么办。判据只看**磁盘**（os.Stat），不看 file 表——
 		// 库里有记录而盘上没有（被手工删过/清理过）不该挡住上传，反过来也一样。
-		if st, statErr := os.Stat(fullPath); statErr == nil {
-			switch {
-			case st.Size() == req.TotalSize && pathHashEquals(db, userID, fullPath, req.FileHash):
-				// 同路径 + 同大小 + 同哈希 = 要传的东西本来就在那儿（重复发布同一个包、
-				// init 重发）。这不是错误，直接当秒传成功返回，既不重传也不产生副本。
-				respondInstant(c, db, engine, userID, &req, fullPath,
-					upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize), "文件已是最新")
-				return
-			case req.Sync:
-				cur := pathHash(db, userID, fullPath)
-				if req.BaseHash != "" && req.BaseHash == cur {
-					break // 基于服务端当前版本的修改：快进，complete 时原子替换
-				}
-				if engine != nil {
-					engine.ReportUploadConflict(userID, req.DeviceID, fullPath, req.Name, req.TotalSize, req.FileHash, req.BaseHash)
-				}
-				logger.Logger.Warn("同步上传与服务端版本冲突，转入冲突待办", zap.String("path", fullPath),
-					zap.String("device_id", req.DeviceID), zap.String("base_hash", req.BaseHash), zap.String("server_hash", cur))
-				c.JSON(http.StatusOK, gin.H{"code": 409, "message": "同步冲突：服务端版本已被其它设备修改，本地副本将转入冲突待办",
-					"data": gin.H{"conflict": true, "server_hash": cur}})
-				return
-			case req.OnConflict == onConflictTimestamp:
-				// 「同名是常态」的场景（发布 APK：每次 build 出来都叫 app-release.apk）。
-				// 报错逼用户改名没有意义，加时间戳区分即可，两个版本都留在盘上。
-				newName, newPath, err := uniqueNameWithTimestamp(req.Path, req.Name)
-				if err != nil {
-					c.JSON(http.StatusOK, gin.H{"code": 500, "message": "生成不重名文件名失败: " + err.Error(), "data": nil})
+		// 快传目标是 uuid 文件名，不存在这套语义，跳过。
+		if !req.QuickShare {
+			if st, statErr := os.Stat(fullPath); statErr == nil {
+				switch {
+				case st.Size() == req.TotalSize && pathHashEquals(db, userID, fullPath, req.FileHash):
+					// 同路径 + 同大小 + 同哈希 = 要传的东西本来就在那儿（重复发布同一个包、
+					// init 重发）。这不是错误，直接当秒传成功返回，既不重传也不产生副本。
+					respondInstant(c, db, engine, userID, &req, fullPath,
+						upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize), "文件已是最新")
+					return
+				case req.Sync:
+					cur := pathHash(db, userID, fullPath)
+					if req.BaseHash != "" && req.BaseHash == cur {
+						break // 基于服务端当前版本的修改：快进，complete 时原子替换
+					}
+					if engine != nil {
+						engine.ReportUploadConflict(userID, req.DeviceID, fullPath, req.Name, req.TotalSize, req.FileHash, req.BaseHash)
+					}
+					logger.Logger.Warn("同步上传与服务端版本冲突，转入冲突待办", zap.String("path", fullPath),
+						zap.String("device_id", req.DeviceID), zap.String("base_hash", req.BaseHash), zap.String("server_hash", cur))
+					c.JSON(http.StatusOK, gin.H{"code": 409, "message": "同步冲突：服务端版本已被其它设备修改，本地副本将转入冲突待办",
+						"data": gin.H{"conflict": true, "server_hash": cur}})
+					return
+				case req.OnConflict == onConflictTimestamp:
+					// 「同名是常态」的场景（发布 APK：每次 build 出来都叫 app-release.apk）。
+					// 报错逼用户改名没有意义，加时间戳区分即可，两个版本都留在盘上。
+					newName, newPath, err := uniqueNameWithTimestamp(req.Path, req.Name)
+					if err != nil {
+						c.JSON(http.StatusOK, gin.H{"code": 500, "message": "生成不重名文件名失败: " + err.Error(), "data": nil})
+						return
+					}
+					logger.Logger.Info("目标同名，自动加时间戳区分",
+						zap.String("old", req.Name), zap.String("new", newName))
+					req.Name = newName
+					fullPath = newPath
+				default:
+					c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件已存在，请先删除或重命名", "data": nil})
 					return
 				}
-				logger.Logger.Info("目标同名，自动加时间戳区分",
-					zap.String("old", req.Name), zap.String("new", newName))
-				req.Name = newName
-				fullPath = newPath
-			default:
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件已存在，请先删除或重命名", "data": nil})
-				return
 			}
 		}
 
 		id := upload_store.SessionID(userID, fullPath, req.FileHash, req.TotalSize, req.ChunkSize)
 
-		// 秒传：同用户已有相同 file_hash + 大小的文件且物理存在 → 直接复制落盘。
-		// 注意：秒传不建会话，客户端收到 instant=true 后【不得】再调 complete。
+		// 秒传：同用户已有相同 file_hash + 大小的文件且物理存在。
+		// 普通路径：直接复制落盘并 instant 返回（不建会话，客户端收到 instant=true 后【不得】再调 complete）。
+		// 快传：分享记录必须由 complete 建，【不走 instant】——内容复制进会话临时文件、照常建会话
+		// 并预置全部位图，客户端见 missing=空 不调 chunk，complete 校验落盘后直接走分享创建。
+		var quickShareSrc string
 		if src, ok := findDedupSource(db, userID, req.FileHash, req.TotalSize); ok && src != fullPath {
-			if err := copyFile(src, fullPath); err != nil {
+			if req.QuickShare {
+				quickShareSrc = src
+			} else if err := copyFile(src, fullPath); err != nil {
 				logger.Logger.Warn("秒传复制失败，回退普通上传", zap.String("src", src), zap.Error(err))
 			} else {
 				respondInstant(c, db, engine, userID, &req, fullPath, id, "秒传成功")
@@ -204,21 +255,37 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			_ = os.Remove(sess.TempPath)
 		}
 
-		// 新建会话：预分配临时文件（与目标同盘，便于原子 rename）
+		// 新建会话：内容进临时文件（与目标同盘，便于原子 rename）。普通路径预分配占位；
+		// 快传命中秒传源时直接复制进临时文件（复制失败回退预分配，照常分片上传）。
 		tempPath := tempPathFor(fullPath, id)
-		if err := synccore.Preallocate(tempPath, uint64(req.TotalSize)); err != nil {
-			logger.Logger.Error("预分配临时文件失败", zap.String("temp", tempPath), zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "预分配失败", "data": nil})
-			return
+		quickShareCopied := false
+		if quickShareSrc != "" {
+			if err := copyFile(quickShareSrc, tempPath); err != nil {
+				logger.Logger.Warn("快传秒传复制失败，回退普通上传", zap.String("src", quickShareSrc), zap.Error(err))
+			} else {
+				quickShareCopied = true
+			}
+		}
+		if !quickShareCopied {
+			if err := synccore.Preallocate(tempPath, uint64(req.TotalSize)); err != nil {
+				logger.Logger.Error("预分配临时文件失败", zap.String("temp", tempPath), zap.Error(err))
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "预分配失败", "data": nil})
+				return
+			}
 		}
 
-		historyID := createUploadHistoryUploading(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
+		// 快传不写上传历史（与旧单发快传接口一致），HistoryID 为 0，complete 据此跳过历史收尾。
+		var historyID uint64
+		if !req.QuickShare {
+			historyID = createUploadHistoryUploading(db, userID, req.Name, fullPath, req.TotalSize, id, req.ChunkCount, c)
+		}
 		sess := &upload_store.Session{
 			ID: id, UserID: userID, FileName: req.Name, TargetPath: fullPath, TempPath: tempPath,
 			TotalSize: req.TotalSize, ChunkSize: req.ChunkSize, ChunkCount: req.ChunkCount,
 			MerkleRoot: req.MerkleRoot, FileHash: req.FileHash,
 			Leaves: hex.EncodeToString(leavesBytes), Status: "uploading",
 			HistoryID: historyID, CreatedAt: time.Now().Unix(),
+			QuickShare: req.QuickShare,
 		}
 		if err := upload_store.Global.Create(ctx, sess, uploadSessionTTL); err != nil {
 			logger.Logger.Error("创建上传会话失败", zap.Error(err))
@@ -230,7 +297,14 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		for i := range missing {
 			missing[i] = i
 		}
-		logger.Logger.Info("上传会话已创建", zap.String("upload_id", id), zap.String("path", fullPath), zap.Int("chunks", req.ChunkCount))
+		if quickShareCopied {
+			// 秒传内容已在临时文件里：预置全部位图并通告 missing=空，客户端直接进 complete。
+			for i := 0; i < req.ChunkCount; i++ {
+				_ = upload_store.Global.MarkChunk(ctx, id, i)
+			}
+			missing = []int{}
+		}
+		logger.Logger.Info("上传会话已创建", zap.String("upload_id", id), zap.String("path", fullPath), zap.Int("chunks", req.ChunkCount), zap.Bool("quick_share", req.QuickShare))
 		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
 			"upload_id": id, "instant": false, "chunk_size": req.ChunkSize,
 			"chunk_count": req.ChunkCount, "missing": missing,
@@ -348,6 +422,33 @@ func uniqueNameWithTimestamp(reqPath, name string) (string, string, error) {
 		}
 	}
 	return "", "", fmt.Errorf("同名文件过多，无法生成唯一文件名")
+}
+
+// quickShareTargetPath 快传分片上传的目标路径：quick_share.base_path/<userID>/<uuid><ext>。
+// 与旧单发快传接口同一套落地规则。BasePath 未配置返回错误（调用方回 500）。
+func quickShareTargetPath(userID uint, name string) (string, error) {
+	qs := config.Conf.QuickShare
+	if qs.BasePath == "" {
+		return "", errors.New("未配置粘贴快传目录 quick_share.base_path")
+	}
+	base := filepath.Base(name)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "pasted-file"
+	}
+	return filepath.Join(qs.BasePath, strconv.FormatUint(uint64(userID), 10), uuid.NewString()+filepath.Ext(base)), nil
+}
+
+// quickShareRemainingBytes 快传剩余配额 = 容量上限（config 未配时 10GB 兜底）- 已用。
+func quickShareRemainingBytes(db *gorm.DB, userID uint) (int64, error) {
+	maxCapacity := config.Conf.QuickShare.MaxCapacityBytes
+	if maxCapacity <= 0 {
+		maxCapacity = defaultQuickShareCapacityBytes
+	}
+	used, err := quickShareUsedBytes(db, userID)
+	if err != nil {
+		return 0, err
+	}
+	return maxCapacity - used, nil
 }
 
 // resolveUploadPath 与旧单发上传一致：name 已是 path 末段则直接用，否则拼接。
