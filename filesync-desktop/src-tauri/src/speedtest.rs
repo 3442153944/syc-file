@@ -230,6 +230,7 @@ async fn run_node(client: ApiClient, node: &ServerNode, now: i64) -> NodeRun {
         // 空样本 = 不复用持久化缓存：测速页要的就是当下实测值
         state: planner::PersistedState::default(),
         adjust_cooldown_ms: planner::ADJUST_COOLDOWN_MS,
+        weight_exponent: planner::DEFAULT_WEIGHT_EXPONENT,
     };
     let mut p = match planner::Planner::new(input) {
         Ok(p) => p,

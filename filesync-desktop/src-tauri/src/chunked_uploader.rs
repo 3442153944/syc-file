@@ -3,15 +3,16 @@
 //               → 乱序并发补传缺失分片 → complete。
 //
 // 两条路径：
-// - 自适应（默认）：先跑 sync_core::upload_planner 的探测循环（每节点微样本测 RTT + 吞吐
-//   样本测带宽，10min 内有新鲜持久化样本则跳过），按总带宽选分片档位；传输期由 planner
-//   做多路径调度（父链折算共享瓶颈、per-node AIMD 窗口、动态超时、重排重试 CHUNK_ATTEMPTS=3
-//   全部由 planner 负责，本端不再做分片级内部重试）。
-// - 固定覆盖（UploadOptions.chunk_size 有值）：跳过探测，init/chunk 全走激活节点的旧
+// - 自适应（默认）：分片大小只由文件大小决定，describe→init 立即开始（不再等探测，首字节
+//   即时发出）；传输期由 planner 做多路径调度（父链折算共享瓶颈、per-node AIMD 窗口、动态
+//   超时、重排重试 CHUNK_ATTEMPTS=3 全部由 planner 负责，本端不做分片级内部重试）。后台探测
+//   以「闲时补测」方式与传输并发：planner 只在派不出分片时顺手给探测，用富余带宽补测其它线路，
+//   样本回来后并入调度（10min 内有新鲜持久化样本则跳过）。
+// - 固定覆盖（UploadOptions.chunk_size 有值）：跳过 planner，init/chunk 全走激活节点的旧
 //   单路径行为，可预期。
 //
-// planner 是同步对象，本模块是它的平台侧：探测 inline await；分片每片一个 tokio task，
-// 结果经 channel 喂回本循环；Task::Wait = 无任务可分派，挂在 channel 上等在途分片的 Report。
+// planner 是同步对象，本模块是它的平台侧：分片与探测各派一个 tokio task，结果经 channel
+// 喂回本循环；Task::Wait = 无任务可分派，挂在 channel 上等在途分片/探测的 Report。
 // Chunk 任务带明确 node url，必须打到该 URL（多路径必须落在同一会话上，由 planner 做
 // 同后端校验）。
 //
@@ -53,7 +54,7 @@ pub type ProgressFn = Arc<dyn Fn(i64, i64) + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub struct UploadOptions {
-    /// 分片大小覆盖：None=自适应（planner 探测选档 + 多路径调度，默认）；
+    /// 分片大小覆盖：None=自适应（planner 按文件大小定档 + 多路径调度 + 传输期后台探测，默认）；
     /// Some(n)=固定 n 字节分片，走激活节点的旧单路径行为。
     pub chunk_size: Option<usize>,
     /// 并发覆盖：None=planner 的 per-node AIMD 窗口；Some(n)=固定协程池（固定路径用）。
@@ -105,7 +106,7 @@ impl UploadOptions {
         self
     }
 
-    /// 显式固定分片大小与并发数，跳过 planner 的自适应探测（保留旧单路径行为的开关）。
+    /// 显式固定分片大小与并发数，跳过 planner 的自适应路径（保留旧单路径行为的开关）。
     pub fn with_fixed_chunks(mut self, chunk_size: usize, concurrency: usize) -> Self {
         self.chunk_size = Some(chunk_size);
         self.concurrency = Some(concurrency);
@@ -234,8 +235,8 @@ pub async fn quick_share_upload(
     serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))
 }
 
-/// upload() / quick_share_upload() 共用的传输主线：探测选档 → describe → init →
-/// 多路调度传片 → complete，返回 complete 响应的原始 JSON，由调用方按模式解析。
+/// upload() / quick_share_upload() 共用的传输主线：按大小定档 → describe → init →
+/// 多路调度传片（后台探测并发补测）→ complete，返回 complete 响应的原始 JSON，由调用方按模式解析。
 /// quick_share 时 init 带 quick_share=true，complete 的 data 是分享记录结构。
 async fn upload_inner(
     client: &ApiClient,
@@ -278,7 +279,7 @@ async fn upload_inner(
             Err(e) => Err(e.into_string()),
         }
     } else {
-        // 自适应路径：planner 探测选档 + 多路径调度
+        // 自适应路径：按大小定档 + 多路径调度（后台探测并发补测）
         run_planned(client, file, remote_dir, options, on_progress, config).await
     }
 }
@@ -339,7 +340,7 @@ struct SpeedtestData {
     server_ms: i64,
 }
 
-/// 自适应路径：planner 探测 → describe（用选出的档位）→ init → 多路径传输 → complete。
+/// 自适应路径：按大小定档（不等探测）→ describe → init → 多路传输（后台探测并发）→ complete。
 async fn run_planned(
     client: &ApiClient,
     file: &Path,
@@ -380,76 +381,42 @@ async fn run_planned(
             .await
             .map_err(|e| e.into_string());
     }
-    let input = {
+    let (main_node, state) = {
         let cfg = config.read();
         let state = cfg
             .upload_planner_state
             .as_ref()
             .and_then(|v| serde_json::from_value::<planner::PersistedState>(v.clone()).ok())
             .unwrap_or_default();
-        planner::PlannerInput {
-            total_size: total,
-            main_node: cfg.active_node_id.clone(),
-            now_ms: now_ms(),
-            nodes: pool.clone(),
-            state,
-            adjust_cooldown_ms: planner::ADJUST_COOLDOWN_MS,
-        }
+        (cfg.active_node_id.clone(), state)
+    };
+    let input = planner::PlannerInput {
+        total_size: total,
+        main_node: main_node.clone(),
+        now_ms: now_ms(),
+        nodes: pool.clone(),
+        state: state.clone(),
+        adjust_cooldown_ms: planner::ADJUST_COOLDOWN_MS,
+        // 探测恒定开启（快传与同步一样要占满多链路）；DRR 权重用平方根，多链路更均衡
+        weight_exponent: planner::DEFAULT_WEIGHT_EXPONENT,
     };
     let mut p = planner::Planner::new(input).map_err(|e| format!("上传规划失败: {}", e))?;
 
-    // ── 探测循环：planner 一次只派一个探测，inline 执行回结果后再拿下一个 ──
-    // 聚合每个节点的 rtt/bps 样本， finalize 后统一打一行探测日志。
-    let mut probe_rtt: HashMap<String, u64> = HashMap::new();
-    let mut probe_bps: HashMap<String, f64> = HashMap::new();
-    loop {
-        match p.next_task() {
-            planner::Task::Probe(t) => {
-                let node = t.node.clone();
-                match run_probe(client, &t).await {
-                    Outcome::Report(r) => {
-                        if let planner::Report::ProbeOk {
-                            kind,
-                            bytes,
-                            elapsed_ms,
-                            ..
-                        } = &r
-                        {
-                            match kind {
-                                planner::ProbeKind::Tiny => {
-                                    probe_rtt.insert(node.clone(), *elapsed_ms);
-                                }
-                                planner::ProbeKind::Throughput => {
-                                    let secs = *elapsed_ms as f64 / 1000.0;
-                                    if secs > 0.0 {
-                                        probe_bps
-                                            .insert(node.clone(), *bytes as f64 / secs);
-                                    }
-                                }
-                            }
-                        }
-                        p.report(r);
-                    }
-                    Outcome::Fatal(e) => return Err(e),
-                }
-            }
-            // 探测 inline 执行，不会有未决探测：Wait = 队列探完、规划完成
-            planner::Task::Wait => break,
-            other => return Err(format!("上传规划异常任务: {:?}", other)),
-        }
-    }
+    // 分片大小只由文件大小决定，不再等探测：describe/init 立即开始，首字节即时发出。
+    // 探测改为传输期后台并发补测（见下方统一循环），样本回来后经 report 并入调度。
     let chunk_size = match p.planned_chunk_size() {
         Some(c) => c as usize,
-        None => {
-            return Err(p
-                .fail_reason()
-                .unwrap_or("上传规划失败：没有可用路径")
-                .to_string())
-        }
+        None => return Err("上传规划失败：无法确定分片大小".to_string()),
     };
-    log_plan(&p, &pool, &probe_rtt, &probe_bps, chunk_size as u64);
+    log_plan_start(&pool, &state, &main_node, chunk_size as u64, total);
+    // 传输期后台探测的样本聚合，结束时统一打一行规划日志。
+    let mut probe_rtt: HashMap<String, u64> = HashMap::new();
+    let mut probe_bps: HashMap<String, f64> = HashMap::new();
+    // 每节点探测返回的后端节点名：收尾日志用它判定"同后端校验"把谁踢出了上传池。
+    let mut probe_backend: HashMap<String, String> = HashMap::new();
+    // 每节点实际派出的分片数/字节：收尾日志里用它证明多链路到底有没有跑起来。
+    let mut node_dispatch: HashMap<String, (u64, u64)> = HashMap::new();
 
-    // describe 依赖分片档位，探测选档完成后再算哈希（一趟顺序读，叶子+树根+整文件）。
     let desc = describe(file, chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
     on_progress(0, desc.total_size);
 
@@ -520,14 +487,20 @@ async fn run_planned(
 
     p.begin_transfer(&init.upload_id, &missing);
     let mut upload_id = init.upload_id.clone();
+    log_initial_windows(&p);
 
-    // ── 传输循环：Chunk 派 tokio task（channel 回报），Wait 挂在 channel 上 ──
+    // ── 统一传输循环：Chunk 与后台 Probe 都派 tokio task（channel 回报），Wait 挂 channel ──
     let (tx, mut rx) = mpsc::channel::<Outcome>(64);
     let mut tasks: JoinSet<()> = JoinSet::new();
     let mut win_snapshot: Vec<(String, usize)> = p.windows();
     let result: Result<serde_json::Value, String> = loop {
         match p.next_task() {
             planner::Task::Chunk(t) => {
+                {
+                    let e = node_dispatch.entry(t.node.clone()).or_insert((0, 0));
+                    e.0 += 1;
+                    e.1 += t.bytes;
+                }
                 let tx = tx.clone();
                 let client = client.clone();
                 let path = file.to_path_buf();
@@ -536,6 +509,16 @@ async fn run_planned(
                 let desc_total = desc.total_size;
                 tasks.spawn(async move {
                     let outcome = execute_chunk(&client, &path, &uid, desc_chunk, desc_total, &t).await;
+                    let _ = tx.send(outcome).await;
+                });
+            }
+            // 边传边测：探测与分片并发派发（planner 数据未传完就优先给探测），
+            // 结果回来经 report 并入 DRR 池——多线路能否用起来全靠它。
+            planner::Task::Probe(t) => {
+                let tx = tx.clone();
+                let client = client.clone();
+                tasks.spawn(async move {
+                    let outcome = run_probe(&client, &t).await;
                     let _ = tx.send(outcome).await;
                 });
             }
@@ -555,6 +538,7 @@ async fn run_planned(
                 };
                 match wake {
                     Some(Wake::Outcome(Outcome::Report(r))) => {
+                        record_probe_sample(&r, &mut probe_rtt, &mut probe_bps, &mut probe_backend);
                         let reason = report_reason(&r);
                         if let planner::Report::ChunkOk { bytes, .. } = &r {
                             let prev = bytes_sent.fetch_add(*bytes as i64, Ordering::Relaxed);
@@ -648,14 +632,56 @@ async fn run_planned(
                 Err(e) => break Err(e),
             },
             planner::Task::Failed { reason } => break Err(reason),
-            planner::Task::Probe(_) => break Err("上传规划异常：传输阶段出现探测任务".into()),
         }
     };
 
-    // 异常退出（Fatal/停滞）时在途分片不再有意义的，全部放弃
+    // 异常退出（Fatal/停滞）时在途分片/探测不再有意义的，全部放弃
     tasks.abort_all();
+    // 计划日志放在传输结束后：此时才聚合齐后台探测样本（首字节早已发出，不受其阻塞）
+    log_plan(
+        &p,
+        &pool,
+        &probe_rtt,
+        &probe_bps,
+        &probe_backend,
+        &main_node,
+        chunk_size as u64,
+        &node_dispatch,
+    );
     persist_planner_state(config, &p);
     result
+}
+
+/// 聚合探测样本用于收尾规划日志（rtt / 实测带宽 / 后端节点名）。
+fn record_probe_sample(
+    r: &planner::Report,
+    rtt: &mut HashMap<String, u64>,
+    bps: &mut HashMap<String, f64>,
+    backend: &mut HashMap<String, String>,
+) {
+    if let planner::Report::ProbeOk {
+        node,
+        kind,
+        bytes,
+        elapsed_ms,
+        backend_node,
+    } = r
+    {
+        if !backend_node.is_empty() {
+            backend.insert(node.clone(), backend_node.clone());
+        }
+        match kind {
+            planner::ProbeKind::Tiny => {
+                rtt.insert(node.clone(), *elapsed_ms);
+            }
+            planner::ProbeKind::Throughput => {
+                let secs = *elapsed_ms as f64 / 1000.0;
+                if secs > 0.0 {
+                    bps.insert(node.clone(), *bytes as f64 / secs);
+                }
+            }
+        }
+    }
 }
 
 enum Wake {
@@ -665,7 +691,13 @@ enum Wake {
 }
 
 /// 执行一个探测任务：POST planner 指定节点的测速接口，把响应当 RTT/带宽样本回报。
+/// 探测结果逐条打日志——多线路能否用起来，全看这里的成败，不要静默吞掉失败原因。
 async fn run_probe(client: &ApiClient, t: &planner::ProbeTask) -> Outcome {
+    let kind = if t.kind == planner::ProbeKind::Tiny {
+        "rtt"
+    } else {
+        "bw"
+    };
     let body = vec![0u8; t.bytes as usize];
     let bytes_q = t.bytes.to_string();
     let params = [("bytes", bytes_q.as_str())];
@@ -681,21 +713,58 @@ async fn run_probe(client: &ApiClient, t: &planner::ProbeTask) -> Outcome {
         .await;
     match resp {
         Err(e) if e.contains(NODE_SWITCHED) => Outcome::Fatal(e),
-        Err(_) => Outcome::Report(planner::Report::ProbeFailed {
-            node: t.node.clone(),
-            kind: t.kind,
-        }),
+        Err(e) => {
+            logger::warn(
+                "upload",
+                format!("[upload] 探测失败 node={} kind={}: {}", t.node, kind, e),
+            );
+            Outcome::Report(planner::Report::ProbeFailed {
+                node: t.node.clone(),
+                kind: t.kind,
+            })
+        }
         Ok(r) => {
             if r.is_ok() {
                 let data = r.data.unwrap_or_default();
+                let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+                if t.kind == planner::ProbeKind::Throughput {
+                    let bps = t.bytes as f64 / (elapsed_ms as f64 / 1000.0);
+                    logger::info(
+                        "upload",
+                        format!(
+                            "[upload] 探测 node={} bw={}/s ({}ms) backend={}",
+                            t.node,
+                            fmt_bps(bps),
+                            elapsed_ms,
+                            if data.node.is_empty() { "?" } else { &data.node }
+                        ),
+                    );
+                } else {
+                    logger::info(
+                        "upload",
+                        format!(
+                            "[upload] 探测 node={} rtt={}ms backend={}",
+                            t.node,
+                            elapsed_ms,
+                            if data.node.is_empty() { "?" } else { &data.node }
+                        ),
+                    );
+                }
                 Outcome::Report(planner::Report::ProbeOk {
                     node: t.node.clone(),
                     kind: t.kind,
                     bytes: t.bytes,
-                    elapsed_ms: started.elapsed().as_millis().max(1) as u64,
+                    elapsed_ms,
                     backend_node: data.node,
                 })
             } else {
+                logger::warn(
+                    "upload",
+                    format!(
+                        "[upload] 探测失败 node={} kind={}: [{}] {}",
+                        t.node, kind, r.code, r.message
+                    ),
+                );
                 Outcome::Report(planner::Report::ProbeFailed {
                     node: t.node.clone(),
                     kind: t.kind,
@@ -1009,38 +1078,140 @@ async fn complete_upload(
     }
 }
 
-/// 探测完成后打一行规划日志：每节点 rtt=微样本 b=实测带宽 eff=父链折算后带宽
-/// chunk=选出的档位 conc=初始窗口。示例：[upload] probe node=ddns rtt=20ms b=1.3MB/s eff=1.3MB/s chunk=8MB conc=1
+/// 传输开始前的规划日志：把真正交给 planner 的节点池、主节点、探测开关、分片档位、
+/// 以及哪些节点有新鲜持久化样本（因此会跳过现场探测）一次性打出来。
+/// 这是判断「到底配了几条链路 / 为什么看起来只有一条」的第一手依据。
+fn log_plan_start(
+    pool: &[planner::PlannerNodeConfig],
+    state: &planner::PersistedState,
+    main_node: &str,
+    chunk_size: u64,
+    total: u64,
+) {
+    let now = now_ms();
+    let fresh_ids: Vec<String> = state
+        .nodes
+        .iter()
+        .filter(|n| now - n.measured_at_ms <= planner::STATE_FRESH_MS)
+        .map(|n| n.id.clone())
+        .collect();
+    let pool_desc: Vec<String> = pool
+        .iter()
+        .map(|n| match &n.parent {
+            Some(p) => format!("{}({}←{})", n.id, n.url, p),
+            None => format!("{}({})", n.id, n.url),
+        })
+        .collect();
+    logger::info(
+        "upload",
+        format!(
+            "[upload] 规划: 主节点={} 分片={} 大小={} 节点池[{}] 新鲜样本[{}]",
+            main_node,
+            fmt_chunk(chunk_size),
+            fmt_bytes(total),
+            if pool_desc.is_empty() {
+                "-".to_string()
+            } else {
+                pool_desc.join(", ")
+            },
+            if fresh_ids.is_empty() {
+                "-".to_string()
+            } else {
+                fresh_ids.join(",")
+            },
+        ),
+    );
+    if pool.len() < 2 {
+        logger::warn(
+            "upload",
+            format!(
+                "[upload] 节点池只有 {} 个节点，本次上传为单链路（多路径需 ≥2 个节点）",
+                pool.len()
+            ),
+        );
+    }
+}
+
+/// 开始传输时的初始窗口：conc=0 表示该节点此刻还不在上传池里（等探测结果或本就在池外）。
+fn log_initial_windows(p: &planner::Planner) {
+    let w: Vec<String> = p
+        .windows()
+        .into_iter()
+        .map(|(id, n)| format!("{}={}", id, n))
+        .collect();
+    logger::info("upload", format!("[upload] 初始窗口: {}", w.join(" ")));
+}
+
+/// 收尾规划日志：每节点 rtt/bw/eff/最终窗口 + 实际派发量 + 出池原因，chunk=分片档位。
+/// 示例：[upload] node=ddns rtt=20ms bw=1.3MB/s eff=1.3MB/s conc=2 [在用] 实传=42片/168MB
 fn log_plan(
     p: &planner::Planner,
     pool: &[planner::PlannerNodeConfig],
     probe_rtt: &HashMap<String, u64>,
     probe_bps: &HashMap<String, f64>,
+    probe_backend: &HashMap<String, String>,
+    main_node: &str,
     chunk_size: u64,
+    node_dispatch: &HashMap<String, (u64, u64)>,
 ) {
     let measured: HashMap<String, f64> = probe_bps.clone();
     let eff = planner::combine_effective(pool, &measured);
     let windows = p.windows();
+    let main_backend = probe_backend.get(main_node).cloned().unwrap_or_default();
+    logger::info("upload", format!("[upload] 规划收尾: chunk={}", fmt_chunk(chunk_size)));
     for n in pool {
-        let (Some(&rtt), Some(&b)) = (probe_rtt.get(&n.id), probe_bps.get(&n.id)) else {
-            continue;
-        };
-        let e = eff.get(&n.id).copied().unwrap_or(b);
         let conc = windows
             .iter()
             .find(|(id, _)| id == &n.id)
             .map(|(_, w)| *w)
             .unwrap_or(0);
+        let rtt = probe_rtt
+            .get(&n.id)
+            .map(|v| format!("{}ms", v))
+            .unwrap_or_else(|| "-".to_string());
+        let b = probe_bps.get(&n.id).map(|v| fmt_bps(*v)).unwrap_or_else(|| "-".into());
+        let e = eff.get(&n.id).map(|v| fmt_bps(*v)).unwrap_or_else(|| "-".into());
+        let (cnt, bytes) = node_dispatch.get(&n.id).copied().unwrap_or((0, 0));
+        // 出池原因：同后端校验不符 / 仅测到 RTT 吞吐失败 / 探测失败或未探测
+        let state = if conc > 0 {
+            "在用".to_string()
+        } else if let Some(nb) = probe_backend.get(&n.id) {
+            if !main_backend.is_empty() && nb != &main_backend {
+                format!("出池:后端不一致(本节点={} 主节点={})", nb, main_backend)
+            } else if probe_bps.contains_key(&n.id) {
+                "出池:已测未入池".to_string()
+            } else {
+                "出池:吞吐探测失败/未完成".to_string()
+            }
+        } else if probe_rtt.contains_key(&n.id) {
+            "出池:吞吐探测失败".to_string()
+        } else {
+            "出池:探测失败/未探测".to_string()
+        };
         logger::info(
             "upload",
             format!(
-                "[upload] probe node={} rtt={}ms b={}/s eff={}/s chunk={} conc={}",
+                "[upload] node={} rtt={} bw={}/s eff={}/s conc={} [{}] 实传={}片/{}",
                 n.id,
                 rtt,
-                fmt_bps(b),
-                fmt_bps(e),
-                fmt_chunk(chunk_size),
-                conc
+                b,
+                e,
+                conc,
+                state,
+                cnt,
+                fmt_bytes(bytes)
+            ),
+        );
+    }
+    let used = node_dispatch.values().filter(|(c, _)| *c > 0).count();
+    if used >= 2 {
+        logger::info("upload", format!("[upload] 多链路生效: {} 个节点参与上传", used));
+    } else {
+        logger::warn(
+            "upload",
+            format!(
+                "[upload] 单链路：仅 {} 个节点参与上传（其余节点见上方出池原因）",
+                used
             ),
         );
     }
@@ -1106,6 +1277,20 @@ fn fmt_chunk(n: u64) -> String {
         format!("{}MB", n >> 20)
     } else if n >= (1 << 10) && n % (1 << 10) == 0 {
         format!("{}KB", n >> 10)
+    } else {
+        format!("{}B", n)
+    }
+}
+
+/// 任意字节数 → 人类可读（1.5GB / 320MB / 4.0MB / 512KB / 800B），带一位小数。
+fn fmt_bytes(n: u64) -> String {
+    let f = n as f64;
+    if f >= 1e9 {
+        format!("{:.1}GB", f / 1e9)
+    } else if f >= 1e6 {
+        format!("{:.1}MB", f / 1e6)
+    } else if f >= 1e3 {
+        format!("{:.0}KB", f / 1e3)
     } else {
         format!("{}B", n)
     }
