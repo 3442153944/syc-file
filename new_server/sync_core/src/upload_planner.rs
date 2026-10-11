@@ -65,6 +65,11 @@ pub const CHUNK_TIERS: [u64; 8] = [
     8 << 20,
 ];
 
+/// 单节点在途分片缓冲预算（字节）。每片在上传期间整片驻留内存（客户端 Vec + 服务端
+/// 读 body 缓冲），在途上限 ≈ 窗口×分片——不钳制的话极端配置（3 节点×32 路×8MB）
+/// 能到 768MB。窗口上限 = max(1, 预算/分片)：8MB 片最多 8 路/节点，64K 片才放开到 32。
+pub const MEM_BUDGET_PER_NODE: u64 = 64 << 20;
+
 // ---------------------------------------------------------------- 输入输出类型
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -291,6 +296,8 @@ struct NodeRuntime {
     /// 探测失败（本次探测且没有新鲜持久化兜底）。
     probe_dead: bool,
     window: usize,
+    /// 内存预算钳制的窗口上限（finalize 时按分片大小算好），AIMD 加窗也不得越过。
+    window_cap: usize,
     deficit: f64,
     streak: u32,
     last_adjust: Option<Instant>,
@@ -376,6 +383,7 @@ impl Planner {
                 backend_node: None,
                 probe_dead: false,
                 window: 1,
+                window_cap: MAX_PER_NODE_CONCURRENCY,
                 deficit: 0.0,
                 streak: 0,
                 last_adjust: None,
@@ -646,10 +654,13 @@ impl Planner {
         }
 
         self.chunk_size = pick_chunk_size(total, self.total_size);
+        let window_cap = ((MEM_BUDGET_PER_NODE / self.chunk_size).max(1) as usize)
+            .clamp(1, MAX_PER_NODE_CONCURRENCY);
         for n in &mut self.nodes {
             match (eff.get(&n.cfg.id), n.rtt) {
                 (Some(&e), Some(rtt)) if e > 0.0 => {
-                    n.window = initial_window(e, rtt, self.chunk_size);
+                    n.window_cap = window_cap;
+                    n.window = initial_window(e, rtt, self.chunk_size).min(window_cap);
                     n.bps = Some(e);
                 }
                 _ => {
@@ -794,7 +805,7 @@ impl Planner {
     fn maybe_increase_window(&mut self, node_id: &str) {
         let cooldown = self.adjust_cooldown;
         let chunk = self.chunk_size;
-        let (streak, window, last_adjust, baseline, ema_bps) = {
+        let (streak, window, window_cap, last_adjust, baseline, ema_bps) = {
             let n = match self.node_mut(node_id) {
                 Some(n) => n,
                 None => return,
@@ -802,12 +813,13 @@ impl Planner {
             (
                 n.streak,
                 n.window,
+                n.window_cap,
                 n.last_adjust,
                 n.rtt.unwrap_or(Duration::from_secs(1)),
                 n.ema_bps,
             )
         };
-        if streak < STREAK_TO_INCREASE || window >= MAX_PER_NODE_CONCURRENCY {
+        if streak < STREAK_TO_INCREASE || window >= window_cap {
             return;
         }
         let cooldown_ok = last_adjust
@@ -1106,6 +1118,20 @@ mod tests {
             MAX_PER_NODE_CONCURRENCY
         );
         assert_eq!(initial_window(0.0, Duration::from_millis(10), MAX_CHUNK), 1);
+    }
+
+    #[test]
+    fn test_mem_budget_caps_window() {
+        // 超大带宽探针（2MiB/5ms ≈ 420MB/s）→ 选片封顶 8MB，窗口需求 53 路
+        // → 必须被内存预算钳到 64MB/8MB=8，而不是 MAX_PER_NODE_CONCURRENCY
+        let nodes = vec![node("main", None)];
+        let p = Planner::new(input(nodes, "main", 1_000_000)).unwrap();
+        let mut p = run_probes_with(p, &[], 5);
+        let chunk = p.planned_chunk_size().unwrap();
+        assert_eq!(chunk, 8 << 20);
+        let w = p.windows()[0].1;
+        assert_eq!(w, (MEM_BUDGET_PER_NODE / chunk) as usize);
+        assert!(w < MAX_PER_NODE_CONCURRENCY);
     }
 
     #[test]
