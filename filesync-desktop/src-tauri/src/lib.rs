@@ -11,6 +11,7 @@ mod device;
 mod hotkey_codec;
 mod logger;
 mod net;
+mod speedtest;
 mod sync_engine;
 mod transfers;
 mod upload_worker;
@@ -235,6 +236,9 @@ pub fn run() {
             transfers::transfer_clear_finished,
             // 粘贴快传
             app_shell::quick_paste::set_quick_paste_hotkey,
+            app_shell::quick_paste::quick_share_upload,
+            app_shell::quick_paste::quick_share_upload_path,
+            app_shell::quick_paste::clipboard_file_paths,
             // 记住密码
             commands::credential::save_remembered_credential,
             commands::credential::get_remembered_credential,
@@ -255,6 +259,8 @@ pub fn run() {
             net::save_server_node,
             net::remove_server_node,
             net::set_failover_settings,
+            // 节点测速（多路径核心并发探测）
+            speedtest::speedtest_nodes,
             // 剪贴板同步
             clipboard_sync::get_clipboard_settings,
             clipboard_sync::set_clipboard_settings,

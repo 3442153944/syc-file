@@ -10,7 +10,7 @@
 import {computed, ref, watch} from 'vue'
 import {
   NModal, NForm, NFormItem, NInput, NButton, NSpace, NSwitch, NInputNumber,
-  NTag, NTooltip, useMessage,
+  NTag, NTooltip, NSelect, useMessage,
 } from 'naive-ui'
 import {
   netState, probeAll, switchNode, saveNode, removeNode, setFailover, healthOf,
@@ -24,10 +24,18 @@ const message = useMessage()
 const probing = ref(false)
 const busyId = ref('')
 
-// 编辑态：null = 没在编辑；id 为空字符串 = 新增
-const editing = ref<{ id: string; name: string; serverUrl: string; wsUrl: string } | null>(null)
+// 编辑态：null = 没在编辑；id 为空字符串 = 新增；parent = 父节点 id（null = 独立链路）
+const editing = ref<{ id: string; name: string; serverUrl: string; wsUrl: string; parent: string | null } | null>(null)
 
 const nodes = computed(() => netState.nodes)
+
+// 父节点候选：除正在编辑的本节点外的全部节点。父链用于上传 planner 的带宽折算
+// （本节点入口是父节点 nginx 的反代上游时，两者共享瓶颈）
+const parentOptions = computed(() =>
+    nodes.value
+        .filter(n => n.id !== editing.value?.id)
+        .map(n => ({label: `${n.name}（${n.id}）`, value: n.id})),
+)
 
 // 打开面板时顺手探测一次，用户看到的延迟数字才是当下的
 watch(() => props.show, async (v) => {
@@ -85,11 +93,14 @@ async function handleSwitch(node: ServerNode) {
 }
 
 function startAdd() {
-  editing.value = {id: '', name: '', serverUrl: '', wsUrl: ''}
+  editing.value = {id: '', name: '', serverUrl: '', wsUrl: '', parent: null}
 }
 
 function startEdit(node: ServerNode) {
-  editing.value = {id: node.id, name: node.name, serverUrl: node.server_url, wsUrl: node.ws_url}
+  editing.value = {
+    id: node.id, name: node.name, serverUrl: node.server_url, wsUrl: node.ws_url,
+    parent: node.parent ?? null,
+  }
 }
 
 async function handleSaveNode(activate: boolean) {
@@ -106,6 +117,7 @@ async function handleSaveNode(activate: boolean) {
       name: e.name,
       serverUrl: e.serverUrl,
       wsUrl: e.wsUrl || null,
+      parent: e.parent,
       activate,
     })
     message.success(activate ? '已保存并切换' : '节点已保存')
@@ -203,6 +215,14 @@ async function handleInterval(v: number | null) {
         <n-form-item label="WebSocket">
           <n-input v-model:value="editing.wsUrl" placeholder="留空自动推导（https→wss）"/>
         </n-form-item>
+        <n-form-item label="父节点">
+          <n-select v-model:value="editing.parent" :options="parentOptions" clearable filterable
+                    placeholder="无（独立链路）"/>
+        </n-form-item>
+        <div class="parent-hint">
+          父节点用于多路径上传的带宽折算：本节点入口是父节点 nginx 的反代上游时选它
+          （如 hk 的上游是 ddns），两者共享瓶颈；普通节点留空。
+        </div>
       </n-form>
       <n-space justify="end" :size="8">
         <n-button size="small" @click="editing = null">取消</n-button>
@@ -306,6 +326,13 @@ async function handleInterval(v: number | null) {
   padding: 12px;
   border: 1px dashed #dcdfe6;
   border-radius: 8px;
+}
+
+.parent-hint {
+  font-size: 12px;
+  color: #a8abb2;
+  line-height: 1.6;
+  margin: -6px 0 8px 90px;
 }
 
 .settings {

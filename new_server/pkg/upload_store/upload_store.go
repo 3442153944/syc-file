@@ -43,6 +43,8 @@ type Session struct {
 	Status     string `redis:"status"`      // uploading / completed
 	HistoryID  uint64 `redis:"history_id"`
 	CreatedAt  int64  `redis:"created_at"`
+	// QuickShare 粘贴快传模式：complete 不建 file 记录/同步派发，直接生成分享记录。
+	QuickShare bool `redis:"quick_share"`
 }
 
 type UploadStore struct {
@@ -80,6 +82,7 @@ func (s *UploadStore) Create(ctx context.Context, sess *Session, ttl time.Durati
 		"status":      sess.Status,
 		"history_id":  sess.HistoryID,
 		"created_at":  sess.CreatedAt,
+		"quick_share": sess.QuickShare,
 	}
 	if err := s.rdb.HSet(ctx, metaKey(sess.ID), m).Err(); err != nil {
 		return err
@@ -112,6 +115,7 @@ func (s *UploadStore) Get(ctx context.Context, id string) (*Session, error) {
 		Status:     m["status"],
 		HistoryID:  uint64(atoi("history_id")),
 		CreatedAt:  atoi("created_at"),
+		QuickShare: m["quick_share"] == "1",
 	}
 	return sess, nil
 }

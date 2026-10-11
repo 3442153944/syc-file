@@ -2,40 +2,63 @@
 // 分片上传编排：算描述信息（叶子/树根/整文件 blake3）→ init →（秒传则完成）
 //               → 乱序并发补传缺失分片 → complete。
 //
-// 设计要点：
-// - 并发：后端 chunk 接口支持乱序/可并发，本端用 Semaphore 限流的协程池并发上传，大幅提速大文件。
-// - 进度：字节级，基于已成功分片累计字节数回调；init 阶段先置「已落盘分片」估算基线。
-// - 取消：本函数是 async，调用方 cancel 它对应的 task 即停止派发新分片；已在途分片随 reqwest 抛错。
-//   每个分片任务开头 `yield_now().await` 让 cancel 信号尽快传播。
-// - 会话过期：任一分片收 code==404 → 视作 SessionGone，由外层 upload() 捕获后自动重新 init 整流程一次
-//   （不会重算哈希；二次仍失败则原样返回 Err）。
+// 两条路径：
+// - 自适应（默认）：分片大小只由文件大小决定，describe→init 立即开始（不再等探测，首字节
+//   即时发出）；传输期由 planner 做多路径调度（父链折算共享瓶颈、per-node AIMD 窗口、动态
+//   超时、重排重试 CHUNK_ATTEMPTS=3 全部由 planner 负责，本端不做分片级内部重试）。后台探测
+//   以「闲时补测」方式与传输并发：planner 只在派不出分片时顺手给探测，用富余带宽补测其它线路，
+//   样本回来后并入调度（10min 内有新鲜持久化样本则跳过）。
+// - 固定覆盖（UploadOptions.chunk_size 有值）：跳过 planner，init/chunk 全走激活节点的旧
+//   单路径行为，可预期。
 //
-// 哈希规则与 file_lib/README.md 一致：叶子=blake3(分片字节)；parent=blake3(left‖right)；
+// planner 是同步对象，本模块是它的平台侧：分片与探测各派一个 tokio task，结果经 channel
+// 喂回本循环；Task::Wait = 无任务可分派，挂在 channel 上等在途分片/探测的 Report。
+// Chunk 任务带明确 node url，必须打到该 URL（多路径必须落在同一会话上，由 planner 做
+// 同后端校验）。
+//
+// 进度：字节级，基于已成功分片累计字节数回调；init 阶段先置「已落盘分片」估算基线。
+// 取消：本函数是 async，调用方 cancel 它对应的 task 即停止派发新分片；已在途分片随循环
+//   退出被 abort（Fatal 路径）或自然完成（Done 时无在途分片）。
+// 会话过期：分片收 code==404 → 回报 ChunkSessionGone → planner 发 Task::Reinit → 本端用
+//   同一 Description 重新 init（不重算哈希）→ planner.resume 续传。
+//
+// 哈希规则与 sync_core/README.md 一致：叶子=blake3(分片字节)；parent=blake3(left‖right)；
 // 奇数节点原样进位；空→blake3("")；单叶子→该叶子本身。与 Android Blake3Util.kt 逐字节一致。
-use crate::api::client::ApiClient;
+use crate::api::client::{ApiClient, ApiResponse, NODE_SWITCHED};
 use crate::api::file::{api as file_api, params::*, response::*};
+use crate::api::routes;
+use crate::config::SharedSyncConfig;
+use crate::logger;
 use blake3::Hasher;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use std::time::{Duration, Instant};
+use sync_core::upload_planner as planner;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
-/// 默认分片 4MiB。
+/// 默认分片 4MiB（固定覆盖路径的缺省值）。
 pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
-/// 默认并发分片数。
+/// 默认并发分片数（固定覆盖路径的缺省值）。
 pub const DEFAULT_CONCURRENCY: usize = 3;
 
-/// 单片校验失败时的重传次数。
-const CHUNK_RETRY: usize = 3;
+/// 传输循环在 channel 与在途分片都无进展时的停滞保护：planner 的单片超时上限 120s，
+/// 超过 2 倍仍无任何分片完成说明调度或执行挂死，报错退出而不是干等。
+const STALL_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// 进度回调类型：`(已发送字节, 总字节)`。Arc 以便多 task 共享。
 pub type ProgressFn = Arc<dyn Fn(i64, i64) + Send + Sync + 'static>;
 
 #[derive(Clone)]
 pub struct UploadOptions {
-    pub chunk_size: usize,
-    pub concurrency: usize,
+    /// 分片大小覆盖：None=自适应（planner 按文件大小定档 + 多路径调度 + 传输期后台探测，默认）；
+    /// Some(n)=固定 n 字节分片，走激活节点的旧单路径行为。
+    pub chunk_size: Option<usize>,
+    /// 并发覆盖：None=planner 的 per-node AIMD 窗口；Some(n)=固定协程池（固定路径用）。
+    pub concurrency: Option<usize>,
     /// 本机设备 id，服务端派发同步任务时排除源设备。
     pub device_id: Arc<str>,
     /// 目标同名时的策略：空/"reject" = 报错（默认，同步链路必须用这个），
@@ -44,6 +67,9 @@ pub struct UploadOptions {
     /// 同步链路的覆盖式上传：Some(base_hash) 表示带基线上传（"" = 本机没有基线），
     /// 服务端目标已存在时据此判断是快进还是与其它设备分叉；None = 普通上传。
     pub sync_base: Option<Arc<str>>,
+    /// 粘贴快传：init 带 quick_share=true（服务端自算目标路径、按快传配额预检），
+    /// complete 返回分享记录（QuickShareCompleteData）而非文件记录。
+    pub quick_share: bool,
 }
 
 /// init 被服务端以版本冲突拒绝时，错误信息里带的标记。服务端已把冲突登记为待办并通知本机隔离本地副本，
@@ -53,11 +79,12 @@ pub const SYNC_CONFLICT: &str = "同步冲突";
 impl UploadOptions {
     pub fn new(device_id: impl Into<String>) -> Self {
         UploadOptions {
-            chunk_size: DEFAULT_CHUNK_SIZE,
-            concurrency: DEFAULT_CONCURRENCY,
+            chunk_size: None,
+            concurrency: None,
             device_id: Arc::from(device_id.into().into_boxed_str()),
             on_conflict: Arc::from(""),
             sync_base: None,
+            quick_share: false,
         }
     }
 
@@ -67,9 +94,22 @@ impl UploadOptions {
         self
     }
 
+    /// 粘贴快传模式：complete 返回分享记录，目标路径/配额由服务端按 quick_share 规则处理。
+    pub fn with_quick_share(mut self) -> Self {
+        self.quick_share = true;
+        self
+    }
+
     /// 同名自动加时间戳（不影响其它字段）。
     pub fn with_timestamp_on_conflict(mut self) -> Self {
         self.on_conflict = Arc::from("timestamp");
+        self
+    }
+
+    /// 显式固定分片大小与并发数，跳过 planner 的自适应路径（保留旧单路径行为的开关）。
+    pub fn with_fixed_chunks(mut self, chunk_size: usize, concurrency: usize) -> Self {
+        self.chunk_size = Some(chunk_size);
+        self.concurrency = Some(concurrency);
         self
     }
 }
@@ -131,7 +171,7 @@ fn describe(file: &Path, chunk_size: usize) -> std::io::Result<Description> {
 }
 
 /// Merkle 树根：叶子两两合并 parent = blake3(left ‖ right)，奇数节点原样进位到上层。
-/// 空 → blake3("")；单叶子 → 该叶子本身。规则同 file_lib/src/lib.rs 的 merkle_root。
+/// 空 → blake3("")；单叶子 → 该叶子本身。规则同 sync_core/src/lib.rs 的 merkle_root。
 fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
     if leaves.is_empty() {
         return *blake3::hash(&[]).as_bytes();
@@ -168,42 +208,79 @@ struct Description {
 
 /// 上传整份文件。
 /// `on_progress(sent_bytes, total_bytes)` 在 init 后及每片成功后回调。
+/// `config` 提供节点池 / 激活节点 / planner 持久化状态（自适应路径用；固定路径不读）。
 pub async fn upload(
     client: &ApiClient,
     file: &Path,
     remote_dir: &str,
     options: &UploadOptions,
     on_progress: ProgressFn,
+    config: &SharedSyncConfig,
 ) -> Result<UploadCompleteData, String> {
-    let desc =
-        describe(file, options.chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
-    on_progress(0, desc.total_size);
+    let v = upload_inner(client, file, remote_dir, options, on_progress, config).await?;
+    serde_json::from_value(v).map_err(|e| format!("解析上传结果失败: {}", e))
+}
 
-    match run_once(
-        client,
-        file,
-        remote_dir,
-        &desc,
-        options,
-        on_progress.clone(),
-    )
-    .await
-    {
-        Ok(d) => Ok(d),
-        Err(e) if e.is_session_gone() => {
-            // 会话过期：重新 init 整流程一次（不重算哈希）
-            run_once(
-                client,
-                file,
-                remote_dir,
-                &desc,
-                options,
-                on_progress.clone(),
-            )
-            .await
-            .map_err(|e2| e2.into_string())
+/// 粘贴快传上传：与 upload() 同一条多路管道，complete 返回分享记录
+/// （服务端 finalizeShareLink 的 data 原样，与旧单发快传接口形状一致）。
+pub async fn quick_share_upload(
+    client: &ApiClient,
+    file: &Path,
+    remote_dir: &str,
+    options: &UploadOptions,
+    on_progress: ProgressFn,
+    config: &SharedSyncConfig,
+) -> Result<QuickShareCompleteData, String> {
+    let v = upload_inner(client, file, remote_dir, options, on_progress, config).await?;
+    serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))
+}
+
+/// upload() / quick_share_upload() 共用的传输主线：按大小定档 → describe → init →
+/// 多路调度传片（后台探测并发补测）→ complete，返回 complete 响应的原始 JSON，由调用方按模式解析。
+/// quick_share 时 init 带 quick_share=true，complete 的 data 是分享记录结构。
+async fn upload_inner(
+    client: &ApiClient,
+    file: &Path,
+    remote_dir: &str,
+    options: &UploadOptions,
+    on_progress: ProgressFn,
+    config: &SharedSyncConfig,
+) -> Result<serde_json::Value, String> {
+    if let Some(chunk_size) = options.chunk_size {
+        // 固定覆盖路径：完全走旧单路径行为（describe→init→激活节点并发补传→complete，
+        // 含 SessionGone 重 init 一次），不探测、不多路径。
+        let desc =
+            describe(file, chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+        on_progress(0, desc.total_size);
+        match run_once(
+            client,
+            file,
+            remote_dir,
+            &desc,
+            options,
+            on_progress.clone(),
+        )
+        .await
+        {
+            Ok(d) => Ok(d),
+            Err(e) if e.is_session_gone() => {
+                // 会话过期：重新 init 整流程一次（不重算哈希）
+                run_once(
+                    client,
+                    file,
+                    remote_dir,
+                    &desc,
+                    options,
+                    on_progress.clone(),
+                )
+                .await
+                .map_err(|e2| e2.into_string())
+            }
+            Err(e) => Err(e.into_string()),
         }
-        Err(e) => Err(e.into_string()),
+    } else {
+        // 自适应路径：按大小定档 + 多路径调度（后台探测并发补测）
+        run_planned(client, file, remote_dir, options, on_progress, config).await
     }
 }
 
@@ -243,6 +320,588 @@ impl UploadError {
     }
 }
 
+/// 平台侧执行结果：正常 Report 喂回 planner；Fatal 是平台级失败（切节点作废 / 读文件失败），
+/// 没法也不应交给 planner 重排，整趟上传直接失败，交给上层决策（如换新节点重试）。
+enum Outcome {
+    Report(planner::Report),
+    Fatal(String),
+}
+
+/// 测速接口响应 data 段（/v1/net/speedtest/upload）。
+#[derive(Debug, serde::Deserialize, Default)]
+#[allow(dead_code)] // bytes/server_ms 仅文档化响应格式，调度只用 node
+struct SpeedtestData {
+    /// 服务端自报节点名：planner 的同后端校验依据（所有节点入口必须指向同一后端）。
+    #[serde(default)]
+    node: String,
+    #[serde(default)]
+    bytes: u64,
+    #[serde(default)]
+    server_ms: i64,
+}
+
+/// 自适应路径：按大小定档（不等探测）→ describe → init → 多路传输（后台探测并发）→ complete。
+async fn run_planned(
+    client: &ApiClient,
+    file: &Path,
+    remote_dir: &str,
+    options: &UploadOptions,
+    on_progress: ProgressFn,
+    config: &SharedSyncConfig,
+) -> Result<serde_json::Value, String> {
+    let total = file
+        .metadata()
+        .map_err(|e| format!("读取文件信息失败: {}", e))?
+        .len();
+    let file_name = file
+        .file_name()
+        .ok_or_else(|| "无效路径".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    // 节点池 + 持久化样本 + 主节点。探测只测无新鲜（<10min）样本的节点（planner 内部处理）。
+    let pool: Vec<planner::PlannerNodeConfig> = {
+        let cfg = config.read();
+        cfg.nodes
+            .iter()
+            .map(|n| planner::PlannerNodeConfig {
+                id: n.id.clone(),
+                url: n.server_url.clone(),
+                parent: n.parent.clone(),
+            })
+            .collect()
+    };
+    if pool.is_empty() {
+        // 节点池为空（normalize_nodes 正常情况下保证不为空）：退回默认分片的固定路径，保证能传。
+        logger::warn("upload", "节点池为空，退回固定分片上传".to_string());
+        let desc = describe(file, DEFAULT_CHUNK_SIZE)
+            .map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+        on_progress(0, desc.total_size);
+        return run_once(client, file, remote_dir, &desc, options, on_progress)
+            .await
+            .map_err(|e| e.into_string());
+    }
+    let (main_node, state) = {
+        let cfg = config.read();
+        let state = cfg
+            .upload_planner_state
+            .as_ref()
+            .and_then(|v| serde_json::from_value::<planner::PersistedState>(v.clone()).ok())
+            .unwrap_or_default();
+        (cfg.active_node_id.clone(), state)
+    };
+    let input = planner::PlannerInput {
+        total_size: total,
+        main_node: main_node.clone(),
+        now_ms: now_ms(),
+        nodes: pool.clone(),
+        state: state.clone(),
+        adjust_cooldown_ms: planner::ADJUST_COOLDOWN_MS,
+        // 探测恒定开启（快传与同步一样要占满多链路）；DRR 权重用平方根，多链路更均衡
+        weight_exponent: planner::DEFAULT_WEIGHT_EXPONENT,
+    };
+    let mut p = planner::Planner::new(input).map_err(|e| format!("上传规划失败: {}", e))?;
+
+    // 分片大小只由文件大小决定，不再等探测：describe/init 立即开始，首字节即时发出。
+    // 探测改为传输期后台并发补测（见下方统一循环），样本回来后经 report 并入调度。
+    let chunk_size = match p.planned_chunk_size() {
+        Some(c) => c as usize,
+        None => return Err("上传规划失败：无法确定分片大小".to_string()),
+    };
+    log_plan_start(&pool, &state, &main_node, chunk_size as u64, total);
+    // 传输期后台探测的样本聚合，结束时统一打一行规划日志。
+    let mut probe_rtt: HashMap<String, u64> = HashMap::new();
+    let mut probe_bps: HashMap<String, f64> = HashMap::new();
+    // 每节点探测返回的后端节点名：收尾日志用它判定"同后端校验"把谁踢出了上传池。
+    let mut probe_backend: HashMap<String, String> = HashMap::new();
+    // 每节点实际派出的分片数/字节：收尾日志里用它证明多链路到底有没有跑起来。
+    let mut node_dispatch: HashMap<String, (u64, u64)> = HashMap::new();
+
+    let desc = describe(file, chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+    on_progress(0, desc.total_size);
+
+    let init = match call_init(
+        client,
+        &file_name,
+        remote_dir,
+        &desc,
+        &options.device_id,
+        &options.on_conflict,
+        options.sync_base.as_deref(),
+        options.quick_share,
+    )
+    .await
+    {
+        Ok(i) => i,
+        Err(e) => {
+            // init 失败也留下刚测的样本，下次（如换节点重试）10min 内免重复探测
+            persist_planner_state(config, &p);
+            return Err(e);
+        }
+    };
+
+    // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
+    // 不能调 complete（会 404 会话不存在），结果就地合成。
+    if init.instant {
+        if options.quick_share {
+            return Err("快传收到意外的秒传响应".into());
+        }
+        on_progress(desc.total_size, desc.total_size);
+        // 名字/路径以**服务端返回的**为准：同名冲突加了时间戳、或服务端另有落盘规则时，
+        // 本地拼出来的是错的。缺字段才回退本地推断。
+        let name = if init.file_name.is_empty() {
+            file_name
+        } else {
+            init.file_name.clone()
+        };
+        let path = if init.storage_path.is_empty() {
+            format!("{}/{}", remote_dir.trim_end_matches(['/', '\\']), name)
+        } else {
+            init.storage_path.clone()
+        };
+        persist_planner_state(config, &p);
+        let data = UploadCompleteData {
+            file_id: 0,
+            file_name: name,
+            storage_path: path,
+            file_size: desc.total_size,
+            file_hash: desc.file_hash_hex.clone(),
+            synced: true,
+        };
+        return serde_json::to_value(&data)
+            .map_err(|e| format!("序列化上传结果失败: {}", e));
+    }
+
+    let missing: Vec<u32> = if !init.missing.is_empty() {
+        init.missing.iter().map(|&i| i as u32).collect()
+    } else {
+        (0..desc.chunk_count).map(|i| i as u32).collect()
+    };
+    let bytes_sent = Arc::new(AtomicI64::new(
+        (desc.chunk_count as i64 - missing.len() as i64) * desc.chunk_size,
+    ));
+    on_progress(
+        bytes_sent.load(Ordering::Relaxed).min(desc.total_size),
+        desc.total_size,
+    );
+
+    p.begin_transfer(&init.upload_id, &missing);
+    let mut upload_id = init.upload_id.clone();
+    log_initial_windows(&p);
+
+    // ── 统一传输循环：Chunk 与后台 Probe 都派 tokio task（channel 回报），Wait 挂 channel ──
+    let (tx, mut rx) = mpsc::channel::<Outcome>(64);
+    let mut tasks: JoinSet<()> = JoinSet::new();
+    let mut win_snapshot: Vec<(String, usize)> = p.windows();
+    let result: Result<serde_json::Value, String> = loop {
+        match p.next_task() {
+            planner::Task::Chunk(t) => {
+                {
+                    let e = node_dispatch.entry(t.node.clone()).or_insert((0, 0));
+                    e.0 += 1;
+                    e.1 += t.bytes;
+                }
+                let tx = tx.clone();
+                let client = client.clone();
+                let path = file.to_path_buf();
+                let uid = upload_id.clone();
+                let desc_chunk = desc.chunk_size;
+                let desc_total = desc.total_size;
+                tasks.spawn(async move {
+                    let outcome = execute_chunk(&client, &path, &uid, desc_chunk, desc_total, &t).await;
+                    let _ = tx.send(outcome).await;
+                });
+            }
+            // 边传边测：探测与分片并发派发（planner 数据未传完就优先给探测），
+            // 结果回来经 report 并入 DRR 池——多线路能否用起来全靠它。
+            planner::Task::Probe(t) => {
+                let tx = tx.clone();
+                let client = client.clone();
+                tasks.spawn(async move {
+                    let outcome = run_probe(&client, &t).await;
+                    let _ = tx.send(outcome).await;
+                });
+            }
+            planner::Task::Wait => {
+                // join_next 在 task 完成时也会就绪：正常结果走 channel，这里只兜 panic。
+                // task 集为空时只剩 channel 能驱动，加停滞保护防挂死。
+                let wake = if tasks.is_empty() {
+                    tokio::select! {
+                        o = rx.recv() => o.map(Wake::Outcome),
+                        _ = tokio::time::sleep(STALL_TIMEOUT) => Some(Wake::Stalled),
+                    }
+                } else {
+                    tokio::select! {
+                        o = rx.recv() => o.map(Wake::Outcome),
+                        j = tasks.join_next() => Some(Wake::TaskDone(j)),
+                    }
+                };
+                match wake {
+                    Some(Wake::Outcome(Outcome::Report(r))) => {
+                        record_probe_sample(&r, &mut probe_rtt, &mut probe_bps, &mut probe_backend);
+                        let reason = report_reason(&r);
+                        if let planner::Report::ChunkOk { bytes, .. } = &r {
+                            let prev = bytes_sent.fetch_add(*bytes as i64, Ordering::Relaxed);
+                            let now = (prev + *bytes as i64).min(desc.total_size);
+                            on_progress(now, desc.total_size);
+                        }
+                        p.report(r);
+                        log_window_changes(&p, &mut win_snapshot, reason);
+                    }
+                    Some(Wake::Outcome(Outcome::Fatal(e))) => break Err(e),
+                    // 分片 task 正常完成：结果经 channel 到，回到循环继续派
+                    Some(Wake::TaskDone(Some(Ok(())))) => {}
+                    Some(Wake::TaskDone(Some(Err(e)))) => {
+                        break Err(format!("分片任务异常: {}", e))
+                    }
+                    // JoinSet 取空（正常不会发生，防御）：回循环继续
+                    Some(Wake::TaskDone(None)) => {}
+                    // 通道关闭（不可能：主 sender 还在）或停滞超时
+                    None | Some(Wake::Stalled) => {
+                        break Err("上传调度停滞：在途分片长时间无响应".into())
+                    }
+                }
+            }
+            planner::Task::Reinit => {
+                logger::warn(
+                    "upload",
+                    format!("[upload] 会话过期，重新 init 后续传: {}", file_name),
+                );
+                let init2 = match call_init(
+                    client,
+                    &file_name,
+                    remote_dir,
+                    &desc,
+                    &options.device_id,
+                    &options.on_conflict,
+                    options.sync_base.as_deref(),
+                    options.quick_share,
+                )
+                .await
+                {
+                    Ok(i) => i,
+                    Err(e) => break Err(e),
+                };
+                if init2.instant {
+                    if options.quick_share {
+                        break Err("快传收到意外的秒传响应".into());
+                    }
+                    // 重传期间已由其它设备传完同一内容：按完成处理（不能再走 complete）
+                    on_progress(desc.total_size, desc.total_size);
+                    let name = if init2.file_name.is_empty() {
+                        file_name.clone()
+                    } else {
+                        init2.file_name.clone()
+                    };
+                    let path = if init2.storage_path.is_empty() {
+                        format!("{}/{}", remote_dir.trim_end_matches(['/', '\\']), name)
+                    } else {
+                        init2.storage_path.clone()
+                    };
+                    let data = UploadCompleteData {
+                        file_id: 0,
+                        file_name: name,
+                        storage_path: path,
+                        file_size: desc.total_size,
+                        file_hash: desc.file_hash_hex.clone(),
+                        synced: true,
+                    };
+                    break serde_json::to_value(&data)
+                        .map_err(|e| format!("序列化上传结果失败: {}", e));
+                }
+                upload_id = init2.upload_id.clone();
+                let missing2: Vec<u32> = if !init2.missing.is_empty() {
+                    init2.missing.iter().map(|&i| i as u32).collect()
+                } else {
+                    (0..desc.chunk_count).map(|i| i as u32).collect()
+                };
+                // 进度基线按新的 missing 重算（服务端已收到的片不再重复计数）
+                bytes_sent.store(
+                    (desc.chunk_count as i64 - missing2.len() as i64) * desc.chunk_size,
+                    Ordering::Relaxed,
+                );
+                on_progress(
+                    bytes_sent.load(Ordering::Relaxed).min(desc.total_size),
+                    desc.total_size,
+                );
+                p.resume(&upload_id, &missing2);
+            }
+            planner::Task::Done => match complete_upload(client, &upload_id, &options.device_id).await
+            {
+                Ok(d) => break Ok(d),
+                Err(e) => break Err(e),
+            },
+            planner::Task::Failed { reason } => break Err(reason),
+        }
+    };
+
+    // 异常退出（Fatal/停滞）时在途分片/探测不再有意义的，全部放弃
+    tasks.abort_all();
+    // 计划日志放在传输结束后：此时才聚合齐后台探测样本（首字节早已发出，不受其阻塞）
+    log_plan(
+        &p,
+        &pool,
+        &probe_rtt,
+        &probe_bps,
+        &probe_backend,
+        &main_node,
+        chunk_size as u64,
+        &node_dispatch,
+    );
+    persist_planner_state(config, &p);
+    result
+}
+
+/// 聚合探测样本用于收尾规划日志（rtt / 实测带宽 / 后端节点名）。
+fn record_probe_sample(
+    r: &planner::Report,
+    rtt: &mut HashMap<String, u64>,
+    bps: &mut HashMap<String, f64>,
+    backend: &mut HashMap<String, String>,
+) {
+    if let planner::Report::ProbeOk {
+        node,
+        kind,
+        bytes,
+        elapsed_ms,
+        backend_node,
+    } = r
+    {
+        if !backend_node.is_empty() {
+            backend.insert(node.clone(), backend_node.clone());
+        }
+        match kind {
+            planner::ProbeKind::Tiny => {
+                rtt.insert(node.clone(), *elapsed_ms);
+            }
+            planner::ProbeKind::Throughput => {
+                let secs = *elapsed_ms as f64 / 1000.0;
+                if secs > 0.0 {
+                    bps.insert(node.clone(), *bytes as f64 / secs);
+                }
+            }
+        }
+    }
+}
+
+enum Wake {
+    Outcome(Outcome),
+    TaskDone(Option<Result<(), tokio::task::JoinError>>),
+    Stalled,
+}
+
+/// 执行一个探测任务：POST planner 指定节点的测速接口，把响应当 RTT/带宽样本回报。
+/// 探测结果逐条打日志——多线路能否用起来，全看这里的成败，不要静默吞掉失败原因。
+async fn run_probe(client: &ApiClient, t: &planner::ProbeTask) -> Outcome {
+    let kind = if t.kind == planner::ProbeKind::Tiny {
+        "rtt"
+    } else {
+        "bw"
+    };
+    let body = vec![0u8; t.bytes as usize];
+    let bytes_q = t.bytes.to_string();
+    let params = [("bytes", bytes_q.as_str())];
+    let started = Instant::now();
+    let resp: Result<ApiResponse<SpeedtestData>, String> = client
+        .post_bytes_to(
+            &t.url,
+            routes::NET_SPEEDTEST_UPLOAD,
+            &params,
+            body,
+            Some(Duration::from_secs(30)),
+        )
+        .await;
+    match resp {
+        Err(e) if e.contains(NODE_SWITCHED) => Outcome::Fatal(e),
+        Err(e) => {
+            logger::warn(
+                "upload",
+                format!("[upload] 探测失败 node={} kind={}: {}", t.node, kind, e),
+            );
+            Outcome::Report(planner::Report::ProbeFailed {
+                node: t.node.clone(),
+                kind: t.kind,
+            })
+        }
+        Ok(r) => {
+            if r.is_ok() {
+                let data = r.data.unwrap_or_default();
+                let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+                if t.kind == planner::ProbeKind::Throughput {
+                    let bps = t.bytes as f64 / (elapsed_ms as f64 / 1000.0);
+                    logger::info(
+                        "upload",
+                        format!(
+                            "[upload] 探测 node={} bw={}/s ({}ms) backend={}",
+                            t.node,
+                            fmt_bps(bps),
+                            elapsed_ms,
+                            if data.node.is_empty() { "?" } else { &data.node }
+                        ),
+                    );
+                } else {
+                    logger::info(
+                        "upload",
+                        format!(
+                            "[upload] 探测 node={} rtt={}ms backend={}",
+                            t.node,
+                            elapsed_ms,
+                            if data.node.is_empty() { "?" } else { &data.node }
+                        ),
+                    );
+                }
+                Outcome::Report(planner::Report::ProbeOk {
+                    node: t.node.clone(),
+                    kind: t.kind,
+                    bytes: t.bytes,
+                    elapsed_ms,
+                    backend_node: data.node,
+                })
+            } else {
+                logger::warn(
+                    "upload",
+                    format!(
+                        "[upload] 探测失败 node={} kind={}: [{}] {}",
+                        t.node, kind, r.code, r.message
+                    ),
+                );
+                Outcome::Report(planner::Report::ProbeFailed {
+                    node: t.node.clone(),
+                    kind: t.kind,
+                })
+            }
+        }
+    }
+}
+
+/// 执行一个分片任务：定位读出字节 → POST 到 planner 指定的节点 URL → 分类成 Report。
+/// 结果分类：2xx→ChunkOk（bytes 为实际字节数，供进度与 planner 的 EMA 用）；
+/// 422→ChunkDataError；404→ChunkSessionGone；超时/传输错误→ChunkCongested。
+/// 平台级失败（切节点作废/读文件失败）→ Fatal。
+async fn execute_chunk(
+    client: &ApiClient,
+    file: &Path,
+    upload_id: &str,
+    chunk_size: i64,
+    total_size: i64,
+    t: &planner::ChunkTask,
+) -> Outcome {
+    let offset = (t.index as i64) * chunk_size;
+    let len = if total_size == 0 {
+        0
+    } else {
+        total_size - offset
+    };
+    let len = std::cmp::min(chunk_size, len);
+    if len < 0 {
+        return Outcome::Fatal(format!(
+            "分片 {} 越界 (offset={}, total={})",
+            t.index, offset, total_size
+        ));
+    }
+    let mut data = vec![0u8; len as usize];
+    let f = match std::fs::File::open(file) {
+        Ok(f) => f,
+        Err(e) => return Outcome::Fatal(format!("打开文件失败: {}", e)),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        if let Err(e) = f.seek_read(&mut data, offset as u64) {
+            return Outcome::Fatal(format!("定位读失败: {}", e));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        if let Err(e) = f.read_at(&mut data, offset as u64) {
+            return Outcome::Fatal(format!("定位读失败: {}", e));
+        }
+    }
+    drop(f);
+
+    let started = Instant::now();
+    let resp = file_api::upload_chunk_to(
+        client,
+        &t.url,
+        upload_id,
+        t.index as i32,
+        data,
+        t.timeout_ms,
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
+    match resp {
+        Err(e) if e.contains(NODE_SWITCHED) => Outcome::Fatal(e),
+        // 超时/传输层错误 = 拥塞信号，交给 planner 减半窗口并重排
+        Err(_) => Outcome::Report(planner::Report::ChunkCongested { seq: t.seq }),
+        Ok(resp) => {
+            if resp.is_ok() {
+                Outcome::Report(planner::Report::ChunkOk {
+                    seq: t.seq,
+                    bytes: len as u64,
+                    elapsed_ms,
+                })
+            } else {
+                match resp.code {
+                    422 => Outcome::Report(planner::Report::ChunkDataError { seq: t.seq }),
+                    404 => Outcome::Report(planner::Report::ChunkSessionGone { seq: t.seq }),
+                    // 其它业务码：HTTP 链路是通的，按拥塞处理占掉一次派发预算
+                    _ => Outcome::Report(planner::Report::ChunkCongested { seq: t.seq }),
+                }
+            }
+        }
+    }
+}
+
+/// 固定路径（run_once 用）：读出该片字节并上传（单次尝试，业务码 422/404 直接返回）。
+/// 返回该片字节数（用于累计进度）。分片级重试已由 planner 的 CHUNK_ATTEMPTS 取代。
+async fn read_and_upload_chunk(
+    client: &ApiClient,
+    file: &Path,
+    upload_id: &str,
+    index: i32,
+    chunk_size: usize,
+    total_size: i64,
+) -> Result<usize, UploadError> {
+    let offset = (index as i64) * (chunk_size as i64);
+    let len = std::cmp::min(chunk_size as i64, total_size - offset) as usize;
+    let mut data = vec![0u8; len];
+    let f = std::fs::File::open(file).map_err(|e| UploadError::Other(e.to_string()))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        f.seek_read(&mut data, offset as u64)
+            .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.read_at(&mut data, offset as u64)
+            .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
+    }
+    drop(f);
+
+    let resp = file_api::upload_chunk(client, upload_id, index, data)
+        .await
+        .map_err(UploadError::Other)?;
+    if resp.is_ok() {
+        return Ok(len);
+    }
+    // 业务码区分（信封 code，HTTP 恒 200）
+    match resp.code {
+        404 => Err(UploadError::SessionGone),
+        422 => Err(UploadError::Other(format!(
+            "分片 {} 校验失败: {}",
+            index, resp.message
+        ))),
+        _ => Err(UploadError::Other(format!(
+            "分片 {} 失败: {}",
+            index, resp.message
+        ))),
+    }
+}
+
 async fn run_once(
     client: &ApiClient,
     file: &Path,
@@ -250,7 +909,7 @@ async fn run_once(
     desc: &Description,
     options: &UploadOptions,
     on_progress: ProgressFn,
-) -> Result<UploadCompleteData, UploadError> {
+) -> Result<serde_json::Value, UploadError> {
     let file_name = file
         .file_name()
         .ok_or_else(|| UploadError::Other("无效路径".into()))?
@@ -265,6 +924,7 @@ async fn run_once(
         &options.device_id,
         &options.on_conflict,
         options.sync_base.as_deref(),
+        options.quick_share,
     )
     .await
     .map_err(UploadError::Other)?;
@@ -272,10 +932,10 @@ async fn run_once(
     // 秒传：服务端在 init 阶段已复制落盘并完成同步派发，【没有建会话】——
     // 不能调 complete（会 404 会话不存在），结果就地合成。
     if init.instant {
+        if options.quick_share {
+            return Err(UploadError::Other("快传收到意外的秒传响应".into()));
+        }
         on_progress(desc.total_size, desc.total_size);
-        // 名字/路径以**服务端返回的**为准：同名冲突加了时间戳、或服务端另有落盘规则时，
-        // 本地拼出来的是错的（曾经这里直接把 remote_dir 当 storage_path 返回，
-        // 发布 APK 时会把「目录」当成 file_path 登记上去）。缺字段才回退本地推断。
         let name = if init.file_name.is_empty() {
             file_name
         } else {
@@ -286,14 +946,16 @@ async fn run_once(
         } else {
             init.storage_path.clone()
         };
-        return Ok(UploadCompleteData {
+        let data = UploadCompleteData {
             file_id: 0,
             file_name: name,
             storage_path: path,
             file_size: desc.total_size,
             file_hash: desc.file_hash_hex.clone(),
             synced: true,
-        });
+        };
+        return serde_json::to_value(&data)
+            .map_err(|e| UploadError::Other(format!("序列化上传结果失败: {}", e)));
     }
 
     let missing: Vec<i32> = if !init.missing.is_empty() {
@@ -309,7 +971,10 @@ async fn run_once(
         desc.total_size,
     );
 
-    let sem = Arc::new(Semaphore::new(options.concurrency.max(1)));
+    use tokio::sync::Semaphore;
+    let sem = Arc::new(Semaphore::new(
+        options.concurrency.unwrap_or(DEFAULT_CONCURRENCY).max(1),
+    ));
     let mut handles = Vec::with_capacity(missing.len());
     for index in missing {
         let permit = sem.clone();
@@ -358,65 +1023,6 @@ async fn run_once(
         .map_err(UploadError::Other)
 }
 
-/// 读出该片字节并上传（含分片级重试，业务码 422 视作 ChunkVerify 重试，404 抛 SessionGone）。
-/// 返回该片字节数（用于累计进度）。
-async fn read_and_upload_chunk(
-    client: &ApiClient,
-    file: &Path,
-    upload_id: &str,
-    index: i32,
-    chunk_size: usize,
-    total_size: i64,
-) -> Result<usize, UploadError> {
-    let offset = (index as i64) * (chunk_size as i64);
-    let len = std::cmp::min(chunk_size as i64, total_size - offset) as usize;
-    let mut data = vec![0u8; len];
-    let f = std::fs::File::open(file).map_err(|e| UploadError::Other(e.to_string()))?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-        f.seek_read(&mut data, offset as u64)
-            .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        f.read_at(&mut data, offset as u64)
-            .map_err(|e| UploadError::Other(format!("定位读失败: {}", e)))?;
-    }
-    drop(f);
-
-    let mut last_err: Option<String> = None;
-    for _ in 0..CHUNK_RETRY {
-        let resp = file_api::upload_chunk(client, upload_id, index, data.clone())
-            .await
-            .map_err(UploadError::Other)?;
-        if resp.is_ok() {
-            return Ok(len);
-        }
-        // 业务码区分
-        match resp.code {
-            404 => return Err(UploadError::SessionGone),
-            422 => {
-                // 分片校验失败：可能网络抖动，相同字节重传有机会
-                last_err = Some(resp.message);
-                continue;
-            }
-            _ => {
-                return Err(UploadError::Other(format!(
-                    "分片 {} 失败: {}",
-                    index, resp.message
-                )))
-            }
-        }
-    }
-    Err(UploadError::Other(format!(
-        "分片 {} 校验失败: {}",
-        index,
-        last_err.unwrap_or_else(|| "未知".into())
-    )))
-}
-
 async fn call_init(
     client: &ApiClient,
     name: &str,
@@ -425,9 +1031,11 @@ async fn call_init(
     device_id: &str,
     on_conflict: &str,
     sync_base: Option<&str>,
+    quick_share: bool,
 ) -> Result<UploadInitData, String> {
     let params = UploadInitParams {
-        path: remote_dir.to_string(),
+        // 快传模式下服务端自算目标路径，path 传空即可（普通模式仍须为目标目录）
+        path: if quick_share { String::new() } else { remote_dir.to_string() },
         name: name.to_string(),
         total_size: desc.total_size,
         chunk_size: desc.chunk_size,
@@ -439,6 +1047,7 @@ async fn call_init(
         on_conflict: on_conflict.to_string(),
         sync: sync_base.is_some(),
         base_hash: sync_base.unwrap_or("").to_string(),
+        quick_share,
     };
     let resp = file_api::upload_init(client, params).await?;
     if resp.is_ok() {
@@ -454,15 +1063,242 @@ async fn complete_upload(
     client: &ApiClient,
     upload_id: &str,
     device_id: &str,
-) -> Result<UploadCompleteData, String> {
+) -> Result<serde_json::Value, String> {
     let params = UploadCompleteParams {
         upload_id: upload_id.to_string(),
         device_id: device_id.to_string(),
     };
-    let resp = file_api::upload_complete(client, params).await?;
+    // data 原样返回（serde_json::Value），由 upload()/quick_share_upload() 按模式解析：
+    // 普通上传是文件记录，快传是分享记录——服务端保证两者各自形状稳定。
+    let resp: ApiResponse<serde_json::Value> = file_api::upload_complete(client, params).await?;
     if resp.is_ok() {
         resp.data.ok_or_else(|| "complete 响应为空".into())
     } else {
         Err(format!("complete 失败: {}", resp.message))
     }
+}
+
+/// 传输开始前的规划日志：把真正交给 planner 的节点池、主节点、探测开关、分片档位、
+/// 以及哪些节点有新鲜持久化样本（因此会跳过现场探测）一次性打出来。
+/// 这是判断「到底配了几条链路 / 为什么看起来只有一条」的第一手依据。
+fn log_plan_start(
+    pool: &[planner::PlannerNodeConfig],
+    state: &planner::PersistedState,
+    main_node: &str,
+    chunk_size: u64,
+    total: u64,
+) {
+    let now = now_ms();
+    let fresh_ids: Vec<String> = state
+        .nodes
+        .iter()
+        .filter(|n| now - n.measured_at_ms <= planner::STATE_FRESH_MS)
+        .map(|n| n.id.clone())
+        .collect();
+    let pool_desc: Vec<String> = pool
+        .iter()
+        .map(|n| match &n.parent {
+            Some(p) => format!("{}({}←{})", n.id, n.url, p),
+            None => format!("{}({})", n.id, n.url),
+        })
+        .collect();
+    logger::info(
+        "upload",
+        format!(
+            "[upload] 规划: 主节点={} 分片={} 大小={} 节点池[{}] 新鲜样本[{}]",
+            main_node,
+            fmt_chunk(chunk_size),
+            fmt_bytes(total),
+            if pool_desc.is_empty() {
+                "-".to_string()
+            } else {
+                pool_desc.join(", ")
+            },
+            if fresh_ids.is_empty() {
+                "-".to_string()
+            } else {
+                fresh_ids.join(",")
+            },
+        ),
+    );
+    if pool.len() < 2 {
+        logger::warn(
+            "upload",
+            format!(
+                "[upload] 节点池只有 {} 个节点，本次上传为单链路（多路径需 ≥2 个节点）",
+                pool.len()
+            ),
+        );
+    }
+}
+
+/// 开始传输时的初始窗口：conc=0 表示该节点此刻还不在上传池里（等探测结果或本就在池外）。
+fn log_initial_windows(p: &planner::Planner) {
+    let w: Vec<String> = p
+        .windows()
+        .into_iter()
+        .map(|(id, n)| format!("{}={}", id, n))
+        .collect();
+    logger::info("upload", format!("[upload] 初始窗口: {}", w.join(" ")));
+}
+
+/// 收尾规划日志：每节点 rtt/bw/eff/最终窗口 + 实际派发量 + 出池原因，chunk=分片档位。
+/// 示例：[upload] node=ddns rtt=20ms bw=1.3MB/s eff=1.3MB/s conc=2 [在用] 实传=42片/168MB
+fn log_plan(
+    p: &planner::Planner,
+    pool: &[planner::PlannerNodeConfig],
+    probe_rtt: &HashMap<String, u64>,
+    probe_bps: &HashMap<String, f64>,
+    probe_backend: &HashMap<String, String>,
+    main_node: &str,
+    chunk_size: u64,
+    node_dispatch: &HashMap<String, (u64, u64)>,
+) {
+    let measured: HashMap<String, f64> = probe_bps.clone();
+    let eff = planner::combine_effective(pool, &measured);
+    let windows = p.windows();
+    let main_backend = probe_backend.get(main_node).cloned().unwrap_or_default();
+    logger::info("upload", format!("[upload] 规划收尾: chunk={}", fmt_chunk(chunk_size)));
+    for n in pool {
+        let conc = windows
+            .iter()
+            .find(|(id, _)| id == &n.id)
+            .map(|(_, w)| *w)
+            .unwrap_or(0);
+        let rtt = probe_rtt
+            .get(&n.id)
+            .map(|v| format!("{}ms", v))
+            .unwrap_or_else(|| "-".to_string());
+        let b = probe_bps.get(&n.id).map(|v| fmt_bps(*v)).unwrap_or_else(|| "-".into());
+        let e = eff.get(&n.id).map(|v| fmt_bps(*v)).unwrap_or_else(|| "-".into());
+        let (cnt, bytes) = node_dispatch.get(&n.id).copied().unwrap_or((0, 0));
+        // 出池原因：同后端校验不符 / 仅测到 RTT 吞吐失败 / 探测失败或未探测
+        let state = if conc > 0 {
+            "在用".to_string()
+        } else if let Some(nb) = probe_backend.get(&n.id) {
+            if !main_backend.is_empty() && nb != &main_backend {
+                format!("出池:后端不一致(本节点={} 主节点={})", nb, main_backend)
+            } else if probe_bps.contains_key(&n.id) {
+                "出池:已测未入池".to_string()
+            } else {
+                "出池:吞吐探测失败/未完成".to_string()
+            }
+        } else if probe_rtt.contains_key(&n.id) {
+            "出池:吞吐探测失败".to_string()
+        } else {
+            "出池:探测失败/未探测".to_string()
+        };
+        logger::info(
+            "upload",
+            format!(
+                "[upload] node={} rtt={} bw={}/s eff={}/s conc={} [{}] 实传={}片/{}",
+                n.id,
+                rtt,
+                b,
+                e,
+                conc,
+                state,
+                cnt,
+                fmt_bytes(bytes)
+            ),
+        );
+    }
+    let used = node_dispatch.values().filter(|(c, _)| *c > 0).count();
+    if used >= 2 {
+        logger::info("upload", format!("[upload] 多链路生效: {} 个节点参与上传", used));
+    } else {
+        logger::warn(
+            "upload",
+            format!(
+                "[upload] 单链路：仅 {} 个节点参与上传（其余节点见上方出池原因）",
+                used
+            ),
+        );
+    }
+}
+
+/// 窗口变化日志：[upload] node=jp window 8→4 (timeout)
+fn log_window_changes(
+    p: &planner::Planner,
+    snapshot: &mut Vec<(String, usize)>,
+    reason: &str,
+) {
+    let now = p.windows();
+    for (id, w) in &now {
+        if let Some((_, old)) = snapshot.iter().find(|(sid, _)| sid == id) {
+            if old != w {
+                logger::info(
+                    "upload",
+                    format!("[upload] node={} window {}→{} ({})", id, old, w, reason),
+                );
+            }
+        }
+    }
+    *snapshot = now;
+}
+
+/// 窗口变化原因：跟随最近一次回报类型（halving 由 timeout/data 触发，加窗由连续成功 streak 触发）。
+fn report_reason(r: &planner::Report) -> &'static str {
+    match r {
+        planner::Report::ChunkOk { .. } => "streak",
+        planner::Report::ChunkCongested { .. } => "timeout",
+        planner::Report::ChunkDataError { .. } => "data",
+        planner::Report::ChunkSessionGone { .. } => "gone",
+        _ => "probe",
+    }
+}
+
+/// 把 planner 导出的测速样本写回 config.yml：下次上传 10min 内直接复用，不重复探测。
+fn persist_planner_state(config: &SharedSyncConfig, p: &planner::Planner) {
+    match serde_json::to_value(p.export_state()) {
+        Ok(v) => {
+            let mut cfg = config.write();
+            cfg.upload_planner_state = Some(v);
+            cfg.save();
+        }
+        Err(e) => logger::warn("upload", format!("planner 状态序列化失败: {}", e)),
+    }
+}
+
+/// bps → 人类可读（1.3MB/s / 500KB/s / 80B/s）。
+fn fmt_bps(bps: f64) -> String {
+    if bps >= 1_000_000.0 {
+        format!("{:.1}MB/s", bps / 1_000_000.0)
+    } else if bps >= 1_000.0 {
+        format!("{:.0}KB/s", bps / 1_000.0)
+    } else {
+        format!("{:.0}B/s", bps)
+    }
+}
+
+/// 字节数 → 档位可读（8MB / 512KB / 64KB）。
+fn fmt_chunk(n: u64) -> String {
+    if n >= (1 << 20) && n % (1 << 20) == 0 {
+        format!("{}MB", n >> 20)
+    } else if n >= (1 << 10) && n % (1 << 10) == 0 {
+        format!("{}KB", n >> 10)
+    } else {
+        format!("{}B", n)
+    }
+}
+
+/// 任意字节数 → 人类可读（1.5GB / 320MB / 4.0MB / 512KB / 800B），带一位小数。
+fn fmt_bytes(n: u64) -> String {
+    let f = n as f64;
+    if f >= 1e9 {
+        format!("{:.1}GB", f / 1e9)
+    } else if f >= 1e6 {
+        format!("{:.1}MB", f / 1e6)
+    } else if f >= 1e3 {
+        format!("{:.0}KB", f / 1e3)
+    } else {
+        format!("{}B", n)
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

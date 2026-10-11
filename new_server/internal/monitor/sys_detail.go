@@ -14,13 +14,13 @@ import (
 
 	"syc-file/config"
 	"syc-file/internal/model"
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 )
 
 // 进程 / 端口明细：独立于 history.go 的系统级 CPU/内存趋势（那个是 1 分钟一次、
 // 只有两个数），这里是按 config.monitor 配置的间隔（默认 30s）采一次"进程 Top-N
 // + 监听端口 + 端口连接数统计"，Rust 侧用 sysinfo + netstat2 采（Go 采太慢，
-// 见 file_lib/src/sys_info.rs），存储/归档策略照抄 history.go 那一套：
+// 见 sync_core/src/sys_info.rs），存储/归档策略照抄 history.go 那一套：
 // Redis 按天分 key 存热数据（8 天 TTL），每天再批量归档进 MySQL 长期保存。
 const (
 	sysDetailTTL          = 8 * 24 * time.Hour
@@ -35,9 +35,9 @@ const (
 // sysDetailFrame 一次采集的完整快照，Redis 里按天存的就是这个结构的 JSON 数组。
 type sysDetailFrame struct {
 	Time            int64                    `json:"t"` // unix 秒
-	Processes       []filecore.ProcessInfo   `json:"processes"`
-	ListeningPorts  []filecore.ListeningPort `json:"listening_ports"`
-	PortConnections []filecore.PortConnCount `json:"port_connections"`
+	Processes       []synccore.ProcessInfo   `json:"processes"`
+	ListeningPorts  []synccore.ListeningPort `json:"listening_ports"`
+	PortConnections []synccore.PortConnCount `json:"port_connections"`
 	NumCpus         uint32                   `json:"num_cpus"`
 }
 
@@ -124,7 +124,7 @@ func recordDetailOnce() {
 	if redisClient == nil {
 		return
 	}
-	snap, err := filecore.CollectSysSnapshot(detailTopN())
+	snap, err := synccore.CollectSysSnapshot(detailTopN())
 	if err != nil {
 		return
 	}
@@ -294,7 +294,7 @@ func archivedFramesInRange(from, to time.Time) []sysDetailFrame {
 				f = &sysDetailFrame{Time: key}
 				byTime[key] = f
 			}
-			f.Processes = append(f.Processes, filecore.ProcessInfo{
+			f.Processes = append(f.Processes, synccore.ProcessInfo{
 				PID: p.PID, Name: p.Name, CPUPercent: float32(p.CPUPercent),
 				MemBytes: p.MemBytes, MemPercent: float32(p.MemPercent),
 				DiskReadBytes: p.DiskReadBytes, DiskWriteBytes: p.DiskWriteBytes,
@@ -313,7 +313,7 @@ func archivedFramesInRange(from, to time.Time) []sysDetailFrame {
 				f = &sysDetailFrame{Time: key}
 				byTime[key] = f
 			}
-			f.ListeningPorts = append(f.ListeningPorts, filecore.ListeningPort{
+			f.ListeningPorts = append(f.ListeningPorts, synccore.ListeningPort{
 				Port: lp.Port, Protocol: lp.Protocol, PID: lp.PID, ProcessName: lp.ProcessName,
 			})
 		}
@@ -329,7 +329,7 @@ func archivedFramesInRange(from, to time.Time) []sysDetailFrame {
 				f = &sysDetailFrame{Time: key}
 				byTime[key] = f
 			}
-			f.PortConnections = append(f.PortConnections, filecore.PortConnCount{
+			f.PortConnections = append(f.PortConnections, synccore.PortConnCount{
 				Port: pc.Port, Protocol: pc.Protocol, Connections: pc.Connections,
 			})
 		}
@@ -391,14 +391,14 @@ func Processes(c *gin.Context) {
 	frames := framesInRange(c.Request.Context(), days)
 	type point struct {
 		Time      int64                  `json:"t"`
-		Processes []filecore.ProcessInfo `json:"processes"`
+		Processes []synccore.ProcessInfo `json:"processes"`
 		NumCpus   uint32                 `json:"num_cpus"`
 	}
 	out := make([]point, 0, len(frames))
 	for _, f := range frames {
 		procs := f.Processes
 		if name != "" {
-			filtered := make([]filecore.ProcessInfo, 0, 1)
+			filtered := make([]synccore.ProcessInfo, 0, 1)
 			for _, p := range procs {
 				if p.Name == name {
 					filtered = append(filtered, p)
@@ -434,21 +434,21 @@ func Ports(c *gin.Context) {
 	frames := framesInRange(c.Request.Context(), days)
 	type point struct {
 		Time            int64                    `json:"t"`
-		ListeningPorts  []filecore.ListeningPort `json:"listening_ports"`
-		PortConnections []filecore.PortConnCount `json:"port_connections"`
+		ListeningPorts  []synccore.ListeningPort `json:"listening_ports"`
+		PortConnections []synccore.PortConnCount `json:"port_connections"`
 	}
 	out := make([]point, 0, len(frames))
 	for _, f := range frames {
 		listening, conns := f.ListeningPorts, f.PortConnections
 		if portFilter > 0 {
-			fl := make([]filecore.ListeningPort, 0, 1)
+			fl := make([]synccore.ListeningPort, 0, 1)
 			for _, lp := range listening {
 				if int(lp.Port) == portFilter {
 					fl = append(fl, lp)
 				}
 			}
 			listening = fl
-			fc := make([]filecore.PortConnCount, 0, 1)
+			fc := make([]synccore.PortConnCount, 0, 1)
 			for _, pc := range conns {
 				if int(pc.Port) == portFilter {
 					fc = append(fc, pc)

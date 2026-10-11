@@ -51,6 +51,12 @@ pub const WS_GROUP_SEND: &str = "/ws/group/send";
 /// 路径参数：group_name
 pub const WS_GROUP_USERS: &str = "/ws/group/{}/users";
 
+// ── 网络测速（需 Token） ─────────────────────────────────────────────────
+/// 多路径上传前的按节点测速：POST 上行样本（data 含 node/bytes/server_ms）
+pub const NET_SPEEDTEST_UPLOAD: &str = "/net/speedtest/upload";
+/// GET 下行测速（二进制流，Content-Length 声明长度）
+pub const NET_SPEEDTEST_DOWNLOAD: &str = "/net/speedtest/download";
+
 // ── 同步（需 Token） ──────────────────────────────────────────────────────
 /// 该账号唯一的同步文件夹配置（GET/POST/PUT/DELETE，无需 folder_id）
 pub const SYNC_FOLDER: &str = "/sync/folder";

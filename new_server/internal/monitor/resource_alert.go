@@ -14,7 +14,7 @@ import (
 
 	"syc-file/internal/model"
 	"syc-file/internal/ws"
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
 )
 
@@ -128,8 +128,8 @@ func maxPerCore(perCore []float64) (best float64, idx int) {
 // fireAlert 落库 + 补采一份进程快照（供参考 + 顺带进常规历史）+ 推送通知。
 func fireAlert(coreIdx int, coreCPU float64) *activeAlert {
 	snapshotJSON := []byte("[]")
-	if snap, err := filecore.CollectSysSnapshot(alertScanTopN); err == nil {
-		sorted := append([]filecore.ProcessInfo(nil), snap.Processes...)
+	if snap, err := synccore.CollectSysSnapshot(alertScanTopN); err == nil {
+		sorted := append([]synccore.ProcessInfo(nil), snap.Processes...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].CPUPercent > sorted[j].CPUPercent })
 		if b, err := json.Marshal(sorted); err == nil {
 			snapshotJSON = b

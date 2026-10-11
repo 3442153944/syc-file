@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"syc-file/config"
-	"syc-file/pkg/filecore"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/volroot"
 )
@@ -45,7 +45,7 @@ func cleanupTempOnce() {
 				continue
 			}
 			p := filepath.Join(dir, e.Name())
-			_ = filecore.Evict(p) // 先关 Rust 侧缓存句柄再删文件
+			_ = synccore.Evict(p) // 先关 Rust 侧缓存句柄再删文件
 			if err := os.Remove(p); err == nil {
 				logger.Logger.Info("清理僵尸临时文件", zap.String("path", p))
 			}

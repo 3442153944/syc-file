@@ -35,6 +35,7 @@ import com.downloader.PRDownloaderConfig
 import com.example.filesync.data.sync.WebSocketManager
 import com.sunyuanling.filesync.network.AuthManager
 import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.core.SyncPlanner
 import com.sunyuanling.filesync.ui.components.serverSetting.ConfigManager
 import com.sunyuanling.filesync.ui.theme.FileSyncTheme
 import com.sunyuanling.filesync.ui.viewModel.data.DownloadController
@@ -78,6 +79,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         Request.init(this)
+        SyncPlanner.init(this)
         TransferPathStore.init(this)
         // 关于页/设置页展示的版本号：从 PackageManager 读真实值，别再停在 AppConfig 里的默认 1.0.0
         runCatching {

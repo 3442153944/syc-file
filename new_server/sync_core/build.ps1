@@ -1,7 +1,7 @@
-# Build the filecore Rust core lib and package the artifact into file_lib/lib/ for Go cgo.
+# Build the sync_core Rust core lib and package the artifact into sync_core/lib/ for Go cgo.
 #
 # Prereqs: Rust (cargo) + x86_64-pc-windows-gnu target + mingw-w64 gcc (WinLibs MSVCRT).
-# Usage: run this from the file_lib dir:  ./build.ps1
+# Usage: run this from the sync_core dir:  ./build.ps1
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
@@ -20,14 +20,14 @@ try {
     Pop-Location
 }
 
-$artifact = Join-Path $root "target\$target\release\libfilecore.a"
+$artifact = Join-Path $root "target\$target\release\libsync_core.a"
 if (-not (Test-Path $artifact)) { throw "artifact not found: $artifact" }
 
 $libDir = Join-Path $root "lib"
 New-Item -ItemType Directory -Force -Path $libDir | Out-Null
-Copy-Item $artifact (Join-Path $libDir "libfilecore.a") -Force
+Copy-Item $artifact (Join-Path $libDir "libsync_core.a") -Force
 
-Write-Host "==> packaged: $(Join-Path $libDir 'libfilecore.a')" -ForegroundColor Green
+Write-Host "==> packaged: $(Join-Path $libDir 'libsync_core.a')" -ForegroundColor Green
 
 # Print the native system libs the Rust staticlib needs, to keep cgo LDFLAGS in sync
 Write-Host "==> native-static-libs (cgo LDFLAGS must cover these):" -ForegroundColor Cyan

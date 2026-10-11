@@ -1,14 +1,14 @@
 [package]
-name = "filecore"
+name = "sync_core"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.74"
 description = "文件同步上传核心：预分配、乱序分片定位写(句柄缓存)、blake3 分片校验与 Merkle 树校验、整文件哈希(mmap+rayon)"
 
 [lib]
-name = "filecore"
-# staticlib：产出 libfilecore.a，供 Go 通过 cgo 静态链接
-# rlib：供 Android/filecore_jni 等 Rust 包装 crate 作为依赖复用同一实现
+name = "sync_core"
+# staticlib：产出 libsync_core.a，供 Go 通过 cgo 静态链接
+# rlib：供 Android/sync_core_jni 等 Rust 包装 crate 作为依赖复用同一实现
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]

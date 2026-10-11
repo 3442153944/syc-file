@@ -48,9 +48,15 @@ impl ApiClient {
         // 隧道地址（如 cf tunnel）一旦连接卡住半开，await 会永久挂起——没有 Err、UI 上也就
         // 看不到任何失败提示，进度停在原地不动（表现为"静默失败"）。这里补上超时，让这种情况
         // 至少能变成一个真实的 Err 冒泡上去。
+        //
+        // 强制 HTTP/1.1：后端 nginx 开了 h2，但在这类高延迟/丢包的跨境链路上，h2 的上传
+        // 流控（64KB 级 stream window + 多路复用）会把吞吐打崩——实测同一路径 2MiB 上传
+        // h2 25~257KB/s vs h1.1 1.1~3.7MB/s，差距 4~50 倍；下载方向两者相当。分片上传、
+        // 测速探针全走这里，统一 h1.1。后端 nginx 反代到 Go 本来也是 HTTP/1.1。
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(60))
+            .http1_only()
             .build()
             .unwrap_or_else(|_| Client::new());
         ApiClient {
@@ -189,6 +195,35 @@ impl ApiClient {
             .body(body);
         for (k, v) in params {
             req = req.query(&[(*k, *v)]);
+        }
+        self.exec(req).await
+    }
+
+    /// POST 裸字节到**指定节点入口**（多路径上传专用：探测与分片必须落在 planner 指定的
+    /// 节点 URL 上，而不是当前激活节点的 base_url）。`node_url` 含 /file 后缀、不含 /v1，
+    /// 由本方法拼。token / device_id 头与统一出口（切节点作废、传输失败上报）都与普通
+    /// 请求一致。`timeout` 是 per-request 的，覆盖 client 默认 60s（分片超时由 planner
+    /// 按链路质量动态给）。
+    pub async fn post_bytes_to<T: DeserializeOwned>(
+        &self,
+        node_url: &str,
+        path: &str,
+        params: &[(&str, &str)],
+        body: Vec<u8>,
+        timeout: Option<Duration>,
+    ) -> Result<ApiResponse<T>, String> {
+        let mut req = self
+            .client
+            .post(format!("{}/v1{}", node_url.trim_end_matches('/'), path))
+            .header("Token", &self.token)
+            .header("Device-Id", &self.device_id)
+            .header("Content-Type", "application/octet-stream")
+            .body(body);
+        for (k, v) in params {
+            req = req.query(&[(*k, *v)]);
+        }
+        if let Some(t) = timeout {
+            req = req.timeout(t);
         }
         self.exec(req).await
     }

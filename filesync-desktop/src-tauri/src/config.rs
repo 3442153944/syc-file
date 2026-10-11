@@ -53,6 +53,10 @@ pub struct SyncConfig {
     /// 真正的故障发现主要靠请求失败时的即时探测。
     #[serde(default = "default_health_interval")]
     pub health_interval_minutes: u64,
+    /// upload_planner 上次导出的测速样本（PlannerInput.state 的 JSON）。
+    /// 上传结束后由 chunked_uploader 写回；10min 内有新鲜样本的节点免重复探测。
+    #[serde(default)]
+    pub upload_planner_state: Option<serde_json::Value>,
 }
 
 /// 一个可用的服务器入口。两个内置节点对应两条 frp 隧道（同一台后端、不同中转），
@@ -68,6 +72,11 @@ pub struct ServerNode {
     /// 内置节点不可删除（可以改地址，改完 builtin 仍为 true）
     #[serde(default)]
     pub builtin: bool,
+    /// 父节点 id：本节点入口是父节点 nginx 的反代上游时填（带宽与父节点共享瓶颈，
+    /// upload_planner 按 min(自身, 父链) 折算有效带宽）。None = 独立链路。
+    /// 旧 config.yml 没有该字段，serde(default) 向后兼容。
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 impl ServerNode {
@@ -84,7 +93,8 @@ impl ServerNode {
     }
 }
 
-/// 两个内置节点：ddns = 主入口，jp = 东京中转。地址对应 frpc 配置里两条隧道的域名。
+/// 内置节点：ddns = 主入口，jp = 东京中转，hk = 香港反代（上游是 ddns，共享瓶颈）。
+/// 地址对应 frpc 配置里各条隧道的域名。
 pub fn default_nodes() -> Vec<ServerNode> {
     vec![
         ServerNode {
@@ -93,6 +103,7 @@ pub fn default_nodes() -> Vec<ServerNode> {
             server_url: "https://ddns.sunyuanling.cn/file".into(),
             ws_url: "wss://ddns.sunyuanling.cn/file".into(),
             builtin: true,
+            parent: None,
         },
         ServerNode {
             id: "jp".into(),
@@ -102,6 +113,17 @@ pub fn default_nodes() -> Vec<ServerNode> {
             server_url: "https://jp.sunyuanling.cn:8443/file".into(),
             ws_url: "wss://jp.sunyuanling.cn:8443/file".into(),
             builtin: true,
+            parent: None,
+        },
+        ServerNode {
+            id: "hk".into(),
+            name: "备用节点 · 香港".into(),
+            // hk 入口的 nginx 反代上游是 ddns，两者打同一台后端、带宽共享瓶颈，
+            // parent 让 upload_planner 的父链折算生效（多路径上传时 eff = min(自身, ddns)）
+            server_url: "https://hk.sunyuanling.cn:8443/file".into(),
+            ws_url: ServerNode::derive_ws_url("https://hk.sunyuanling.cn:8443/file"),
+            builtin: true,
+            parent: Some("ddns".into()),
         },
     ]
 }
@@ -144,6 +166,9 @@ pub struct FileConfig {
     pub health_interval_minutes: u64,
     #[serde(default)]
     pub local_paths: BTreeMap<u64, String>,
+    /// upload_planner 持久化的测速样本，原样读写（结构见 sync_core::upload_planner::PersistedState）
+    #[serde(default)]
+    pub upload_planner_state: Option<serde_json::Value>,
 }
 
 /// 日志配置，字段命名与后端 config.yaml 的 log 段一致。
@@ -229,6 +254,7 @@ impl Default for SyncConfig {
             active_node_id: "ddns".into(),
             auto_failover: true,
             health_interval_minutes: default_health_interval(),
+            upload_planner_state: None,
         }
     }
 }
@@ -265,6 +291,7 @@ impl SyncConfig {
             auto_failover: self.auto_failover,
             health_interval_minutes: self.health_interval_minutes,
             local_paths: self.local_paths.clone(),
+            upload_planner_state: self.upload_planner_state.clone(),
         };
         if let Ok(text) = serde_yaml::to_string(&fc) {
             let _ = std::fs::write(app_paths::config_file(), text);
@@ -302,6 +329,7 @@ impl SyncConfig {
             self.health_interval_minutes = fc.health_interval_minutes;
         }
         self.local_paths = fc.local_paths;
+        self.upload_planner_state = fc.upload_planner_state;
     }
 
     /// 记下本机为某个同步文件夹选的本地目录并落盘。
@@ -363,6 +391,7 @@ impl SyncConfig {
                 server_url: current,
                 ws_url: ws,
                 builtin: false,
+                parent: None,
             });
             self.active_node_id = id;
         }
@@ -408,6 +437,7 @@ impl SyncConfig {
                     server_url: url.clone(),
                     ws_url: ws.clone(),
                     builtin: false,
+                    parent: None,
                 });
                 id
             }

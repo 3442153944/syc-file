@@ -1,6 +1,6 @@
 # 构建上下文 = new_server/，这些都不要进上下文
-file_lib/target
-file_lib/lib
+sync_core/target
+sync_core/lib
 syc-file
 syc-file.exe
 venv

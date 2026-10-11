@@ -1,18 +1,18 @@
-// Package filecore 是对 Rust 核心库 filecore 的 cgo 封装。
+// Package synccore 是对 Rust 核心库 synccore 的 cgo 封装。
 //
-// 底层实现见 new_server/file_lib（Rust，staticlib）。构建产物为
-// file_lib/lib/libfilecore.a，需先运行 file_lib/build.ps1 生成。
+// 底层实现见 new_server/sync_core（Rust，staticlib）。构建产物为
+// sync_core/lib/libsync_core.a，需先运行 sync_core/build.ps1 生成。
 //
 // 所有哈希均为 32 字节 blake3。Go 侧只做编排（HTTP/鉴权/Redis 会话/DB），
 // 预分配、乱序定位写、分片与 Merkle 校验、整文件哈希等热路径全在 Rust。
-package filecore
+package synccore
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../file_lib
-#cgo windows LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
-#cgo linux LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lpthread -ldl -lm
+#cgo CFLAGS: -I${SRCDIR}/../../sync_core
+#cgo windows LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
+#cgo linux LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lpthread -ldl -lm
 #include <stdlib.h>
-#include "filecore.h"
+#include "sync_core.h"
 */
 import "C"
 
@@ -25,14 +25,14 @@ import (
 // HashSize 是 blake3 哈希字节数。
 const HashSize = 32
 
-// 与 Rust/filecore.h 对应的错误。
+// 与 Rust/sync_core.h 对应的错误。
 var (
-	ErrArg          = errors.New("filecore: 参数无效")
-	ErrIO           = errors.New("filecore: IO 错误")
-	ErrLeafMismatch = errors.New("filecore: 分片哈希不匹配")
-	ErrRootMismatch = errors.New("filecore: Merkle 树根不匹配")
-	ErrSizeMismatch = errors.New("filecore: 文件尺寸/分片数与描述不符")
-	ErrUnknown      = errors.New("filecore: 未知错误")
+	ErrArg          = errors.New("synccore: 参数无效")
+	ErrIO           = errors.New("synccore: IO 错误")
+	ErrLeafMismatch = errors.New("synccore: 分片哈希不匹配")
+	ErrRootMismatch = errors.New("synccore: Merkle 树根不匹配")
+	ErrSizeMismatch = errors.New("synccore: 文件尺寸/分片数与描述不符")
+	ErrUnknown      = errors.New("synccore: 未知错误")
 )
 
 func codeToErr(rc C.int32_t) error {

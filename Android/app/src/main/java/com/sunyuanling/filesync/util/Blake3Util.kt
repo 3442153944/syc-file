@@ -1,6 +1,6 @@
 // util/Blake3Util.kt
 // BLAKE3 封装：分片叶子哈希、整文件流式哈希、Merkle 树根。
-// 底层用 io.github.rctcwyvrn:blake3（纯 Java）。树的构造规则必须与服务端 file_lib（fc_merkle_root）
+// 底层用 io.github.rctcwyvrn:blake3（纯 Java）。树的构造规则必须与服务端 sync_core（fc_merkle_root）
 // 逐字节一致，否则两端算出的树根对不上，会触发整份重传。
 //
 // rctcwyvrn API：
@@ -25,7 +25,7 @@ object Blake3Util {
 
     /**
      * Merkle 树根：叶子两两合并 parent = blake3(left ‖ right)，奇数节点原样进位到上层。
-     * 空 → blake3("")；单叶子 → 该叶子本身。规则同 file_lib/src/lib.rs 的 merkle_root。
+     * 空 → blake3("")；单叶子 → 该叶子本身。规则同 sync_core/src/lib.rs 的 merkle_root。
      */
     fun merkleRoot(leaves: List<ByteArray>): ByteArray {
         if (leaves.isEmpty()) return hash(ByteArray(0))

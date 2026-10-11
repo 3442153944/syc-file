@@ -1,12 +1,12 @@
-# filecore —— 分片上传 Rust 核心库
+# sync_core —— 分片上传 Rust 核心库
 
 `new_server` 上传服务的热路径核心库：预分配、乱序分片定位写、blake3 分片校验、
-Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libfilecore.a`）形式由 Go 经 cgo 调用。
+Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libsync_core.a`）形式由 Go 经 cgo 调用。
 
 - **实现**：`src/lib.rs`（Rust，`crate-type = ["staticlib"]`）
-- **C 头**：`filecore.h`
-- **产物**：`lib/libfilecore.a`（由 `build.ps1` 生成打包）
-- **Go 封装**：`../pkg/filecore/`（cgo）
+- **C 头**：`sync_core.h`
+- **产物**：`lib/libsync_core.a`（由 `build.ps1` 生成打包）
+- **Go 封装**：`../pkg/sync_core/`（cgo）
 
 ---
 
@@ -49,7 +49,7 @@ Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libfilecore.a`）
 
 ---
 
-## 二、filecore 库设计
+## 二、sync_core 库设计
 
 **对外无状态**：会话/位图状态全在 Go+Redis，重启后一切照常。进程内有一层**写句柄缓存**
 （纯加速层，v2 引入）：按路径缓存写句柄，消除每分片一次 open/close（Windows 上 CreateFile
@@ -62,13 +62,13 @@ Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libfilecore.a`）
 编译期报错）。同一份实现将复用到安卓（NDK）、另一个 Tauri 客户端与鸿蒙。
 
 **调用方必须遵守**（详见 `src/lib.rs` 模块注释）：
-1. **删除临时文件前先 `fc_evict(path)`**（Go 侧 `filecore.Evict`），否则缓存可能残留
+1. **删除临时文件前先 `fc_evict(path)`**（Go 侧 `sync_core.Evict`），否则缓存可能残留
    指向已删文件的句柄，同路径新会话的写入会静默丢失。`fc_preallocate` / `fc_finalize` /
    `fc_move` 内部已自带逐出。
 2. **`fc_finalize` / `fc_move` 期间不得有同路径写入/预分配在途**（finalize 走 mmap，
    途中截断文件在 unix 上是 SIGBUS）。服务端语义天然满足：收齐分片才 finalize。
 
-### FFI 接口（见 `filecore.h`）
+### FFI 接口（见 `sync_core.h`）
 
 | 函数 | 作用 |
 |---|---|
@@ -134,26 +134,26 @@ rustup target add x86_64-pc-windows-gnu
 ### 构建库
 
 ```powershell
-# 在 file_lib 目录下
+# 在 sync_core 目录下
 ./build.ps1
 ```
 
 `build.ps1` 会 `cargo build --release --target x86_64-pc-windows-gnu`，把
-`target/.../release/libfilecore.a` 拷到 `lib/libfilecore.a`，并打印 `native-static-libs`
+`target/.../release/libsync_core.a` 拷到 `lib/libsync_core.a`，并打印 `native-static-libs`
 （cgo LDFLAGS 需覆盖的系统库）。
 
 ### 编译 Go（链接本库）
 
 ```powershell
 $env:CGO_ENABLED = "1"; $env:CC = "gcc"
-go build ./...        # 或 go test ./pkg/filecore/
+go build ./...        # 或 go test ./pkg/sync_core/
 ```
 
-cgo 指令写在 `../pkg/filecore/filecore.go`：
+cgo 指令写在 `../pkg/sync_core/sync_core.go`：
 
 ```go
-// #cgo CFLAGS: -I${SRCDIR}/../../file_lib
-// #cgo LDFLAGS: -L${SRCDIR}/../../file_lib/lib -lfilecore -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp
+// #cgo CFLAGS: -I${SRCDIR}/../../sync_core
+// #cgo LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp
 ```
 
 **先 `build.ps1` 生成 `.a`，再 `go build`。** 整个 `new_server` 已是 cgo 项目，
@@ -187,12 +187,12 @@ cgo 指令写在 `../pkg/filecore/filecore.go`：
 ## 五、目录
 
 ```
-file_lib/
+sync_core/
 ├── Cargo.toml          # crate 配置（staticlib; blake3+rayon/memmap2; lto; panic=unwind）
 ├── src/lib.rs          # 核心实现（v2：句柄缓存/定位写/sparse/fallocate/mmap 并行 finalize）
-├── filecore.h          # C ABI 声明
+├── sync_core.h          # C ABI 声明
 ├── build.ps1           # 构建并打包到 lib/
-├── lib/libfilecore.a   # 构建产物（Go cgo 链接目标）
+├── lib/libsync_core.a   # 构建产物（Go cgo 链接目标）
 ├── target/             # cargo 中间产物（.gitignore）
 └── README.md           # 本文件
 ```

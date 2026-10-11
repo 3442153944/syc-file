@@ -84,7 +84,7 @@ pub async fn upload_file(
         let on_progress: ProgressFn = Arc::new(move |sent, total| {
             transfers::upload_progress(&id_for_progress, sent, total);
         });
-        let data = upload(&client, path, &remote_dir, &options, on_progress).await?;
+        let data = upload(&client, path, &remote_dir, &options, on_progress, &config).await?;
         logger::info(
             "upload",
             format!(

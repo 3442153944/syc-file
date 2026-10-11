@@ -33,7 +33,7 @@ import com.sunyuanling.filesync.api.sync.SyncApi
 import com.sunyuanling.filesync.api.sync.SyncFolderInfo
 import com.sunyuanling.filesync.api.sync.SyncNotifyParams
 import com.sunyuanling.filesync.api.sync.SyncScanParams
-import com.sunyuanling.filesync.core.FileCore
+import com.sunyuanling.filesync.core.SyncCore
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.util.Blake3Util
 import com.sunyuanling.filesync.util.DeviceInfoUtil
@@ -730,7 +730,7 @@ object SyncEngine {
     }
 
     private fun computeFileHash(file: File): String? {
-        FileCore.fileHashHex(file)?.let { return it }
+        SyncCore.fileHashHex(file)?.let { return it }
         // 纯 Java 回退：流式整文件 blake3
         return runCatching {
             val hasher = Blake3Util.newHasher()

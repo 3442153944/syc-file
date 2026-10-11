@@ -95,7 +95,7 @@ object FileUtils {
     }
 
     /**
-     * 计算文件 blake3（同步身份哈希 / file_hash，与服务端 file_lib、桌面端一致）。
+     * 计算文件 blake3（同步身份哈希 / file_hash，与服务端 sync_core、桌面端一致）。
      * 流式读取，不把整文件载入内存。
      */
     fun calculateBLAKE3(file: File): String {

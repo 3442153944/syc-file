@@ -239,7 +239,7 @@ SyncConflict：
 
 ## 5. 传输接口复用（不变）
 
-- 上传：`POST /v1/file/upload/init` + `/chunk` + `/complete` 分片协议（blake3 校验，详见 `file_lib/README.md`）
+- 上传：`POST /v1/file/upload/init` + `/chunk` + `/complete` 分片协议（blake3 校验，详见 `sync_core/README.md`）
 - 下载：`GET /v1/file/download?path=远端目录&name=文件名&device_id=&token=` 支持 Range
 
 ---
@@ -252,7 +252,7 @@ SyncConflict：
 4. **冲突处理**：收 conflict → 隔离到 `.syncpending` + 主目录收敛 + 记待办；处理时调 `/conflicts/:id/resolve`。
 5. **稳定窗口 + 忽略 Office 锁文件**：Word 等保存是「写临时文件 + rename + `~$` 锁文件」，watcher 探测后须**等文件稳定**（size/mtime 连续 N 秒不变 / `~$*` 消失）再算 hash，避免抓到中间态。
 6. **忽略目录**：`.synctmp/`、`.syncpending/`、`~$*` 不上报。
-7. **hash 依赖**：Rust 端 `blake3 = "1.5"`（双端共用 file_lib 的哈希/树实现，逐字节一致）。
+7. **hash 依赖**：Rust 端 `blake3 = "1.5"`（双端共用 sync_core 的哈希/树实现，逐字节一致）。
 
 ---
 

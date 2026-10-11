@@ -69,6 +69,12 @@ pub struct UploadInitParams {
     #[serde(default)]
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_hash: String,
+    /// 粘贴快传模式：服务端自算目标路径（quick_share.base_path/<userID>/<uuid><ext>）、
+    /// 按快传配额预检，complete 直接生成分享记录（响应为分享数据结构）
+    #[serde(rename = "quick_share")]
+    #[serde(default)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub quick_share: bool,
 }
 
 /// 分片上传完成。

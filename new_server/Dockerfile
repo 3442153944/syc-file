@@ -4,7 +4,7 @@
 # 手动构建时上下文是 new_server/，国内需要 --build-arg GOPROXY=... --build-arg GO_DL=...，参数见脚本。
 # 运行：  docker run -d --name filesync -p 9999:9999 -v filesync-data:/data filesync-server
 
-# ── 构建阶段：Rust 编译 libfilecore.a → Go(cgo) 链接 ────────────────
+# ── 构建阶段：Rust 编译 libsync_core.a → Go(cgo) 链接 ────────────────
 FROM rust:1-bookworm AS builder
 ARG TARGETARCH
 ARG GO_VERSION=1.25.3
@@ -18,8 +18,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 # Rust 核心单独成层：只改 Go 代码时不重编 Rust
-COPY file_lib ./file_lib
-RUN bash file_lib/build.sh
+COPY sync_core ./sync_core
+RUN bash sync_core/build.sh
 COPY . .
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/syc-file ./cmd
 
