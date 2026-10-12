@@ -11,6 +11,8 @@ func RegisterUpdateRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	h := NewAPIHandler(db)
 	u := rg.Group("/update")
 	u.GET("/check", h.Check)
+	u.GET("/desktop", h.DesktopManifest)
+	u.GET("/package/:id", h.DownloadPackage)
 	u.GET("/latest", h.Latest)
 	u.GET("/releases", h.ListReleases)
 	u.POST("/publish", h.Publish)
