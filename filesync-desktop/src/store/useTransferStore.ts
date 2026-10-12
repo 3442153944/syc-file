@@ -23,8 +23,8 @@ import type { SyncTask, SyncConflict } from '../api/sync/syncTypes'
 import { SpeedMeter } from '../utils/speedMeter'
 
 // ── 类型（与 Rust transfers.rs 的序列化结果一一对应） ─────────────────────────
-export type UploadStatus = 'uploading' | 'done' | 'error'
-/** manual = 文件管理/发布里的分片上传；quick-share = 粘贴快传（单次整包上传） */
+export type UploadStatus = 'uploading' | 'paused' | 'cancelled' | 'done' | 'error'
+/** manual = 手动上传；quick-share = 粘贴快传（桌面 Rust 后台，Web XHR） */
 export type UploadKind = 'manual' | 'quick-share'
 export interface UploadEntry {
   id: string
@@ -34,6 +34,7 @@ export interface UploadEntry {
   sent: number
   status: UploadStatus
   error?: string
+  shareUrl?: string
   startedAt: number
   finishedAt?: number
   /** 当前速度（字节/秒），上传中每秒刷新；完成后为整段平均速度 */
@@ -150,13 +151,18 @@ export const useTransferStore = defineStore('transfer', () => {
   //
   // 合并进已有对象（Object.assign）而不是整体替换：调用方持有的响应式对象保持同一个，
   // 界面上的绑定不会闪断。新条目放最前（与 Rust 侧顺序、界面展示一致）。
-  function upsert<T extends { id: string }>(list: Ref<T[]>, entry: T) {
+  function trimList<T extends {id: string; status?: string}>(items: T[]): T[] {
+    // 限制历史条数时保留活跃/暂停任务，不能让它们从控制界面消失。
+    return items.filter((item, index) => index < MAX_LIST || item.status === 'uploading' || item.status === 'paused')
+  }
+
+  function upsert<T extends { id: string; status?: string }>(list: Ref<T[]>, entry: T) {
     const existing = list.value.find((x) => x.id === entry.id)
     if (existing) {
       Object.assign(existing, entry)
     } else {
       list.value.unshift(entry)
-      if (list.value.length > MAX_LIST) list.value.length = MAX_LIST
+      if (list.value.length > MAX_LIST) list.value = trimList(list.value)
     }
   }
 
@@ -197,7 +203,7 @@ export const useTransferStore = defineStore('transfer', () => {
   }
 
   function applyCleared(list: ListName) {
-    if (list === 'uploads') uploads.value = uploads.value.filter((u) => u.status === 'uploading')
+    if (list === 'uploads') uploads.value = uploads.value.filter((u) => u.status === 'uploading' || u.status === 'paused')
     else if (list === 'downloads') downloads.value = downloads.value.filter((d) => d.status === 'downloading')
     else if (list === 'syncEvents') syncEvents.value = []
   }
@@ -207,11 +213,11 @@ export const useTransferStore = defineStore('transfer', () => {
    * 来自事件，一定不比快照旧，不能被快照覆盖回去。
    */
   function mergeSnapshot(snap: TransferSnapshot) {
-    const mergeInto = <T extends { id: string }>(list: Ref<T[]>, incoming: T[], ts: (x: T) => number) => {
+    const mergeInto = <T extends { id: string; status?: string }>(list: Ref<T[]>, incoming: T[], ts: (x: T) => number) => {
       const have = new Set(list.value.map((x) => x.id))
       const missing = incoming.filter((x) => !have.has(x.id))
       if (missing.length === 0) return
-      list.value = [...list.value, ...missing].sort((a, b) => ts(b) - ts(a)).slice(0, MAX_LIST)
+      list.value = trimList([...list.value, ...missing].sort((a, b) => ts(b) - ts(a)))
     }
     mergeInto(uploads, snap.uploads, (u) => u.startedAt)
     mergeInto(downloads, snap.downloads, (d) => d.startedAt)
@@ -366,6 +372,17 @@ export const useTransferStore = defineStore('transfer', () => {
   }
 
   // ── 手动上传（并行）──────────────────────────────────────────────────────
+  function setWebUploadStatus(id: string, status: UploadStatus) {
+    const entry = uploadById(id)
+    if (!entry || tauri) return
+    entry.status = status
+    entry.speed = 0
+    if (status === 'cancelled') {
+      entry.finishedAt = Date.now()
+      meters.delete(id)
+    }
+  }
+
   /**
    * 启动一次手动上传。多个调用并行即为并行上传（调用方用 Promise.all / Promise.allSettled）。
    *
@@ -479,6 +496,8 @@ export const useTransferStore = defineStore('transfer', () => {
     dispose,
     refreshSyncData,
     uploadById,
+    ensureMirror,
+    setWebUploadStatus,
     startManualUpload,
     beginUpload,
     reportUploadProgress,

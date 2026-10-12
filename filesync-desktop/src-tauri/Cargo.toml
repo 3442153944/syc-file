@@ -50,6 +50,7 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 # 多路径自适应上传决策核心（rlib 进程内调用：测速编排/父链折算/选片/AIMD 窗口/动态超时/多路调度）。
 # 它带 sysinfo/netstat2 依赖属正常；HTTP 发送仍归本平台（见 chunked_uploader.rs）。
 sync_core = { path = "../../new_server/sync_core" }
+tauri-plugin-updater = "=2.13.3"
 
 
 # 剪贴板文件路径读取（CF_HDROP）：粘贴快传对大文件走原路径零拷贝上传。
@@ -60,3 +61,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_DataExchange",
     "Win32_UI_Shell",
 ] }
+
+[dev-dependencies]
+base64 = "0.23"
+minisign-verify = "0.3"

@@ -26,6 +26,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVCQTBEQjgwNTM3RTBGRkEKUldUNkQzNVRnTnVnNjdDN3grOEtxZXJnV09uQWhWSzBOMnFacW10ckZPdVgyRDd3MEFyUWVLc0gK",
+      "requireSignedVersion": true,
+      "windows": { "installMode": "passive" }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

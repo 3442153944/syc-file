@@ -26,11 +26,11 @@ const MAX_LIST: usize = 100;
 pub struct UploadEntry {
     pub id: String,
     pub name: String,
-    /// manual = 文件管理/发布里的分片上传（Rust 执行）；quick-share = 粘贴快传（WebView 里的 XHR）
+    /// manual = 手动上传；quick-share = Rust 后台粘贴快传
     pub kind: String,
     pub total: i64,
     pub sent: i64,
-    /// uploading / done / error
+    /// uploading / paused / cancelled / done / error
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -41,6 +41,8 @@ pub struct UploadEntry {
     pub speed: f64,
     /// 是否已进入真实传输阶段（分片上传前两次上报只是簿记，见 SpeedMeter）
     pub started: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
     /// 发起这次上传的窗口。WebView 里跑的上传（快传）依赖该窗口存活，
     /// 关窗时要据此决定能不能立刻销毁 WebView。
     #[serde(skip)]
@@ -254,15 +256,18 @@ pub fn upload_begin(name: &str, kind: &str, total: i64, owner_window: Option<Str
         finished_at: None,
         speed: 0.0,
         started: false,
+        share_url: None,
         owner_window,
     };
-    let leading = if kind == "manual" { 2 } else { 0 };
+    let leading = if kind == "manual" || kind == "quick-share" { 2 } else { 0 };
     {
         let mut st = state().lock();
         st.meters.insert(entry.id.clone(), SpeedMeter::new(leading));
         st.uploads.push_front(entry.clone());
         while st.uploads.len() > MAX_LIST {
-            if let Some(dropped) = st.uploads.pop_back() {
+            // 活跃或暂停的任务不能因为追加新任务被截掉。
+            let Some(index) = st.uploads.iter().rposition(|u| !matches!(u.status.as_str(), "uploading" | "paused")) else { break; };
+            if let Some(dropped) = st.uploads.remove(index) {
                 st.meters.remove(&dropped.id);
             }
         }
@@ -331,7 +336,36 @@ pub fn has_active_uploads_owned_by(window: &str) -> bool {
         .lock()
         .uploads
         .iter()
-        .any(|u| u.status == "uploading" && u.owner_window.as_deref() == Some(window))
+        .any(|u| matches!(u.status.as_str(), "uploading" | "paused") && u.owner_window.as_deref() == Some(window))
+}
+
+/// 快传控制状态与分享结果也进入同一快照，任意窗口都能恢复显示。
+pub fn quick_share_status(id: &str, status: &str) {
+    let changed = {
+        let mut st = state().lock();
+        let State { uploads, meters, .. } = &mut *st;
+        let Some(u) = uploads.iter_mut().find(|u| u.id == id && matches!(u.status.as_str(), "uploading" | "paused")) else { return; };
+        u.status = status.into();
+        u.speed = 0.0;
+        if status == "cancelled" { u.finished_at = Some(now_ms()); meters.remove(id); }
+        else if status == "uploading" {
+            let mut meter = SpeedMeter::new(0);
+            meter.push(u.sent, now_ms());
+            meters.insert(id.into(), meter);
+        }
+        u.clone()
+    };
+    emit(Change::Upload(changed));
+}
+
+pub fn quick_share_result(id: &str, url: String) {
+    let changed = {
+        let mut st = state().lock();
+        let Some(u) = st.uploads.iter_mut().find(|u| u.id == id) else { return; };
+        u.share_url = Some(url);
+        u.clone()
+    };
+    emit(Change::Upload(changed));
 }
 
 // ── 下载（同步引擎收到 task_created 后执行） ──────────────────────────────────
@@ -438,7 +472,7 @@ pub fn clear_finished(list: &str) {
     {
         let mut st = state().lock();
         match list {
-            "uploads" => st.uploads.retain(|u| u.status == "uploading"),
+            "uploads" => st.uploads.retain(|u| matches!(u.status.as_str(), "uploading" | "paused")),
             "downloads" => st.downloads.retain(|d| d.status == "downloading"),
             // 同步活动原本就是整张清空
             "syncEvents" => st.sync_events.clear(),

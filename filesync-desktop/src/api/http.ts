@@ -172,6 +172,7 @@ export function httpPostBlob<T>(
   params: Record<string, string>,
   body: Blob,
   onProgress?: (sent: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<ApiEnvelope<T>> {
   const url = `${getServerUrl()}/v1${path}?${new URLSearchParams(params).toString()}`
   const token = getToken()
@@ -193,9 +194,12 @@ export function httpPostBlob<T>(
     const ctrl = new AbortController()
     const unregister = registerAbort(ctrl)
     ctrl.signal.addEventListener('abort', () => xhr.abort())
+    const abort = () => xhr.abort()
+    signal?.addEventListener('abort', abort, {once: true})
 
     const settle = (env: ApiEnvelope<T>) => {
       unregister()
+      signal?.removeEventListener('abort', abort)
       resolve(env)
     }
 
@@ -215,8 +219,12 @@ export function httpPostBlob<T>(
     }
     xhr.onerror = () => settle({ code: -1, message: '网络请求失败', data: undefined })
     xhr.ontimeout = () => settle({ code: -1, message: '请求超时', data: undefined })
-    xhr.onabort = () => settle({ code: -2, message: '节点已切换，本次上传已取消', data: undefined })
+    xhr.onabort = () => settle({ code: -2, message: signal?.aborted ? '已取消' : '节点已切换，本次上传已取消', data: undefined })
 
+    if (signal?.aborted) {
+      settle({code: -2, message: '已取消', data: undefined})
+      return
+    }
     xhr.send(body)
   })
 }

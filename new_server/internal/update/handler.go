@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -38,7 +39,7 @@ func (h *APIHandler) Check(c *gin.Context) {
 	versionCode, _ := strconv.ParseInt(c.Query("version_code"), 10, 64)
 
 	var rel model.AppRelease
-	err := h.db.Where("platform = ? AND enabled = ?", platform, true).
+	err := releaseQuery(h.db, platform, c.Query("arch"), c.Query("bundle_type")).Where("enabled = ?", true).
 		Order("version_code desc").First(&rel).Error
 	if err != nil {
 		jsonOK(c, gin.H{"has_update": false})
@@ -59,7 +60,7 @@ func (h *APIHandler) Latest(c *gin.Context) {
 	}
 	platform := c.DefaultQuery("platform", "android")
 	var rel model.AppRelease
-	err := h.db.Where("platform = ? AND enabled = ?", platform, true).
+	err := releaseQuery(h.db, platform, c.Query("arch"), c.Query("bundle_type")).Where("enabled = ?", true).
 		Order("version_code desc").First(&rel).Error
 	if err != nil {
 		jsonOK(c, nil)
@@ -85,7 +86,7 @@ func (h *APIHandler) ListReleases(c *gin.Context) {
 	jsonOK(c, gin.H{"list": list, "total": len(list)})
 }
 
-// Publish 发布新版本（仅 admin）。APK 须已经过分片上传落在允许盘内。
+// Publish 发布新版本（仅 admin）。安装包须已经过分片上传落在允许盘内。
 func (h *APIHandler) Publish(c *gin.Context) {
 	claims, ok := requireAdmin(c)
 	if !ok {
@@ -93,6 +94,9 @@ func (h *APIHandler) Publish(c *gin.Context) {
 	}
 	var req struct {
 		Platform       string `json:"platform"`
+		Arch           string `json:"arch"`
+		BundleType     string `json:"bundle_type"`
+		Signature      string `json:"signature"`
 		VersionCode    int64  `json:"version_code" binding:"required"`
 		VersionName    string `json:"version_name" binding:"required"`
 		Notes          string `json:"notes"`
@@ -113,9 +117,19 @@ func (h *APIHandler) Publish(c *gin.Context) {
 	if req.Platform == "" {
 		req.Platform = "android"
 	}
-	// APK 路径必须落在允许盘内（与 download/upload 一致的安全边界）
+	req.Signature = strings.TrimSpace(req.Signature)
+	code, err := validateTarget(req.Platform, req.Arch, req.BundleType, req.VersionName, req.Signature, req.FileName)
+	if err != nil {
+		jsonErr(c, 400, err.Error())
+		return
+	}
+	if req.Platform != "android" && code != req.VersionCode {
+		jsonErr(c, 400, "桌面版本号必须与版本名对应")
+		return
+	}
+	// 安装包路径必须落在允许盘内（与 download/upload 一致的安全边界）
 	if !config.Conf.IsPathAllowed(req.FilePath) {
-		jsonErr(c, 400, "APK 路径不在允许的存储范围内")
+		jsonErr(c, 400, "安装包路径不在允许的存储范围内")
 		return
 	}
 	enabled := true
@@ -124,6 +138,7 @@ func (h *APIHandler) Publish(c *gin.Context) {
 	}
 	// 同平台同版本号唯一：已存在则更新，避免重复
 	rel := model.AppRelease{
+		Arch: req.Arch, BundleType: req.BundleType, Signature: req.Signature,
 		Platform:       req.Platform,
 		VersionCode:    req.VersionCode,
 		VersionName:    req.VersionName,
@@ -138,7 +153,7 @@ func (h *APIHandler) Publish(c *gin.Context) {
 		UploaderID:     claims,
 	}
 	var existing model.AppRelease
-	err := h.db.Where("platform = ? AND version_code = ?", req.Platform, req.VersionCode).First(&existing).Error
+	err = h.db.Where("platform = ? AND version_code = ? AND arch = ? AND bundle_type = ?", req.Platform, req.VersionCode, req.Arch, req.BundleType).First(&existing).Error
 	if err == nil {
 		rel.ID = existing.ID
 		rel.CreatedAt = existing.CreatedAt
@@ -194,7 +209,7 @@ func (h *APIHandler) UpdateRelease(c *gin.Context) {
 	jsonOK(c, nil)
 }
 
-// DeleteRelease 删除版本记录（仅 admin，不删磁盘 APK，属手动管理）。
+// DeleteRelease 删除版本记录（仅 admin，不删磁盘安装包，属手动管理）。
 func (h *APIHandler) DeleteRelease(c *gin.Context) {
 	if _, ok := requireAdmin(c); !ok {
 		return
@@ -211,11 +226,13 @@ func (h *APIHandler) DeleteRelease(c *gin.Context) {
 	jsonOK(c, nil)
 }
 
-// broadcastAppUpdate 向所有在线设备广播 app_update；非 Android 客户端按 type 忽略即可。
+// broadcastAppUpdate 向所有在线设备广播 app_update；客户端按平台、架构及包类型筛选。
 func broadcastAppUpdate(rel *model.AppRelease) {
 	payload, _ := json.Marshal(gin.H{
 		"event":        WSEventAppUpdate,
 		"platform":     rel.Platform,
+		"arch":         rel.Arch,
+		"bundle_type":  rel.BundleType,
 		"version_code": rel.VersionCode,
 		"version_name": rel.VersionName,
 		"mandatory":    rel.Mandatory,

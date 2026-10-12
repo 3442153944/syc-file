@@ -5,25 +5,28 @@
 //
 // 在快传页面上粘贴时，页面容器会先接住事件，这里据 defaultPrevented 跳过，
 // 不会重复上传（见 useQuickPaste）。
-import {onMounted, onUnmounted, watch} from 'vue'
-import {useMessage, type MessageReactive} from 'naive-ui'
-import {useRoute} from 'vue-router'
+import {h, onMounted, onUnmounted, watch} from 'vue'
+import {NButton, useMessage, type MessageReactive} from 'naive-ui'
+import {useRoute, useRouter} from 'vue-router'
+import {isTauri} from '@tauri-apps/api/core'
 import {useQuickPaste} from '@/composables/useQuickPaste'
 import {formatBytes, formatSpeed, formatEta} from '@/utils/speedMeter'
 
 const message = useMessage()
 const route = useRoute()
+const router = useRouter()
 
 // 上传过程中的常驻提示，实时显示进度和速度；结束时换成成功/失败提示。
 // 快传页面自己有进度展示，那里就不重复弹。
 let progressMsg: MessageReactive | null = null
+const previousStatuses = new Map<string, string>()
 
 const closeProgress = () => {
   progressMsg?.destroy()
   progressMsg = null
 }
 
-const {handlePasteEvent, currentTask} = useQuickPaste((result, err) => {
+const {handlePasteEvent, tasks} = useQuickPaste((result, err) => {
   closeProgress()
   if (result) {
     message.success('已上传，链接已复制到剪贴板')
@@ -35,20 +38,36 @@ const {handlePasteEvent, currentTask} = useQuickPaste((result, err) => {
 const onQuickSharePage = () => route.name === 'QuickShare'
 
 watch(
-    () => currentTask.value && [currentTask.value.status, currentTask.value.sent, currentTask.value.speed],
+    () => [route.fullPath, ...tasks.value.map(t => [t.id, t.status, t.sent, t.speed])],
     () => {
-      const t = currentTask.value
-      if (!t || t.status !== 'uploading' || onQuickSharePage()) {
+      for (const task of tasks.value) {
+        const previous = previousStatuses.get(task.id)
+        previousStatuses.set(task.id, task.status)
+        if (isTauri() && (previous === 'uploading' || previous === 'paused') && task.status === 'done') {
+          message.success(`快传 ${task.name} 已完成，可在任务列表复制链接`)
+        } else if (isTauri() && (previous === 'uploading' || previous === 'paused') && task.status === 'error') {
+          message.error(`快传 ${task.name}：${task.error || '上传失败'}`)
+        }
+      }
+      const active = tasks.value.filter(t => t.status === 'uploading' || t.status === 'paused')
+      const t = active[0]
+      if (!t || onQuickSharePage()) {
         closeProgress()
         return
       }
-      const content = describeProgress(t)
+      const content = () => h('span', [
+        h('span', active.length > 1 ? `快传 ${active.length} 个任务进行中 ` : t.status === 'paused' ? `快传 ${t.name}：已暂停 ` : describeProgress(t) + ' '),
+        h(NButton, {size: 'tiny', text: true, type: 'primary', onClick: () => {
+          void router.push({name: 'QuickShare'})
+        }}, {default: () => '查看任务'}),
+      ])
       if (progressMsg) {
         progressMsg.content = content
       } else {
         progressMsg = message.loading(content, {duration: 0})
       }
     },
+    {immediate: true, flush: 'sync'},
 )
 
 function describeProgress(t: { name: string; sent: number; total: number; speed: number; started: boolean }) {

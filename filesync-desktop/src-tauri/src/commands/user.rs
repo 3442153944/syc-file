@@ -23,6 +23,7 @@ pub async fn login(
     let data = api_data(resp, "login")?;
     config.write().token = data.token.clone();
     apply_quick_share_user_settings(&app, &config, &data.user);
+    crate::desktop_update::auto_check(app.clone(), config.inner().clone());
     Ok(data)
 }
 
@@ -54,6 +55,7 @@ pub async fn verify(config: State<'_, SharedSyncConfig>, app: tauri::AppHandle) 
     let data = api_data(resp, "verify")?;
     if let Some(u) = &data.user {
         apply_quick_share_user_settings(&app, &config, u);
+        crate::desktop_update::auto_check(app.clone(), config.inner().clone());
     }
     Ok(data)
 }
