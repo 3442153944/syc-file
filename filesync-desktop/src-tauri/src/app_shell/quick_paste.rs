@@ -3,7 +3,36 @@
 use crate::config::SharedSyncConfig;
 use crate::hotkey_codec;
 use crate::logger;
-use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+use parking_lot::Mutex;
+use tokio::sync::watch;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Control { Running, Paused, Cancelled }
+static CONTROLS: OnceLock<Mutex<HashMap<String, watch::Sender<Control>>>> = OnceLock::new();
+fn controls() -> &'static Mutex<HashMap<String, watch::Sender<Control>>> {
+    CONTROLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 暂停时保留同一个 future / 服务端会话；取消时 drop future，不再产生新网络请求。
+async fn controlled_upload<F: std::future::Future>(upload: F, mut rx: watch::Receiver<Control>) -> Option<F::Output> {
+    tokio::pin!(upload);
+    loop {
+        let control = *rx.borrow_and_update();
+        if control == Control::Cancelled { return None; }
+        if control == Control::Paused {
+            if rx.changed().await.is_err() { return None; }
+            continue;
+        }
+        tokio::select! {
+            biased;
+            changed = rx.changed() => { if changed.is_err() { return None; } }
+            result = &mut upload => { return Some(result); }
+        }
+    }
+}
 
 /// 打开（或聚焦）粘贴快传悬浮窗，label = "quick-paste"，渲染前端 QuickPaste.vue（见
 /// App.vue 按 label 的硬分支，和 "logs" 窗口同款处理，不走 vue-router）。
@@ -17,12 +46,14 @@ use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 /// 占满屏幕，但拖大一点看长文件名/长链接还是有用的。
 pub fn open_quick_paste_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("quick-paste") {
+        let _ = w.show();
+        let _ = w.unminimize();
         let _ = w.set_focus();
         return;
     }
     match WebviewWindowBuilder::new(app, "quick-paste", WebviewUrl::App("index.html".into()))
         .title("粘贴快传")
-        .inner_size(380.0, 300.0)
+        .inner_size(520.0, 480.0)
         .resizable(true)
         .maximizable(false)
         .max_inner_size(800.0, 600.0)
@@ -69,15 +100,14 @@ pub fn set_quick_paste_hotkey(
 
 /// 粘贴快传上传（Tauri 侧）：内容写临时文件 → 走多路分片上传核心（quick_share 模式，
 /// h1.1 多连接 + DRR 调度，绕开 WebView2 h2 单连接 64KB 流控窗口的 ~880KB/s 限速）→
-/// 删临时文件。进度经 "quick-share-progress" 事件推给调用窗口。
-/// 返回分享记录（与旧单发快传接口同一形状），前端直接当 CreateShareLinkData 用。
+/// 删临时文件。立即返回任务 ID，执行与状态均由 Rust 持有，关窗不影响上传。
 #[tauri::command]
 pub async fn quick_share_upload(
     name: String,
     bytes: Vec<u8>,
-    window: tauri::Window,
+    app: tauri::AppHandle,
     config: State<'_, SharedSyncConfig>,
-) -> Result<serde_json::Value, String> {
+) -> Result<String, String> {
     if bytes.is_empty() {
         return Err("内容为空".into());
     }
@@ -95,18 +125,16 @@ pub async fn quick_share_upload(
         return Err(format!("创建临时目录失败: {}", e));
     }
     if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_dir_all(tmp.parent().expect("临时目录"));
         return Err(format!("写入临时文件失败: {}", e));
     }
-    let result = run_quick_share(&tmp, &window, &config).await;
-    if let Some(dir) = tmp.parent() {
-        if let Err(e) = std::fs::remove_dir_all(dir) {
-            logger::warn(
-                "quick-share",
-                format!("删除临时文件失败: {} ({})", dir.display(), e),
-            );
+    match start_quick_share(tmp.clone(), true, app, config.inner().clone()) {
+        Ok(id) => Ok(id),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(tmp.parent().expect("临时目录"));
+            Err(e)
         }
     }
-    result
 }
 
 /// 从原始文件路径做粘贴快传（零拷贝路径）：剪贴板里是资源管理器复制的文件时，
@@ -115,9 +143,9 @@ pub async fn quick_share_upload(
 #[tauri::command]
 pub async fn quick_share_upload_path(
     path: String,
-    window: tauri::Window,
+    app: tauri::AppHandle,
     config: State<'_, SharedSyncConfig>,
-) -> Result<serde_json::Value, String> {
+) -> Result<String, String> {
     let p = std::path::PathBuf::from(&path);
     let meta = std::fs::metadata(&p).map_err(|e| format!("读取剪贴板文件失败: {e}"))?;
     if !meta.is_file() {
@@ -126,34 +154,83 @@ pub async fn quick_share_upload_path(
     if meta.len() == 0 {
         return Err("内容为空".into());
     }
-    run_quick_share(&p, &window, &config).await
+    start_quick_share(p, false, app, config.inner().clone())
 }
 
-/// 快传公共执行段：多路分片上传（quick_share 模式），进度经事件推送。
-async fn run_quick_share(
-    file: &std::path::Path,
-    window: &tauri::Window,
-    config: &State<'_, SharedSyncConfig>,
-) -> Result<serde_json::Value, String> {
+/// 暂停停止派发新请求，已在途分片允许结束；取消丢弃整个上传 future（JoinSet 随之 abort）。
+#[tauri::command]
+pub fn control_quick_share(id: String, action: String) -> Result<(), String> {
+    let state = match action.as_str() {
+        "pause" => Control::Paused,
+        "resume" => Control::Running,
+        "cancel" => Control::Cancelled,
+        _ => return Err("未知快传操作".into()),
+    };
+    let map = controls().lock();
+    let sender = map.get(&id).ok_or("任务已结束")?;
+    if *sender.borrow() == Control::Cancelled { return Err("任务已取消".into()); }
+    sender.send(state).map_err(|_| "任务已结束".to_string())?;
+    crate::transfers::quick_share_status(&id, match state {
+        Control::Running => "uploading", Control::Paused => "paused", Control::Cancelled => "cancelled",
+    });
+    Ok(())
+}
+
+fn start_quick_share(
+    file: std::path::PathBuf, temporary: bool, app: tauri::AppHandle, config: SharedSyncConfig,
+) -> Result<String, String> {
     use crate::chunked_uploader::{quick_share_upload as upload_inner, ProgressFn, UploadOptions};
-    use std::sync::Arc;
-    let (client, device_id) = {
+    let (client, device_id, base_url) = {
         let cfg = config.read();
         (
             crate::commands::support::make_client(&cfg)?,
             cfg.device_id.clone(),
+            cfg.server_url.trim_end_matches('/').to_string(),
         )
     };
+    let total = file.metadata().map_err(|e| e.to_string())?.len() as i64;
+    let name = file.file_name().ok_or("无效文件名")?.to_string_lossy();
+    let id = crate::transfers::upload_begin(&name, "quick-share", total, None);
+    let (tx, rx) = watch::channel(Control::Running);
+    controls().lock().insert(id.clone(), tx);
     let options = UploadOptions::new(device_id).with_quick_share();
-    let window = window.clone();
+    let progress_id = id.clone();
     let on_progress: ProgressFn = Arc::new(move |sent, total| {
-        let _ = window.emit(
-            "quick-share-progress",
-            serde_json::json!({ "sent": sent, "total": total }),
-        );
+        crate::transfers::upload_progress(&progress_id, sent, total);
     });
-    let data = upload_inner(&client, file, "", &options, on_progress, config).await?;
-    serde_json::to_value(&data).map_err(|e| format!("序列化分享结果失败: {}", e))
+    let task_id = id.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = controlled_upload(
+            upload_inner(&client, &file, "", &options, on_progress, &config), rx,
+        ).await; // 先 drop 上传 future，再清理临时文件。
+        // 与控制命令串行提交终态，避免完成与取消竞态覆盖彼此。
+        {
+            let mut map = controls().lock();
+            let cancelled = map.get(&task_id).map(|s| *s.borrow() == Control::Cancelled).unwrap_or(true);
+            match result {
+                Some(Ok(data)) if !cancelled => {
+                    let url = format!("{}{}", base_url, data.url_path);
+                    crate::transfers::quick_share_result(&task_id, url.clone());
+                    let clipboard = app.state::<crate::clipboard_sync::SharedClipboardState>();
+                    if let Err(e) = crate::clipboard_sync::apply_to_clipboard(&clipboard, &url) {
+                        logger::warn("quick-share", e);
+                    }
+                    crate::transfers::upload_finish(&task_id, None);
+                }
+                Some(Err(e)) if !cancelled => crate::transfers::upload_finish(&task_id, Some(e)),
+                _ => crate::transfers::quick_share_status(&task_id, "cancelled"),
+            }
+            map.remove(&task_id);
+        }
+        if temporary {
+            if let Some(dir) = file.parent() {
+                if let Err(e) = std::fs::remove_dir_all(dir) {
+                    logger::warn("quick-share", format!("清理临时文件失败: {e}"));
+                }
+            }
+        }
+    });
+    Ok(id)
 }
 
 /// 读取当前剪贴板的文件路径列表（Windows CF_HDROP）。剪贴板里是复制的文件时返回
@@ -204,4 +281,58 @@ fn clipboard_paths_impl() -> Vec<String> {
 #[cfg(not(windows))]
 fn clipboard_paths_impl() -> Vec<String> {
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn paused_upload_does_not_poll_until_resumed() {
+        let (tx, rx) = watch::channel(Control::Paused);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(controlled_upload(async move {
+            let _ = started_tx.send(());
+            42
+        }, rx));
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        tx.send(Control::Running).unwrap();
+        started_rx.await.unwrap();
+        assert_eq!(task.await.unwrap(), Some(42));
+    }
+
+    #[tokio::test]
+    async fn cancelling_paused_upload_drops_future_without_starting_it() {
+        let (tx, rx) = watch::channel(Control::Paused);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(controlled_upload(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await
+        }, rx));
+        tx.send(Control::Cancelled).unwrap();
+        assert_eq!(task.await.unwrap(), None);
+        assert!(started_rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_running_upload_aborts_owned_inflight_tasks() {
+        let (tx, rx) = watch::channel(Control::Running);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (child_tx, child_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(controlled_upload(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(async move {
+                let _guard = child_tx;
+                std::future::pending::<()>().await;
+            });
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            drop(tasks);
+        }, rx));
+        started_rx.await.unwrap();
+        tx.send(Control::Cancelled).unwrap();
+        assert_eq!(task.await.unwrap(), None);
+        assert!(child_rx.await.is_err(), "JoinSet 中的请求必须随取消被 abort");
+    }
 }

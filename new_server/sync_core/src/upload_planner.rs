@@ -32,7 +32,7 @@
 //! - 调度：DRR 赤字轮询，节点权重 = eff_bps^weight_exponent（默认 0.5=平方根，多链路更均衡；
 //!   1.0=严格按带宽，吞吐最优但会饿死慢链路）。
 //! - 运行时：每节点独立 AIMD 窗口（上限 MAX_PER_NODE_CONCURRENCY），超时/传输错误
-//!   减半，连续成功且延迟 <2×RTT 才加一；422 类数据错误不算拥塞。
+//!   减半，连续成功且传片耗时在链路预算内才加一；422 类数据错误不算拥塞。
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -109,6 +109,11 @@ pub struct PersistedNodeState {
     pub rtt_ms: f64,
     pub bps: f64,
     pub measured_at_ms: i64,
+    /// 样本必须绑定入口与后端；旧缓存缺字段时重新实测。
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub backend_node: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -322,6 +327,7 @@ struct NodeRuntime {
     bps: Option<f64>,
     /// 主节点测速响应里的后端节点名（同后端校验用）。
     backend_node: Option<String>,
+    measured_at_ms: Option<i64>,
     /// 探测失败（本次探测且没有新鲜持久化兜底）。
     probe_dead: bool,
     window: usize,
@@ -376,13 +382,24 @@ impl Planner {
         if input.nodes.is_empty() {
             return Err("节点池为空".into());
         }
+        let ids: HashSet<_> = input.nodes.iter().map(|n| n.id.as_str()).collect();
+        if ids.len() != input.nodes.len() || !ids.contains(input.main_node.as_str()) {
+            return Err("节点 ID 重复或主节点不在节点池中".into());
+        }
         let main = input.main_node.clone();
         let cooldown = Duration::from_millis(input.adjust_cooldown_ms);
         let fresh: HashMap<String, &PersistedNodeState> = input
             .state
             .nodes
             .iter()
-            .filter(|n| input.now_ms - n.measured_at_ms <= STATE_FRESH_MS)
+            .filter(|n| {
+                let age = input.now_ms.checked_sub(n.measured_at_ms);
+                matches!(age, Some(0..=STATE_FRESH_MS))
+                    && n.rtt_ms.is_finite() && n.rtt_ms > 0.0 && n.rtt_ms <= 120_000.0
+                    && n.bps.is_finite() && n.bps > 0.0
+                    && !n.backend_node.is_empty()
+                    && input.nodes.iter().any(|cfg| cfg.id == n.id && cfg.url == n.url)
+            })
             .map(|n| (n.id.clone(), n))
             .collect();
 
@@ -414,7 +431,8 @@ impl Planner {
                 cfg,
                 rtt,
                 bps,
-                backend_node: None,
+                backend_node: fresh.get(id).map(|s| s.backend_node.clone()),
+                measured_at_ms: fresh.get(id).map(|s| s.measured_at_ms),
                 probe_dead: false,
                 window: 0,
                 window_cap: MAX_PER_NODE_CONCURRENCY,
@@ -477,6 +495,10 @@ impl Planner {
     /// 会话过期后重新接入（平台也可用它做首个会话接入，与 begin_transfer 同效：
     /// 会在需要时按当前样本/bootstrap 重算窗口）。
     pub fn resume(&mut self, upload_id: &str, missing: &[u32]) {
+        // 平台已取消旧会话在途任务，被取消的探针需要重新排队。
+        for (node, kind) in self.probing.drain() {
+            self.probe_queue.push_back((node, kind));
+        }
         self.ensure_sized();
         self.recompute_windows();
         self.upload_id = upload_id.to_string();
@@ -569,13 +591,16 @@ impl Planner {
                 .nodes
                 .iter()
                 .filter_map(|n| {
+                    if n.probe_dead { return None; }
                     let rtt = n.rtt?;
                     let bps = n.bps?;
                     Some(PersistedNodeState {
                         id: n.cfg.id.clone(),
                         rtt_ms: rtt.as_secs_f64() * 1000.0,
                         bps,
-                        measured_at_ms: self.now_ms,
+                        measured_at_ms: n.measured_at_ms?,
+                        url: n.cfg.url.clone(),
+                        backend_node: n.backend_node.clone()?,
                     })
                 })
                 .collect(),
@@ -616,6 +641,7 @@ impl Planner {
         if !self.probing.remove(&(node.to_string(), kind)) {
             return; // 乱序/过期探测结果，忽略
         }
+        let measured_at = self.now_ms;
         {
             let n = match self.node_mut(node) {
                 Some(n) => n,
@@ -633,6 +659,7 @@ impl Planner {
                     ProbeKind::Throughput => {
                         if bytes > 0 {
                             n.bps = Some(bytes as f64 / elapsed.as_secs_f64());
+                            n.measured_at_ms = Some(measured_at);
                         }
                     }
                 }
@@ -684,14 +711,19 @@ impl Planner {
         for n in &mut self.nodes {
             n.window_cap = window_cap;
             n.eff_bps = 0.0;
-            let dead = n.probe_dead && n.rtt.is_none();
+            let dead = n.probe_dead;
             let mismatch = n
                 .backend_node
                 .as_deref()
-                .map(|b| !main_backend.is_empty() && b != main_backend)
+                .map(|b| b.is_empty() || (!main_backend.is_empty() && b != main_backend))
                 .unwrap_or(false);
-            if dead || mismatch {
-                n.bps = None;
+            // 主节点身份尚未实测时，仅让 init 锚点开传，不把其它入口加入会话。
+            let unverified = n.cfg.id != main_id
+                && (main_backend.is_empty() || n.backend_node.is_none());
+            if dead || mismatch || unverified {
+                if dead || mismatch {
+                    n.bps = None;
+                }
                 n.window = 0;
             }
         }
@@ -700,7 +732,9 @@ impl Planner {
         let measured: HashMap<String, f64> = self
             .nodes
             .iter()
-            .filter(|n| n.rtt.is_some())
+            .filter(|n| n.rtt.is_some() && !n.probe_dead
+                && !main_backend.is_empty()
+                && n.backend_node.as_deref() == Some(main_backend.as_str()))
             .map(|n| (n.cfg.id.clone(), n.bps.unwrap_or(0.0)))
             .collect();
         let eff = combine_effective(&cfgs, &measured);
@@ -717,13 +751,13 @@ impl Planner {
             }
         }
 
-        // 主节点是 init 锚点（已证明可达）：没有任何实测先验时也给启动窗口，
-        // 保证首字节立即能发；全池都派不出分片时兜底给任意一个已配置节点。
-        if !self.nodes.iter().any(|n| n.window > 0) {
+        // 主节点是 init 锚点（已证明可达）：没有实测先验时也给启动窗口。
+        // init 锚点始终保留 bootstrap，不能因为副节点先测完就饿死主链路。
+        {
             if let Some(n) = self.nodes.iter_mut().find(|n| n.cfg.id == main_id) {
-                n.window = BOOTSTRAP_WINDOW.min(window_cap);
-            } else if let Some(n) = self.nodes.first_mut() {
-                n.window = BOOTSTRAP_WINDOW.min(window_cap);
+                if n.window == 0 {
+                    n.window = BOOTSTRAP_WINDOW.min(window_cap);
+                }
             }
         }
     }
@@ -860,7 +894,7 @@ impl Planner {
     fn maybe_increase_window(&mut self, node_id: &str) {
         let cooldown = self.adjust_cooldown;
         let chunk = self.chunk_size;
-        let (streak, window, window_cap, last_adjust, baseline, ema_bps) = {
+        let (streak, window, window_cap, last_adjust, baseline, probe_bps, ema_bps) = {
             let n = match self.node_mut(node_id) {
                 Some(n) => n,
                 None => return,
@@ -871,6 +905,7 @@ impl Planner {
                 n.window_cap,
                 n.last_adjust,
                 n.rtt.unwrap_or(Duration::from_secs(1)),
+                n.bps,
                 n.ema_bps,
             )
         };
@@ -883,12 +918,15 @@ impl Planner {
         if !cooldown_ok {
             return;
         }
-        // 平均片延迟须 < 2×RTT 基线才加窗
+        // 分片耗时包括发送字节，不能只和 RTT 比：WAN 上 4MiB / 带宽通常远大于 RTT，
+        // 旧判定会让健康低带宽线路永远无法加窗。用探测带宽估算完整传片预算。
         let avg = match ema_bps {
             Some(b) if b > 0.0 => Duration::from_secs_f64(chunk as f64 / b),
             _ => Duration::ZERO,
         };
-        if avg <= baseline.mul_f64(2.0) {
+        let budget = probe_bps.filter(|b| *b > 0.0)
+            .map(|b| baseline + Duration::from_secs_f64(chunk as f64 / b));
+        if budget.map(|b| avg <= b.mul_f64(2.0)).unwrap_or(true) {
             if let Some(n) = self.node_mut(node_id) {
                 n.window += 1;
                 n.streak = 0;
@@ -1513,6 +1551,97 @@ mod tests {
         let windows = p2.windows();
         assert_eq!(windows.iter().find(|(id, _)| id == "hk").unwrap().1, 0);
         assert!(windows.iter().find(|(id, _)| id == "main").unwrap().1 >= 1);
+    }
+
+    #[test]
+    fn cached_identity_and_timestamp_survive_reuse() {
+        let p = run_probes(Planner::new(input(vec![node("main", None), node("other", None)], "main", 1_000_000)).unwrap(), &[]);
+        let mut i = input(vec![node("main", None), node("other", None)], "main", 1_100_000);
+        i.state = p.export_state();
+        i.state.nodes.iter_mut().find(|s| s.id == "other").unwrap().backend_node = "different".into();
+        let mut cached = Planner::new(i).unwrap();
+        cached.begin_transfer("session", &[0, 1]);
+        assert_eq!(cached.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        let state = cached.export_state();
+        assert_eq!(state.nodes[0].measured_at_ms, 1_000_000, "复用不能刷新样本时间");
+        assert_eq!(state.nodes[0].backend_node, "backend-1");
+        let mut expired = input(vec![node("main", None)], "main", 1_700_001);
+        expired.state = state;
+        assert!(matches!(Planner::new(expired).unwrap().next_task(), Task::Probe(_)));
+    }
+
+    #[test]
+    fn cache_rejects_changed_url_future_clock_and_invalid_numbers() {
+        let p = run_probes(Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap(), &[]);
+        for case in 0..5 {
+            let mut i = input(vec![node("main", None)], "main", 1_100_000);
+            i.state = p.export_state();
+            match case {
+                0 => i.nodes[0].url = "https://changed".into(),
+                1 => i.state.nodes[0].measured_at_ms = 1_200_000,
+                2 => i.state.nodes[0].rtt_ms = f64::NAN,
+                3 => i.state.nodes[0].bps = -1.0,
+                _ => i.state.nodes[0].backend_node.clear(),
+            }
+            assert!(matches!(Planner::new(i).unwrap().next_task(), Task::Probe(_)));
+        }
+    }
+
+    #[test]
+    fn secondary_waits_for_main_identity_even_when_probes_finish_first() {
+        let mut p = Planner::new(input(vec![node("main", None), node("other", None)], "main", 1_000_000)).unwrap();
+        let mut probes = vec![];
+        while let Task::Probe(t) = p.next_task() { probes.push(t); }
+        for t in probes.iter().filter(|t| t.node == "other") {
+            p.report(Report::ProbeOk {node: t.node.clone(), kind: t.kind, bytes: t.bytes, elapsed_ms: 20, backend_node: "other-backend".into()});
+        }
+        p.begin_transfer("session", &[0, 1]);
+        assert_eq!(chunk_or_panic(p.next_task()).node, "main");
+        assert_eq!(p.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        for t in probes.iter().filter(|t| t.node == "main") {
+            p.report(Report::ProbeOk {node: t.node.clone(), kind: t.kind, bytes: t.bytes, elapsed_ms: 20, backend_node: "main-backend".into()});
+        }
+        assert_eq!(p.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+    }
+
+    #[test]
+    fn late_throughput_cannot_revive_failed_tiny_probe() {
+        let mut p = Planner::new(input(vec![node("main", None), node("other", None)], "main", 1_000_000)).unwrap();
+        let mut probes = vec![];
+        while let Task::Probe(t) = p.next_task() { probes.push(t); }
+        for t in probes.iter().filter(|t| t.node == "main") {
+            p.report(Report::ProbeOk {node: t.node.clone(), kind: t.kind, bytes: t.bytes, elapsed_ms: 20, backend_node: "backend-1".into()});
+        }
+        p.report(Report::ProbeFailed {node: "other".into(), kind: ProbeKind::Tiny});
+        p.report(Report::ProbeOk {node: "other".into(), kind: ProbeKind::Throughput, bytes: PROBE_THROUGHPUT_BYTES, elapsed_ms: 20, backend_node: "backend-1".into()});
+        assert_eq!(p.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        assert!(!p.export_state().nodes.iter().any(|s| s.id == "other"));
+    }
+
+    #[test]
+    fn resume_requeues_aborted_probes_and_ignores_old_chunks() {
+        let mut p = Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap();
+        p.begin_transfer("old", &[0]);
+        assert!(matches!(p.next_task(), Task::Probe(_)));
+        assert!(matches!(p.next_task(), Task::Probe(_)));
+        let old = chunk_or_panic(p.next_task());
+        p.report(Report::ChunkSessionGone {seq: old.seq});
+        p.resume("new", &[0]);
+        p.report(Report::ChunkOk {seq: old.seq, bytes: old.bytes, elapsed_ms: 10});
+        assert!(matches!(p.next_task(), Task::Probe(_)));
+        assert!(p.pending.contains_key(&0));
+    }
+
+    #[test]
+    fn healthy_wan_can_increase_window_when_chunk_time_exceeds_rtt() {
+        let mut p = run_probes(Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap(), &[]);
+        p.begin_transfer("session", &[0, 1, 2, 3, 4]);
+        let before = p.windows()[0].1;
+        for _ in 0..STREAK_TO_INCREASE {
+            let t = chunk_or_panic(p.next_task());
+            p.report(Report::ChunkOk {seq: t.seq, bytes: t.bytes, elapsed_ms: 3200});
+        }
+        assert!(p.windows()[0].1 > before, "健康大分片不能因耗时超过 RTT 被永久锁在初始窗口");
     }
 
     #[test]

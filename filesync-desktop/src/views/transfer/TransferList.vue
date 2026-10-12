@@ -5,6 +5,9 @@
 import { onMounted, onBeforeUnmount, computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTransferStore } from '@/store/useTransferStore'
+import {controlQuickPaste} from '@/composables/useQuickPaste'
+import {copyText} from '@/utils/clipboard'
+import {isTauri} from '@tauri-apps/api/core'
 import { listSyncTasks, clearSyncTasks } from '@/api/sync/syncApi'
 import type { SyncTask } from '@/api/sync/syncTypes'
 import type { UploadEntry } from '@/store/useTransferStore'
@@ -15,6 +18,14 @@ import { NButton, NSpace, NEmpty, NTag, NProgress, NPopconfirm, NPagination, NSe
 const router = useRouter()
 const store = useTransferStore()
 const message = useMessage()
+const desktop = isTauri()
+const uploadLabels = {uploading: '上传中', paused: '已暂停', cancelled: '已取消', done: '完成', error: '失败'}
+async function controlUpload(id: string, action: 'pause' | 'resume' | 'cancel') {
+  try { await controlQuickPaste(id, action) } catch (e) { message.error(String(e)) }
+}
+async function copyLink(url: string) {
+  try { await copyText(url); message.success('链接已复制') } catch (e) { message.error(String(e)) }
+}
 
 // ── 服务端同步记录（分页）────────────────────────────────────────────────
 const taskList = ref<SyncTask[]>([])
@@ -148,7 +159,7 @@ const goBack = () => router.back()
                 {{ u.name }}
               </div>
               <n-progress
-                v-if="u.status === 'uploading'"
+                v-if="u.status === 'uploading' || u.status === 'paused'"
                 :percentage="uploadPercent(u)"
                 :height="8"
                 :show-indicator="false"
@@ -163,12 +174,18 @@ const goBack = () => router.back()
                 <span>{{ formatTime(u.startedAt) }}</span>
               </div>
               <div v-if="u.error" class="row-err">{{ u.error }}</div>
+              <n-space v-if="u.kind === 'quick-share'" size="small">
+                <n-button v-if="desktop && u.status === 'uploading'" size="tiny" @click="controlUpload(u.id, 'pause')">暂停</n-button>
+                <n-button v-if="u.status === 'paused'" size="tiny" @click="controlUpload(u.id, 'resume')">继续</n-button>
+                <n-button v-if="u.status === 'uploading' || u.status === 'paused'" size="tiny" @click="controlUpload(u.id, 'cancel')">取消</n-button>
+                <n-button v-if="u.shareUrl" size="tiny" @click="copyLink(u.shareUrl)">复制链接</n-button>
+              </n-space>
             </div>
             <n-tag
               size="small"
               :type="u.status === 'done' ? 'success' : u.status === 'error' ? 'error' : 'info'"
             >
-              {{ u.status === 'uploading' ? '上传中' : u.status === 'done' ? '完成' : '失败' }}
+              {{ uploadLabels[u.status] }}
             </n-tag>
           </div>
         </div>

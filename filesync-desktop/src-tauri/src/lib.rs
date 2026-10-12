@@ -8,6 +8,7 @@ mod clipboard_sync;
 mod commands;
 mod config;
 mod device;
+mod desktop_update;
 mod hotkey_codec;
 mod logger;
 mod net;
@@ -47,6 +48,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -61,6 +63,7 @@ pub fn run() {
         .manage(shared_config.clone())
         .manage(sync_engine::init_sync_engine())
         .manage(clipboard_state.clone())
+        .manage(desktop_update::init())
         .setup(move |app| {
             // 启动时 tauri.conf.json 自动建出的主窗口用的是配置里写死的默认位置/大小，
             // 补上一次关闭时缓存的值（没有缓存就保持默认，见 app_shell::window）
@@ -238,6 +241,7 @@ pub fn run() {
             app_shell::quick_paste::set_quick_paste_hotkey,
             app_shell::quick_paste::quick_share_upload,
             app_shell::quick_paste::quick_share_upload_path,
+            app_shell::quick_paste::control_quick_share,
             app_shell::quick_paste::clipboard_file_paths,
             // 记住密码
             commands::credential::save_remembered_credential,
@@ -304,6 +308,11 @@ pub fn run() {
             commands::update::update_app_release,
             commands::update::delete_app_release,
             commands::update::check_app_update,
+            desktop_update::desktop_update_status,
+            desktop_update::desktop_check_update,
+            desktop_update::desktop_download_update,
+            desktop_update::desktop_install_update,
+            desktop_update::read_update_signature,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

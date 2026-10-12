@@ -52,6 +52,14 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(240);
 /// 进度回调类型：`(已发送字节, 总字节)`。Arc 以便多 task 共享。
 pub type ProgressFn = Arc<dyn Fn(i64, i64) + Send + Sync + 'static>;
 
+/// 大文件描述计算不占异步运行时线程；暂停/取消命令能够立即被处理。
+async fn describe_async(file: &Path, chunk_size: usize) -> Result<Description, String> {
+    let path = file.to_path_buf();
+    tokio::task::spawn_blocking(move || describe(&path, chunk_size))
+        .await.map_err(|e| format!("描述任务失败: {e}"))?
+        .map_err(|e| format!("计算文件描述信息失败: {e}"))
+}
+
 #[derive(Clone)]
 pub struct UploadOptions {
     /// 分片大小覆盖：None=自适应（planner 按文件大小定档 + 多路径调度 + 传输期后台探测，默认）；
@@ -249,8 +257,7 @@ async fn upload_inner(
     if let Some(chunk_size) = options.chunk_size {
         // 固定覆盖路径：完全走旧单路径行为（describe→init→激活节点并发补传→complete，
         // 含 SessionGone 重 init 一次），不探测、不多路径。
-        let desc =
-            describe(file, chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+        let desc = describe_async(file, chunk_size).await?;
         on_progress(0, desc.total_size);
         match run_once(
             client,
@@ -374,8 +381,7 @@ async fn run_planned(
     if pool.is_empty() {
         // 节点池为空（normalize_nodes 正常情况下保证不为空）：退回默认分片的固定路径，保证能传。
         logger::warn("upload", "节点池为空，退回固定分片上传".to_string());
-        let desc = describe(file, DEFAULT_CHUNK_SIZE)
-            .map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+        let desc = describe_async(file, DEFAULT_CHUNK_SIZE).await?;
         on_progress(0, desc.total_size);
         return run_once(client, file, remote_dir, &desc, options, on_progress)
             .await
@@ -417,7 +423,7 @@ async fn run_planned(
     // 每节点实际派出的分片数/字节：收尾日志里用它证明多链路到底有没有跑起来。
     let mut node_dispatch: HashMap<String, (u64, u64)> = HashMap::new();
 
-    let desc = describe(file, chunk_size).map_err(|e| format!("计算文件描述信息失败: {}", e))?;
+    let desc = describe_async(file, chunk_size).await?;
     on_progress(0, desc.total_size);
 
     let init = match call_init(
@@ -534,6 +540,7 @@ async fn run_planned(
                     tokio::select! {
                         o = rx.recv() => o.map(Wake::Outcome),
                         j = tasks.join_next() => Some(Wake::TaskDone(j)),
+                        _ = tokio::time::sleep(STALL_TIMEOUT) => Some(Wake::Stalled),
                     }
                 };
                 match wake {
@@ -563,6 +570,10 @@ async fn run_planned(
                 }
             }
             planner::Task::Reinit => {
+                // 旧会话的结果不能在 resume 后污染新会话进度或触发第二次 reinit。
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                while rx.try_recv().is_ok() {}
                 logger::warn(
                     "upload",
                     format!("[upload] 会话过期，重新 init 后续传: {}", file_name),

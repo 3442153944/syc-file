@@ -372,6 +372,9 @@ fn route_text(text: &str, app: &AppHandle, sync_tx: &mpsc::UnboundedSender<serde
         // ws.NotifyAll），内容形如 {title, message, level, time}，原样转发给前端
         // 弹 naive-ui 通知，不在 Rust 侧解析字段——以后这条通道加别的通知类型
         // 也不用跟着改 Rust。
+        "app_update" => {
+            let _ = app.emit("app-update", content);
+        }
         "notification" => {
             let _ = app.emit("server-notification", content);
         }

@@ -4,6 +4,9 @@
 export interface AppRelease {
   id: number
   platform: string
+  arch?: string
+  bundle_type?: string
+  signature?: string
   version_code: number
   version_name: string
   notes: string
@@ -20,6 +23,9 @@ export interface AppRelease {
 
 export interface PublishParams {
   platform?: string
+  arch?: string
+  bundle_type?: string
+  signature?: string
   version_code: number
   version_name: string
   notes?: string

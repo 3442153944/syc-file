@@ -8,10 +8,12 @@ import {User, Edit, Lock, ArrowLeft} from '@vicons/fa'
 import type {UserInfo} from '@/api/user/userTypes'
 import {verify as apiVerify} from '@/api/user/userApi'
 import {avatarUrl} from '@/api/platform'
+import {isTauri} from '@tauri-apps/api/core'
 
 const router = useRouter()
 const user = ref<UserInfo | null>(null)
 const avatar = computed(() => avatarUrl(user.value?.avatar))
+const openDesktopUpdate = () => window.dispatchEvent(new Event('desktop-update-open'))
 
 onMounted(async () => {
   const saved = localStorage.getItem('userInfo')
@@ -88,6 +90,9 @@ onMounted(async () => {
       </n-button>
       <n-button @click="router.push('/person/quick-share')" block>
         粘贴快传设置
+      </n-button>
+      <n-button v-if="isTauri()" block @click="openDesktopUpdate">
+        检查桌面端更新
       </n-button>
     </n-space>
   </div>
