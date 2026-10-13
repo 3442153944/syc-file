@@ -116,9 +116,10 @@ pub async fn upload_chunk_to(
     index: i32,
     data: Vec<u8>,
     timeout_ms: u64,
+    attempt_id: &str,
 ) -> Result<ApiResponse<UploadChunkData>, String> {
     let index_str = index.to_string();
-    let params: [(&str, &str); 2] = [("upload_id", upload_id), ("index", index_str.as_str())];
+    let params: [(&str, &str); 3] = [("upload_id", upload_id), ("index", index_str.as_str()), ("attempt_id", attempt_id)];
     client
         .post_bytes_to(
             node_url,

@@ -228,6 +228,16 @@ impl ApiClient {
         self.exec(req).await
     }
 
+    /// 上传会话控制指令通过仍可达的入口发送，不能依赖已经断开的分片入口。
+    pub async fn post_json_to<T: DeserializeOwned, B: Serialize>(
+        &self, node_url: &str, path: &str, body: &B,
+    ) -> Result<ApiResponse<T>, String> {
+        let req = self.client.post(format!("{}/v1{}", node_url.trim_end_matches('/'), path))
+            .header("Token", &self.token).header("Device-Id", &self.device_id)
+            .timeout(Duration::from_secs(5)).json(body);
+        self.exec(req).await
+    }
+
     /// 构建带 token 的完整 GET URL（用于下载、WS 等 token 需放 query string 的场景）
     pub fn build_url_with_token(&self, path: &str, mut params: HashMap<&str, String>) -> String {
         params.insert("token", self.token.clone());

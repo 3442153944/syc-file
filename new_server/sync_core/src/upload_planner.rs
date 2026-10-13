@@ -215,6 +215,10 @@ pub enum Report {
     ChunkCongested {
         seq: u64,
     },
+    /// 节点断链或超过平台的分片期限：移出本次传输，并重排其全部在途分片。
+    ChunkUnavailable {
+        seq: u64,
+    },
     /// 422 类校验错误：数据问题，不是拥塞。
     ChunkDataError {
         seq: u64,
@@ -330,6 +334,7 @@ struct NodeRuntime {
     measured_at_ms: Option<i64>,
     /// 探测失败（本次探测且没有新鲜持久化兜底）。
     probe_dead: bool,
+    transfer_dead: bool,
     window: usize,
     /// 内存预算钳制的窗口上限（按分片大小算好），AIMD 加窗也不得越过。
     window_cap: usize,
@@ -434,6 +439,7 @@ impl Planner {
                 backend_node: fresh.get(id).map(|s| s.backend_node.clone()),
                 measured_at_ms: fresh.get(id).map(|s| s.measured_at_ms),
                 probe_dead: false,
+                transfer_dead: false,
                 window: 0,
                 window_cap: MAX_PER_NODE_CONCURRENCY,
                 deficit: 0.0,
@@ -546,6 +552,13 @@ impl Planner {
             if let Some(t) = self.take_chunk_task() {
                 return Task::Chunk(t);
             }
+            if self.inflight.is_empty() && self.probing.is_empty()
+                && self.nodes.iter().all(|n| n.window == 0)
+            {
+                self.phase = Phase::Finished;
+                self.fail_reason = Some("所有上传节点均不可用，未确认分片无法重传".into());
+                return Task::Failed { reason: self.fail_reason.clone().unwrap() };
+            }
             return Task::Wait;
         }
         if let Some(t) = self.take_probe_task() {
@@ -580,6 +593,7 @@ impl Planner {
                 elapsed_ms,
             } => self.on_chunk_done(seq, true, bytes, elapsed_ms, false),
             Report::ChunkCongested { seq } => self.on_chunk_done(seq, false, 0, 0, true),
+            Report::ChunkUnavailable { seq } => self.on_node_unavailable(seq),
             Report::ChunkDataError { seq } => self.on_chunk_done(seq, false, 0, 0, false),
             Report::ChunkSessionGone { seq } => self.on_session_gone(seq),
         }
@@ -591,7 +605,7 @@ impl Planner {
                 .nodes
                 .iter()
                 .filter_map(|n| {
-                    if n.probe_dead { return None; }
+                    if n.probe_dead || n.transfer_dead { return None; }
                     let rtt = n.rtt?;
                     let bps = n.bps?;
                     Some(PersistedNodeState {
@@ -711,7 +725,7 @@ impl Planner {
         for n in &mut self.nodes {
             n.window_cap = window_cap;
             n.eff_bps = 0.0;
-            let dead = n.probe_dead;
+            let dead = n.probe_dead || n.transfer_dead;
             let mismatch = n
                 .backend_node
                 .as_deref()
@@ -732,7 +746,7 @@ impl Planner {
         let measured: HashMap<String, f64> = self
             .nodes
             .iter()
-            .filter(|n| n.rtt.is_some() && !n.probe_dead
+            .filter(|n| n.rtt.is_some() && !n.probe_dead && !n.transfer_dead
                 && !main_backend.is_empty()
                 && n.backend_node.as_deref() == Some(main_backend.as_str()))
             .map(|n| (n.cfg.id.clone(), n.bps.unwrap_or(0.0)))
@@ -755,7 +769,7 @@ impl Planner {
         // init 锚点始终保留 bootstrap，不能因为副节点先测完就饿死主链路。
         {
             if let Some(n) = self.nodes.iter_mut().find(|n| n.cfg.id == main_id) {
-                if n.window == 0 {
+                if n.window == 0 && !n.transfer_dead {
                     n.window = BOOTSTRAP_WINDOW.min(window_cap);
                 }
             }
@@ -834,6 +848,43 @@ impl Planner {
         })
     }
 
+    /// 平台据此取消已被重排的请求，并忽略其迟到回报（包括进度计数）。
+    pub fn is_chunk_inflight(&self, seq: u64) -> bool {
+        self.inflight.contains_key(&seq)
+    }
+
+    fn on_node_unavailable(&mut self, seq: u64) {
+        let node = match self.inflight.get(&seq) {
+            Some(v) => v.node.clone(),
+            None => return,
+        };
+        if let Some(n) = self.node_mut(&node) {
+            n.transfer_dead = true;
+            n.window = 0;
+            n.eff_bps = 0.0;
+            n.streak = 0;
+        }
+        self.probe_queue.retain(|(id, _)| id != &node);
+        self.probing.retain(|(id, _)| id != &node);
+        // 取消的是链路上的尝试，未确认的文件分片仍必须在健康节点上传。
+        let mut retry = Vec::new();
+        self.inflight.retain(|_, v| {
+            if v.node == node {
+                retry.push(v.index);
+                false
+            } else {
+                true
+            }
+        });
+        retry.sort_unstable();
+        for index in retry.into_iter().rev() {
+            if self.pending.contains_key(&index) {
+                self.dispatch_queue.push_front(index);
+            }
+        }
+        self.recompute_windows();
+    }
+
     fn on_chunk_done(&mut self, seq: u64, ok: bool, bytes: u64, elapsed_ms: u64, congested: bool) {
         let (node_id, index) = match self.inflight.remove(&seq) {
             Some(v) => (v.node, v.index),
@@ -884,7 +935,7 @@ impl Planner {
     }
 
     fn on_session_gone(&mut self, seq: u64) {
-        self.inflight.remove(&seq);
+        if self.inflight.remove(&seq).is_none() { return; }
         if self.phase == Phase::Transfer {
             self.phase = Phase::NeedReinit;
             self.reinit_notified = false;
@@ -1125,6 +1176,58 @@ pub extern "C" fn fc_planner_free(handle: *mut c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_node_requeues_all_chunks_and_ignores_late_reports() {
+        let p = Planner::new(input(vec![node("main", None), node("hk", Some("main"))], "main", 1_000_000)).unwrap();
+        let mut p = run_probes(p, &[]);
+        p.begin_transfer("u1", &[0, 1, 2]);
+        let mut sent = Vec::new();
+        while let Task::Chunk(t) = p.next_task() { sent.push(t); }
+        let dead = &sent[0].node;
+        let retired: Vec<_> = sent.iter().filter(|t| &t.node == dead).collect();
+        assert!(retired.len() >= 2, "覆盖同节点多个在途分片");
+        p.report(Report::ChunkUnavailable { seq: retired[0].seq });
+        assert_eq!(p.windows().into_iter().find(|(id, _)| id == dead).unwrap().1, 0);
+        for t in &retired {
+            assert!(!p.is_chunk_inflight(t.seq));
+            p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 10 });
+            p.report(Report::ChunkSessionGone { seq: t.seq });
+        }
+        assert_eq!(p.phase_name(), "transfer");
+        assert!(p.export_state().nodes.iter().all(|n| &n.id != dead));
+        for t in sent.iter().filter(|t| &t.node != dead) {
+            p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+        }
+        let mut retried = Vec::new();
+        loop {
+            match p.next_task() {
+                Task::Chunk(t) => {
+                    assert_ne!(&t.node, dead);
+                    retried.push(t.index);
+                    p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+                }
+                Task::Done => break,
+                task => panic!("重传不能停滞: {task:?}"),
+            }
+        }
+        retried.sort_unstable();
+        let mut expected: Vec<_> = retired.iter().map(|t| t.index).collect();
+        expected.sort_unstable();
+        assert_eq!(retried, expected);
+    }
+
+    #[test]
+    fn all_transfer_nodes_unavailable_fails_instead_of_waiting() {
+        let p = Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap();
+        let mut p = run_probes(p, &[]);
+        p.begin_transfer("u1", &[0]);
+        let Task::Chunk(t) = p.next_task() else { panic!("应派发首片") };
+        p.report(Report::ChunkUnavailable { seq: t.seq });
+        // 重算/续传也不能把已失效的主节点 bootstrap 回调度池。
+        p.resume("u2", &[0]);
+        assert!(matches!(p.next_task(), Task::Failed { .. }));
+    }
 
     fn node(id: &str, parent: Option<&str>) -> PlannerNodeConfig {
         PlannerNodeConfig {
