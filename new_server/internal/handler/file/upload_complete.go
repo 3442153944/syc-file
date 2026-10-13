@@ -51,6 +51,8 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			return
 		}
 
+		unlock := lockUploadCommit(uploadID)
+		defer unlock()
 		ctx := context.Background()
 		sess, err := upload_store.Global.Get(ctx, uploadID)
 		if errors.Is(err, upload_store.ErrNotFound) {

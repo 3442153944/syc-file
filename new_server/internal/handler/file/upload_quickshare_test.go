@@ -80,6 +80,7 @@ func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
 	})
 	r.POST("/upload/init", HandlerFuncUploadInit(db, rdb, nil))
 	r.POST("/upload/chunk", HandlerFuncUploadChunk(db, rdb))
+	r.POST("/upload/abandon", HandlerFuncUploadAbandon(rdb))
 	r.POST("/upload/complete", HandlerFuncUploadComplete(db, rdb, nil))
 	env.router = r
 	return env
