@@ -102,7 +102,7 @@ func TestQuickShareAbandonFencesDelayedAttempts(t *testing.T) {
 		t.Fatal("late request did not finish")
 	}
 	json.Unmarshal(rec.Body.Bytes(), &result)
-	if result["code"] != float64(404) {
+	if result["code"] != float64(409) {
 		t.Fatalf("completed session must reject late write: %s", rec.Body.String())
 	}
 	if _, err = os.Stat(sess.TempPath); !os.IsNotExist(err) {

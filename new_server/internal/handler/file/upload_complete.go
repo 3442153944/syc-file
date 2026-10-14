@@ -3,6 +3,7 @@ package file
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -65,6 +66,22 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		}
 		if sess.UserID != userID {
 			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该上传会话", "data": nil})
+			return
+		}
+
+		// complete在网络断开时可能已经成功：重试必须返回同一结果，不能再次移动文件。
+		if sess.Status == "completed" && sess.QuickShare {
+			var result gin.H
+			if json.Unmarshal([]byte(sess.ResultJSON), &result) != nil {
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "完成结果损坏"})
+				return
+			}
+			shareCode, _ := result["share_code"].(string)
+			if _, active := lookupShareLink(db, redisClient, shareCode); !active {
+				c.JSON(http.StatusOK, gin.H{"code": 404, "message": "分享已失效"})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": result})
 			return
 		}
 
@@ -135,12 +152,22 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			expireMinutes := quickShareExpireMinutesFor(db, userID)
 			_, respData, serr := finalizeShareLink(db, redisClient, userID, sess.TargetPath, sess.FileName,
 				filepath.Base(sess.TargetPath), "disk", sess.TotalSize, expireMinutes, false, true)
-			// 删会话（临时文件已随 Move 消失）
-			_ = upload_store.Global.Delete(ctx, uploadID)
 			if serr != nil {
+				_ = upload_store.Global.Delete(ctx, uploadID)
 				_ = os.Remove(sess.TargetPath)
 				logger.Logger.Error("写入快传分享记录失败", zap.String("upload_id", uploadID), zap.Error(serr))
 				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入分享记录失败", "data": nil})
+				return
+			}
+
+			resultJSON, encodeErr := json.Marshal(respData)
+			if encodeErr != nil {
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "序列化完成结果失败"})
+				return
+			}
+			if err := upload_store.Global.Complete(ctx, uploadID, string(resultJSON), time.Duration(expireMinutes)*time.Minute); err != nil {
+				logger.Logger.Error("保存快传完成结果失败", zap.String("upload_id", uploadID), zap.Error(err))
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "保存完成结果失败"})
 				return
 			}
 			logger.Logger.Info("快传分片上传完成", zap.Uint("user_id", userID), zap.String("path", sess.TargetPath),

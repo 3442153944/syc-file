@@ -127,6 +127,12 @@ func HandlerFuncUploadChunk(db *gorm.DB, rdb *redis.Client) gin.HandlerFunc {
 				return
 			}
 		}
+
+		// 已完成的会话只允许幂等确认，迟到分片不能写入已生成分享的文件。
+		if sess.Status == "completed" {
+			c.JSON(http.StatusOK, gin.H{"code": 409, "message": "上传已完成，不接受迟到分片"})
+			return
+		}
 		bitmap, err := upload_store.Global.Bitmap(ctx, uploadID)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询分片状态失败"})

@@ -44,7 +44,8 @@ type Session struct {
 	HistoryID  uint64 `redis:"history_id"`
 	CreatedAt  int64  `redis:"created_at"`
 	// QuickShare 粘贴快传模式：complete 不建 file 记录/同步派发，直接生成分享记录。
-	QuickShare bool `redis:"quick_share"`
+	QuickShare bool   `redis:"quick_share"`
+	ResultJSON string `redis:"result_json"`
 }
 
 type UploadStore struct {
@@ -116,6 +117,7 @@ func (s *UploadStore) Get(ctx context.Context, id string) (*Session, error) {
 		HistoryID:  uint64(atoi("history_id")),
 		CreatedAt:  atoi("created_at"),
 		QuickShare: m["quick_share"] == "1",
+		ResultJSON: m["result_json"],
 	}
 	return sess, nil
 }
@@ -178,4 +180,15 @@ func MissingChunks(bitmap []byte, chunkCount int) []int {
 		}
 	}
 	return missing
+}
+
+// Complete 保留快传完成结果，完成响应丢失后可重取同一分享。TTL不超过分享有效期。
+func (s *UploadStore) Complete(ctx context.Context, id, result string, ttl time.Duration) error {
+	_, err := s.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.HSet(ctx, metaKey(id), "status", "completed", "result_json", result)
+		pipe.Expire(ctx, metaKey(id), ttl)
+		pipe.Del(ctx, bitsKey(id))
+		return nil
+	})
+	return err
 }
