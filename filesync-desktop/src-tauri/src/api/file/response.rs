@@ -125,6 +125,11 @@ pub struct UploadStatusData {
 /// 与旧单发快传接口（/file/quick-share/upload）响应形状一致，前端直接当 CreateShareLinkData 用。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuickShareCompleteData {
+    /// 客户端确认可下载的入口，不使用上传启动时可能已失效的地址。
+    #[serde(default)]
+    pub entry_url: String,
+    #[serde(default)]
+    pub entry_candidates: Vec<String>,
     #[serde(rename = "share_code")]
     pub share_code: String,
     #[serde(rename = "temp_name")]

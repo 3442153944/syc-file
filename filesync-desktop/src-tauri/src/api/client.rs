@@ -36,6 +36,7 @@ pub struct ApiClient {
     /// 构造这个 client 时的节点世代号。切节点会让它作废：在途请求立刻返回
     /// NODE_SWITCHED，不用干等 TCP 超时（见 net.rs 顶部注释）。
     epoch: u64,
+    cancel_on_switch: bool,
 }
 
 /// 节点切换导致请求被主动放弃时的错误文案。调用方（尤其是重试逻辑）可以据此
@@ -65,12 +66,16 @@ impl ApiClient {
             token: token.to_string(),
             device_id: device_id.to_string(),
             epoch: net::epoch(),
+            cancel_on_switch: true,
         }
     }
 
     /// 统一出口：所有请求都从这里走，好让「切节点」能一刀切断在途请求，
     /// 并把传输层失败上报给灾备模块去触发探测。
     async fn exec<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<ApiResponse<T>, String> {
+        if !self.cancel_on_switch {
+            return send_and_parse(req.send().await).await;
+        }
         tokio::select! {
             biased;
             // 先看有没有切节点：切了就没必要再等这条注定打在旧地址上的请求
@@ -90,6 +95,25 @@ impl ApiClient {
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
+    }
+
+    /// 快传会话绑定原后端和凭证；节点选择由同后端上传池负责，不能被全局选路世代取消。
+    pub fn for_upload_session(&self) -> Self {
+        let mut client = self.clone();
+        client.cancel_on_switch = false;
+        client
+    }
+
+    pub fn server_url(&self) -> &str { self.base_url.trim_end_matches("/v1") }
+
+    /// 分享下载为公开接口。只读取一个字节的响应头，确认入口不是404，不搬运整份文件。
+    pub async fn probe_share_url(&self, url: &str) -> Result<(), String> {
+        let response = self.client.get(url).header("Range", "bytes=0-0")
+            .timeout(Duration::from_secs(5)).send().await.map_err(|e| e.to_string())?;
+        match response.status().as_u16() {
+            200 | 206 if response.headers().contains_key(reqwest::header::CONTENT_DISPOSITION) => Ok(()),
+            status => Err(format!("分享入口 HTTP {status}")),
+        }
     }
 
     /// GET 请求，params 为可选 query string map
@@ -232,9 +256,15 @@ impl ApiClient {
     pub async fn post_json_to<T: DeserializeOwned, B: Serialize>(
         &self, node_url: &str, path: &str, body: &B,
     ) -> Result<ApiResponse<T>, String> {
+        self.post_json_to_timeout(node_url, path, body, Duration::from_secs(5)).await
+    }
+
+    pub async fn post_json_to_timeout<T: DeserializeOwned, B: Serialize>(
+        &self, node_url: &str, path: &str, body: &B, timeout: Duration,
+    ) -> Result<ApiResponse<T>, String> {
         let req = self.client.post(format!("{}/v1{}", node_url.trim_end_matches('/'), path))
             .header("Token", &self.token).header("Device-Id", &self.device_id)
-            .timeout(Duration::from_secs(5)).json(body);
+            .timeout(timeout).json(body);
         self.exec(req).await
     }
 

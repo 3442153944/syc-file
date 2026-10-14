@@ -241,8 +241,19 @@ pub async fn quick_share_upload(
     on_progress: ProgressFn,
     config: &SharedSyncConfig,
 ) -> Result<QuickShareCompleteData, String> {
-    let v = upload_inner(client, file, remote_dir, options, on_progress, config).await?;
-    serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))
+    let session_client = client.for_upload_session();
+    let v = upload_inner(&session_client, file, remote_dir, options, on_progress, config).await?;
+    let mut data: QuickShareCompleteData = serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))?;
+    if data.entry_candidates.is_empty() { data.entry_candidates.push(session_client.server_url().to_string()); }
+    data.entry_candidates.sort_by_key(|url| !url.starts_with("https://"));
+    for base in &data.entry_candidates {
+        let url = format!("{}{}", base.trim_end_matches('/'), data.url_path);
+        if session_client.probe_share_url(&url).await.is_ok() {
+            data.entry_url = base.trim_end_matches('/').to_string();
+            return Ok(data);
+        }
+    }
+    Err("文件已完成，但所有分享入口均不可下载；未复制失效链接".into())
 }
 
 /// upload() / quick_share_upload() 共用的传输主线：按大小定档 → describe → init →
@@ -684,7 +695,11 @@ async fn run_planned(
                 );
                 p.resume(&upload_id, &missing2);
             }
-            planner::Task::Done => match complete_upload(client, &upload_id, &options.device_id).await
+            planner::Task::Done => match if options.quick_share {
+                let eligible: Vec<String> = p.windows().into_iter().filter(|(_, window)| *window > 0)
+                    .filter_map(|(id, _)| pool.iter().find(|node| node.id == id).map(|node| node.url.clone())).collect();
+                complete_quick_share(client, &upload_id, &options.device_id, eligible).await
+            } else { complete_upload(client, &upload_id, &options.device_id).await }
             {
                 Ok(d) => break Ok(d),
                 Err(e) => break Err(e),
@@ -1148,6 +1163,36 @@ async fn complete_upload(
     } else {
         Err(format!("complete 失败: {}", resp.message))
     }
+}
+
+/// 收尾请求也可跨同后端入口重试。后端保留完成结果，响应丢失不会生成第二个分享或404。
+async fn complete_quick_share(
+    client: &ApiClient, upload_id: &str, device_id: &str, mut candidates: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    candidates.sort_by_key(|url| !url.starts_with("https://"));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|url| seen.insert(url.clone()));
+    if candidates.is_empty() { return Err("没有同后端的可用上传收尾节点".into()); }
+    let params = UploadCompleteParams { upload_id: upload_id.into(), device_id: device_id.into() };
+    let mut last_error = String::new();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while Instant::now() < deadline {
+        for base in &candidates {
+            match client.post_json_to_timeout::<serde_json::Value, _>(base, routes::FILE_UPLOAD_COMPLETE, &params, Duration::from_secs(10)).await {
+                Ok(resp) if resp.is_ok() => {
+                    let mut data = resp.data.ok_or("complete 响应为空")?;
+                    data["entry_url"] = serde_json::json!(base.trim_end_matches('/'));
+                    data["entry_candidates"] = serde_json::json!(candidates);
+                    return Ok(data);
+                }
+                Ok(resp) if matches!(resp.code, 401 | 403 | 404 | 422) => return Err(format!("complete 失败: {}", resp.message)),
+                Ok(resp) => last_error = resp.message,
+                Err(error) => last_error = error,
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    Err(format!("上传收尾节点均失败: {last_error}"))
 }
 
 /// 传输开始前的规划日志：把真正交给 planner 的节点池、主节点、探测开关、分片档位、
