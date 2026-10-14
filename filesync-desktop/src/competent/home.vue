@@ -7,7 +7,7 @@ import {useRouteStore} from "@/store/useRouteStore"
 import type {MenuNode} from "@/router/dynamic"
 import {NMenu, NBadge, NDropdown, NAvatar, NIcon, NTag} from "naive-ui"
 import type {MenuOption, DropdownOption} from "naive-ui"
-import {logo} from "@syl/icon"
+import logo from '@/assets/private-cloud-icon.png'
 import {useTransferStore} from "@/store/useTransferStore"
 import {avatarUrl} from "@/api/platform"
 import {setServerUrl} from "@/api/platform"
@@ -93,7 +93,7 @@ const goPerson = () => router.push("/person/center")
 const userDropdownOptions: DropdownOption[] = [
   {label: '个人中心', key: 'center'},
   // 桌面端：日志窗口。Linux 不挂原生顶部菜单栏（GNOME + Wayland 下会让 GTK 栈溢出崩溃），入口放在这里
-  ...(isTauri() ? [{label: '日志窗口', key: 'logs'}] : []),
+  ...(isTauri() ? [{label: '关于私有云 / 检查更新', key: 'about'}, {label: '日志窗口', key: 'logs'}] : []),
   {label: '退出登录', key: 'logout'},
 ]
 
@@ -104,6 +104,7 @@ const openLogWindow = async () => {
 
 const handleUserDropdown = (key: string) => {
   if (key === 'center') goPerson()
+  else if (key === 'about') window.dispatchEvent(new Event('desktop-update-open'))
   else if (key === 'logs') openLogWindow()
   else if (key === 'logout') handleLogout()
 }

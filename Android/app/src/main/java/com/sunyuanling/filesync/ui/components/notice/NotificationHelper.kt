@@ -57,7 +57,7 @@ object DownloadNotificationHelper {
     fun buildForegroundBase(context: Context) =
         NotificationCompat.Builder(context, CHANNEL_ID_PROGRESS)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("云梯下载")
+            .setContentTitle("私有云下载")
             .setContentText("下载服务运行中")
             .setOngoing(true)
             .setOnlyAlertOnce(true)

@@ -49,7 +49,10 @@ pub fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu
         .item(&settings)
         .build()?;
 
-    MenuBuilder::new(app).item(&tools).item(&network).build()
+    let about = MenuItemBuilder::with_id("about_app", "关于私有云…").build(app)?;
+    let update = MenuItemBuilder::with_id("check_update", "检查更新…").build(app)?;
+    let help = SubmenuBuilder::new(app, "帮助").item(&about).item(&update).build()?;
+    MenuBuilder::new(app).item(&tools).item(&network).item(&help).build()
 }
 
 /// 节点表/健康状态变了之后重建菜单（勾选项、延迟数字都要跟着变）。

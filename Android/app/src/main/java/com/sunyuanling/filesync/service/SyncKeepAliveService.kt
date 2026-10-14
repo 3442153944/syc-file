@@ -128,7 +128,7 @@ class SyncKeepAliveService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
-            .setContentTitle("云梯同步保活")
+            .setContentTitle("私有云同步保活")
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)

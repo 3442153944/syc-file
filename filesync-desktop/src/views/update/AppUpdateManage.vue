@@ -97,6 +97,13 @@ async function doPublish() {
   if (platform.value !== 'android' && (!signature.value || desktopVersionCode(form.value.version_name) !== form.value.version_code)) {
     message.warning('桌面包需要配套签名，版本名与安装包自带版本一致（x.y.z）'); return
   }
+  if (platform.value !== 'android') {
+    const artifact = inferDesktopArtifact(uploaded.value.file_name)
+    if (artifact.version && artifact.version !== form.value.version_name.trim()) {
+      message.warning(`安装包版本为 ${artifact.version}，请使用相同版本发布，或重新构建目标版本的安装包`)
+      return
+    }
+  }
   publishing.value = true
   try {
     await publishRelease({
