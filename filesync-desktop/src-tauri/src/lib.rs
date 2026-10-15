@@ -152,6 +152,7 @@ pub fn run() {
             let id = event.id().as_ref().to_string();
             match id.as_str() {
                 "open_logs" => app_shell::log_window::open_log_window(app),
+                "about_app" | "check_update" => desktop_update::open_update_window(app),
                 "net_settings" => app_shell::window::open_network_settings(app),
                 "net_probe" => {
                     tauri::async_runtime::spawn(async {
@@ -313,6 +314,7 @@ pub fn run() {
             desktop_update::desktop_download_update,
             desktop_update::desktop_install_update,
             desktop_update::read_update_signature,
+            desktop_update::take_pending_desktop_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

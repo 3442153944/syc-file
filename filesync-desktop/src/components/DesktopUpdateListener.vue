@@ -15,12 +15,18 @@ const visible = ref(false)
 const message = useMessage()
 const router = useRouter()
 const unlisteners: UnlistenFn[] = []
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+let disposed = false
+let notifiedVersion = ''
 const percent = computed(() => status.value?.total ? Math.min(100, Math.floor(status.value.downloaded / status.value.total * 100)) : 0)
 const working = computed(() => ['checking','downloading','installing'].includes(status.value?.stage || ''))
 function receive(value: UpdateStatus) {
   status.value = value
   if (['available','ready'].includes(value.stage) && value.mandatory) visible.value = true
-  else if (value.stage === 'available') visible.value = true
+  else if (value.stage === 'available' && value.version !== notifiedVersion) {
+    notifiedVersion = value.version
+    visible.value = true
+  }
 }
 async function check(manual = false) {
   if (!isTauri()) return
@@ -43,21 +49,36 @@ function open() { visible.value = true; void check(true) }
 function transfers() { visible.value = false; void router.push('/transfers') }
 onMounted(async () => {
   if (!isTauri()) return
-  unlisteners.push(await listen<UpdateStatus>('desktop-update-changed', event => receive(event.payload)))
-  unlisteners.push(await listen<{platform: string; arch?: string; bundle_type?: string}>('app-update', event => {
-    const t = status.value
-    if (t && event.payload.platform === t.platform && event.payload.arch === t.arch && event.payload.bundle_type === t.bundleType) void check()
-  }))
-  // 先订阅再取快照，主窗口关闭重开后仍可恢复下载进度及安装入口。
-  const snapshot = await invoke<UpdateStatus>('desktop_update_status')
-  if (!status.value) receive(snapshot)
   window.addEventListener('desktop-update-open', open)
+  const subscribe = async <T,>(name: string, handler: (value: T) => void) => {
+    const off = await listen<T>(name, event => handler(event.payload))
+    if (disposed) off()
+    else unlisteners.push(off)
+  }
+  try {
+    await subscribe<UpdateStatus>('desktop-update-changed', receive)
+    await subscribe('desktop-update-open', open)
+    // Rust 持有更新状态，关窗期间收到的发布通知也能在重开时恢复。
+    const snapshot = await invoke<UpdateStatus>('desktop_update_status')
+    if (disposed) return
+    if (!status.value) receive(snapshot)
+    if (await invoke<boolean>('take_pending_desktop_update')) open()
+    else void check()
+    if (disposed) return
+    // 发布时断网或丢失通知，仍能定期补查；登录检查继续由 Rust 负责。
+    refreshTimer = setInterval(() => void check(), 5 * 60 * 1000)
+  } catch (e) { console.warn('初始化桌面更新失败', e) }
 })
-onUnmounted(() => { unlisteners.forEach(fn => fn()); window.removeEventListener('desktop-update-open', open) })
+onUnmounted(() => {
+  disposed = true
+  if (refreshTimer) clearInterval(refreshTimer)
+  unlisteners.forEach(fn => fn())
+  window.removeEventListener('desktop-update-open', open)
+})
 </script>
 
 <template>
-  <n-modal v-model:show="visible" preset="card" title="桌面端更新" style="width:min(480px,95vw)" :mask-closable="!status?.mandatory && !working" :closable="!status?.mandatory && !working">
+  <n-modal v-model:show="visible" preset="card" title="关于私有云" style="width:min(480px,95vw)" :mask-closable="!status?.mandatory && !working" :closable="!status?.mandatory && !working">
     <template v-if="status">
       <p>当前版本 {{ status.currentVersion }} · {{ status.platform }} {{ status.arch }}</p>
       <p v-if="status.version">新版本 {{ status.version }} <n-tag v-if="status.mandatory" type="warning" size="small">需要更新</n-tag></p>
@@ -76,8 +97,9 @@ onUnmounted(() => { unlisteners.forEach(fn => fn()); window.removeEventListener(
         <n-button v-if="!status.mandatory && !working" @click="visible = false">稍后</n-button>
         <n-button v-if="status.stage === 'available'" type="primary" @click="download">下载更新</n-button>
         <n-button v-if="status.stage === 'ready'" type="primary" @click="install">安装并重启</n-button>
-        <n-button v-if="status.stage === 'error' || status.stage === 'idle'" @click="check(true)">重新检查</n-button>
+        <n-button v-if="status.stage === 'error' || status.stage === 'idle' || status.stage === 'available'" @click="check(true)">检查更新</n-button>
       </n-space>
     </template>
+    <p v-else>正在读取版本信息…</p>
   </n-modal>
 </template>

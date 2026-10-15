@@ -80,7 +80,9 @@ func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
 	})
 	r.POST("/upload/init", HandlerFuncUploadInit(db, rdb, nil))
 	r.POST("/upload/chunk", HandlerFuncUploadChunk(db, rdb))
+	r.POST("/upload/abandon", HandlerFuncUploadAbandon(rdb))
 	r.POST("/upload/complete", HandlerFuncUploadComplete(db, rdb, nil))
+	r.GET("/share/:code", HandlerFuncShareDownload(db, rdb))
 	env.router = r
 	return env
 }
@@ -227,9 +229,33 @@ func TestQuickShareChunkedUploadCreatesShareLink(t *testing.T) {
 		t.Fatalf("快传不应产生 file/history 记录: file=%d history=%d", fileCount, historyCount)
 	}
 
-	// ── 会话已删 ──
-	if _, err := upload_store.Global.Get(t.Context(), uploadID); err == nil {
-		t.Fatal("complete 后会话应已删除")
+	// 模拟完成响应丢失/入口切换：重试取回原分享，不生成第二条记录。
+	session, err := upload_store.Global.Get(t.Context(), uploadID)
+	if err != nil || session.Status != "completed" {
+		t.Fatalf("完成结果应保留: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		code, retried := doJSON(t, env.router, http.MethodPost, "/upload/complete", map[string]any{"upload_id": uploadID})
+		if code != 200 || retried["data"].(map[string]any)["share_code"] != shareCode {
+			t.Fatalf("重试结果不一致: %v", retried)
+		}
+	}
+	var count int64
+	env.db.Model(&model.ShareLink{}).Where("original_path = ?", link.OriginalPath).Count(&count)
+	if count != 1 {
+		t.Fatalf("重试创建了多条分享: %d", count)
+	}
+	originalUser := env.userID
+	env.userID++
+	forbidden, _ := doJSON(t, env.router, http.MethodPost, "/upload/complete", map[string]any{"upload_id": uploadID})
+	env.userID = originalUser
+	if forbidden != 403 {
+		t.Fatalf("完成结果被其它用户读取: %d", forbidden)
+	}
+	download := httptest.NewRecorder()
+	env.router.ServeHTTP(download, httptest.NewRequest(http.MethodGet, "/share/"+shareCode, nil))
+	if download.Code != 200 || !bytes.Equal(download.Body.Bytes(), content) {
+		t.Fatalf("重试后链接不可下载: %d", download.Code)
 	}
 }
 

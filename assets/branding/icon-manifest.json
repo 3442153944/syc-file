@@ -1,0 +1,6 @@
+{
+  "default": "private-cloud-icon.png",
+  "bg_color": "#F0F8FC",
+  "android_fg": "private-cloud-icon.png",
+  "android_fg_scale": 75
+}

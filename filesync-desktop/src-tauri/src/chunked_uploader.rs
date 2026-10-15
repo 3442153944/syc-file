@@ -48,6 +48,8 @@ pub const DEFAULT_CONCURRENCY: usize = 3;
 /// 传输循环在 channel 与在途分片都无进展时的停滞保护：planner 的单片超时上限 120s，
 /// 超过 2 倍仍无任何分片完成说明调度或执行挂死，报错退出而不是干等。
 const STALL_TIMEOUT: Duration = Duration::from_secs(240);
+/// 单片超过 10 秒即放弃当前链路，由调度器交给其他可用节点。
+const CHUNK_FAILOVER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 进度回调类型：`(已发送字节, 总字节)`。Arc 以便多 task 共享。
 pub type ProgressFn = Arc<dyn Fn(i64, i64) + Send + Sync + 'static>;
@@ -239,8 +241,19 @@ pub async fn quick_share_upload(
     on_progress: ProgressFn,
     config: &SharedSyncConfig,
 ) -> Result<QuickShareCompleteData, String> {
-    let v = upload_inner(client, file, remote_dir, options, on_progress, config).await?;
-    serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))
+    let session_client = client.for_upload_session();
+    let v = upload_inner(&session_client, file, remote_dir, options, on_progress, config).await?;
+    let mut data: QuickShareCompleteData = serde_json::from_value(v).map_err(|e| format!("解析分享结果失败: {}", e))?;
+    if data.entry_candidates.is_empty() { data.entry_candidates.push(session_client.server_url().to_string()); }
+    data.entry_candidates.sort_by_key(|url| !url.starts_with("https://"));
+    for base in &data.entry_candidates {
+        let url = format!("{}{}", base.trim_end_matches('/'), data.url_path);
+        if session_client.probe_share_url(&url).await.is_ok() {
+            data.entry_url = base.trim_end_matches('/').to_string();
+            return Ok(data);
+        }
+    }
+    Err("文件已完成，但所有分享入口均不可下载；未复制失效链接".into())
 }
 
 /// upload() / quick_share_upload() 共用的传输主线：按大小定档 → describe → init →
@@ -498,6 +511,8 @@ async fn run_planned(
     // ── 统一传输循环：Chunk 与后台 Probe 都派 tokio task（channel 回报），Wait 挂 channel ──
     let (tx, mut rx) = mpsc::channel::<Outcome>(64);
     let mut tasks: JoinSet<()> = JoinSet::new();
+    let mut chunk_handles = HashMap::new();
+    let attempt_prefix = uuid::Uuid::new_v4().to_string();
     let mut win_snapshot: Vec<(String, usize)> = p.windows();
     let result: Result<serde_json::Value, String> = loop {
         match p.next_task() {
@@ -513,10 +528,15 @@ async fn run_planned(
                 let uid = upload_id.clone();
                 let desc_chunk = desc.chunk_size;
                 let desc_total = desc.total_size;
-                tasks.spawn(async move {
-                    let outcome = execute_chunk(&client, &path, &uid, desc_chunk, desc_total, &t).await;
+                let seq = t.seq;
+                let dispatched = t.clone();
+                let attempt_id = format!("{attempt_prefix}-{seq}");
+                let request_attempt = attempt_id.clone();
+                let handle = tasks.spawn(async move {
+                    let outcome = execute_chunk(&client, &path, &uid, desc_chunk, desc_total, &t, &request_attempt).await;
                     let _ = tx.send(outcome).await;
                 });
+                chunk_handles.insert(seq, (dispatched, attempt_id, handle));
             }
             // 边传边测：探测与分片并发派发（planner 数据未传完就优先给探测），
             // 结果回来经 report 并入 DRR 池——多线路能否用起来全靠它。
@@ -545,20 +565,57 @@ async fn run_planned(
                 };
                 match wake {
                     Some(Wake::Outcome(Outcome::Report(r))) => {
+                        if let planner::Report::ChunkUnavailable { seq } = &r {
+                            if !p.is_chunk_inflight(*seq) { continue; }
+                            let failed_node = &chunk_handles.get(seq).expect("在途分片必须持有取消句柄").0.node;
+                            let mut attempts = Vec::new();
+                            let mut urls = Vec::new();
+                            for (task, attempt, handle) in chunk_handles.values() {
+                                if &task.node == failed_node {
+                                    handle.abort();
+                                    attempts.push(serde_json::json!({"index": task.index, "attempt_id": attempt}));
+                                }
+                            }
+                            // 入口均须属于同一后端；失败节点最后尝试，优先走已验证的其他入口。
+                            for (node, window) in p.windows() {
+                                if node != *failed_node && window > 0 {
+                                    if let Some(cfg) = pool.iter().find(|cfg| cfg.id == node) {
+                                        urls.push(cfg.url.clone());
+                                    }
+                                }
+                            }
+                            urls.push(chunk_handles.get(seq).unwrap().0.url.clone());
+                            let body = serde_json::json!({"upload_id": upload_id, "attempts": attempts});
+                            let mut confirmed = false;
+                            for url in urls {
+                                match client.post_json_to::<serde_json::Value, _>(&url, routes::FILE_UPLOAD_ABANDON, &body).await {
+                                    Ok(resp) if resp.is_ok() => { confirmed = true; break; }
+                                    _ => {}
+                                }
+                            }
+                            if !confirmed { break Err("无法确认后端已放弃旧分片尝试，停止上传以避免迟到写入".into()); }
+                        }
                         record_probe_sample(&r, &mut probe_rtt, &mut probe_bps, &mut probe_backend);
                         let reason = report_reason(&r);
-                        if let planner::Report::ChunkOk { bytes, .. } = &r {
+                        if let planner::Report::ChunkOk { seq, bytes, .. } = &r {
+                            if !p.is_chunk_inflight(*seq) { continue; }
                             let prev = bytes_sent.fetch_add(*bytes as i64, Ordering::Relaxed);
                             let now = (prev + *bytes as i64).min(desc.total_size);
                             on_progress(now, desc.total_size);
                         }
                         p.report(r);
+                        chunk_handles.retain(|seq, (_, _, handle)| {
+                            if p.is_chunk_inflight(*seq) { return true; }
+                            handle.abort();
+                            false
+                        });
                         log_window_changes(&p, &mut win_snapshot, reason);
                     }
                     Some(Wake::Outcome(Outcome::Fatal(e))) => break Err(e),
                     // 分片 task 正常完成：结果经 channel 到，回到循环继续派
                     Some(Wake::TaskDone(Some(Ok(())))) => {}
                     Some(Wake::TaskDone(Some(Err(e)))) => {
+                        if e.is_cancelled() { continue; }
                         break Err(format!("分片任务异常: {}", e))
                     }
                     // JoinSet 取空（正常不会发生，防御）：回循环继续
@@ -572,6 +629,7 @@ async fn run_planned(
             planner::Task::Reinit => {
                 // 旧会话的结果不能在 resume 后污染新会话进度或触发第二次 reinit。
                 tasks.abort_all();
+                chunk_handles.clear();
                 while tasks.join_next().await.is_some() {}
                 while rx.try_recv().is_ok() {}
                 logger::warn(
@@ -637,7 +695,11 @@ async fn run_planned(
                 );
                 p.resume(&upload_id, &missing2);
             }
-            planner::Task::Done => match complete_upload(client, &upload_id, &options.device_id).await
+            planner::Task::Done => match if options.quick_share {
+                let eligible: Vec<String> = p.windows().into_iter().filter(|(_, window)| *window > 0)
+                    .filter_map(|(id, _)| pool.iter().find(|node| node.id == id).map(|node| node.url.clone())).collect();
+                complete_quick_share(client, &upload_id, &options.device_id, eligible).await
+            } else { complete_upload(client, &upload_id, &options.device_id).await }
             {
                 Ok(d) => break Ok(d),
                 Err(e) => break Err(e),
@@ -787,7 +849,7 @@ async fn run_probe(client: &ApiClient, t: &planner::ProbeTask) -> Outcome {
 
 /// 执行一个分片任务：定位读出字节 → POST 到 planner 指定的节点 URL → 分类成 Report。
 /// 结果分类：2xx→ChunkOk（bytes 为实际字节数，供进度与 planner 的 EMA 用）；
-/// 422→ChunkDataError；404→ChunkSessionGone；超时/传输错误→ChunkCongested。
+/// 422→ChunkDataError；404→ChunkSessionGone；10秒期限/断链→ChunkUnavailable。
 /// 平台级失败（切节点作废/读文件失败）→ Fatal。
 async fn execute_chunk(
     client: &ApiClient,
@@ -796,6 +858,7 @@ async fn execute_chunk(
     chunk_size: i64,
     total_size: i64,
     t: &planner::ChunkTask,
+    attempt_id: &str,
 ) -> Outcome {
     let offset = (t.index as i64) * chunk_size;
     let len = if total_size == 0 {
@@ -832,19 +895,31 @@ async fn execute_chunk(
     drop(f);
 
     let started = Instant::now();
-    let resp = file_api::upload_chunk_to(
+    let resp = tokio::time::timeout(CHUNK_FAILOVER_TIMEOUT, file_api::upload_chunk_to(
         client,
         &t.url,
         upload_id,
         t.index as i32,
         data,
         t.timeout_ms,
-    )
-    .await;
+        attempt_id,
+    )).await;
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(_) => {
+            logger::warn("upload", format!("[upload] node={} chunk={} 超过10秒，取消该节点在途分片并切换链路", t.node, t.index));
+            return Outcome::Report(planner::Report::ChunkUnavailable { seq: t.seq });
+        }
+    };
     let elapsed_ms = started.elapsed().as_millis().max(1) as u64;
     match resp {
         Err(e) if e.contains(NODE_SWITCHED) => Outcome::Fatal(e),
-        // 超时/传输层错误 = 拥塞信号，交给 planner 减半窗口并重排
+        Err(e) if e.starts_with("HTTP 502") || e.starts_with("HTTP 503") || e.starts_with("HTTP 504")
+            || (!e.starts_with("HTTP ") && !e.starts_with("JSON 解析失败")) => {
+            logger::warn("upload", format!("[upload] node={} chunk={} 链路失败，切换节点: {}", t.node, t.index, e));
+            Outcome::Report(planner::Report::ChunkUnavailable { seq: t.seq })
+        }
+        // HTTP/解析错误：保留原有预算重试，不直接判定节点断链。
         Err(_) => Outcome::Report(planner::Report::ChunkCongested { seq: t.seq }),
         Ok(resp) => {
             if resp.is_ok() {
@@ -857,6 +932,7 @@ async fn execute_chunk(
                 match resp.code {
                     422 => Outcome::Report(planner::Report::ChunkDataError { seq: t.seq }),
                     404 => Outcome::Report(planner::Report::ChunkSessionGone { seq: t.seq }),
+                    502 | 503 | 504 => Outcome::Report(planner::Report::ChunkUnavailable { seq: t.seq }),
                     // 其它业务码：HTTP 链路是通的，按拥塞处理占掉一次派发预算
                     _ => Outcome::Report(planner::Report::ChunkCongested { seq: t.seq }),
                 }
@@ -1089,6 +1165,36 @@ async fn complete_upload(
     }
 }
 
+/// 收尾请求也可跨同后端入口重试。后端保留完成结果，响应丢失不会生成第二个分享或404。
+async fn complete_quick_share(
+    client: &ApiClient, upload_id: &str, device_id: &str, mut candidates: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    candidates.sort_by_key(|url| !url.starts_with("https://"));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|url| seen.insert(url.clone()));
+    if candidates.is_empty() { return Err("没有同后端的可用上传收尾节点".into()); }
+    let params = UploadCompleteParams { upload_id: upload_id.into(), device_id: device_id.into() };
+    let mut last_error = String::new();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while Instant::now() < deadline {
+        for base in &candidates {
+            match client.post_json_to_timeout::<serde_json::Value, _>(base, routes::FILE_UPLOAD_COMPLETE, &params, Duration::from_secs(10)).await {
+                Ok(resp) if resp.is_ok() => {
+                    let mut data = resp.data.ok_or("complete 响应为空")?;
+                    data["entry_url"] = serde_json::json!(base.trim_end_matches('/'));
+                    data["entry_candidates"] = serde_json::json!(candidates);
+                    return Ok(data);
+                }
+                Ok(resp) if matches!(resp.code, 401 | 403 | 404 | 422) => return Err(format!("complete 失败: {}", resp.message)),
+                Ok(resp) => last_error = resp.message,
+                Err(error) => last_error = error,
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    Err(format!("上传收尾节点均失败: {last_error}"))
+}
+
 /// 传输开始前的规划日志：把真正交给 planner 的节点池、主节点、探测开关、分片档位、
 /// 以及哪些节点有新鲜持久化样本（因此会跳过现场探测）一次性打出来。
 /// 这是判断「到底配了几条链路 / 为什么看起来只有一条」的第一手依据。
@@ -1253,6 +1359,7 @@ fn report_reason(r: &planner::Report) -> &'static str {
     match r {
         planner::Report::ChunkOk { .. } => "streak",
         planner::Report::ChunkCongested { .. } => "timeout",
+        planner::Report::ChunkUnavailable { .. } => "unavailable",
         planner::Report::ChunkDataError { .. } => "data",
         planner::Report::ChunkSessionGone { .. } => "gone",
         _ => "probe",
@@ -1312,4 +1419,38 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_chunk_response_is_abandoned_after_ten_seconds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            stream.read(&mut request).await.unwrap();
+            // 已连接、已返回 HTTP 头，但响应体卡住：期限必须覆盖响应解析。
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let file = std::env::temp_dir().join(format!("upload-failover-test-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&file, b"chunk").unwrap();
+        let client = ApiClient::new(&format!("http://{address}"), "test", "test");
+        let task = planner::ChunkTask {
+            seq: 7, node: "stalled".into(), url: format!("http://{address}/file"),
+            index: 0, timeout_ms: 120_000, bytes: 5,
+        };
+        let started = Instant::now();
+        let result = execute_chunk(&client, &file, "test", 5, 5, &task, "attempt-7").await;
+        server.abort();
+        std::fs::remove_file(file).unwrap();
+        assert!(matches!(result, Outcome::Report(planner::Report::ChunkUnavailable { seq: 7 })));
+        assert!(started.elapsed() >= CHUNK_FAILOVER_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
 }

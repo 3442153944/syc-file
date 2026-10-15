@@ -3,6 +3,7 @@ use crate::config::SharedSyncConfig;
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -31,6 +32,39 @@ pub struct UpdateState {
     busy: bool,
 }
 pub type SharedUpdate = Arc<Mutex<UpdateState>>;
+static PENDING_OPEN: AtomicBool = AtomicBool::new(false);
+
+pub fn open_update_window(app: &AppHandle) {
+    // 先留下标记，避免重建窗口挂载早于这里写入；前端取快照后消费它。
+    PENDING_OPEN.store(true, Ordering::SeqCst);
+    match crate::app_shell::window::show_main_window(app) {
+        Some((window, false)) => {
+            PENDING_OPEN.store(false, Ordering::SeqCst);
+            let _ = window.emit("desktop-update-open", ());
+        }
+        Some((_, true)) => {}
+        None => { PENDING_OPEN.store(false, Ordering::SeqCst); }
+    }
+}
+
+#[tauri::command]
+pub fn take_pending_desktop_update() -> bool {
+    PENDING_OPEN.swap(false, Ordering::SeqCst)
+}
+
+pub fn on_release(app: &AppHandle, release: &serde_json::Value) {
+    let state = app.state::<SharedUpdate>();
+    let matches = {
+        let s = state.lock();
+        release["platform"].as_str() == Some(s.status.platform.as_str())
+            && release["arch"].as_str() == Some(s.status.arch.as_str())
+            && release["bundle_type"].as_str() == Some(s.status.bundle_type.as_str())
+    };
+    if matches {
+        crate::logger::info("update", "收到当前平台的版本发布通知，后台检查更新");
+        auto_check(app.clone(), app.state::<SharedSyncConfig>().inner().clone());
+    }
+}
 
 pub fn init() -> SharedUpdate {
     let bundle = match tauri::utils::platform::bundle_type() {
@@ -64,7 +98,7 @@ pub fn auto_check(app: AppHandle, config: SharedSyncConfig) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<SharedUpdate>().inner().clone();
         if let Err(e) = check(&app, &config, &state).await {
-            crate::logger::debug("update", format!("自动查新: {e}"));
+            crate::logger::warn("update", format!("自动检查更新失败: {e}"));
         }
     });
 }
@@ -86,11 +120,35 @@ fn package_url(base: &str, release_id: u64) -> Result<reqwest::Url, String> {
     reqwest::Url::parse(&format!("{}/v1/update/package/{}", base.trim_end_matches('/'), release_id)).map_err(|e| e.to_string())
 }
 
+async fn secure_update_base(base: &str, nodes: &[crate::config::ServerNode]) -> Result<String, String> {
+    let url = reqwest::Url::parse(base).map_err(|e| e.to_string())?;
+    if url.scheme() == "https" { return Ok(base.to_string()); }
+    if url.scheme() != "http" { return Err("更新入口必须使用 HTTPS".into()); }
+    let current = nodes.iter().find(|node| node.server_url.trim_end_matches('/') == base)
+        .cloned().unwrap_or(crate::config::ServerNode {
+            id: "update-current".into(), name: "当前入口".into(), server_url: base.into(),
+            ws_url: crate::config::ServerNode::derive_ws_url(base), builtin: false, parent: None,
+        });
+    let current_health = crate::net::probe_node(&current).await;
+    if !current_health.reachable || current_health.server_node.is_empty() {
+        return Err("无法确认当前后端，不能选择 HTTPS 更新入口".into());
+    }
+    for node in nodes {
+        if !reqwest::Url::parse(&node.server_url).map(|url| url.scheme() == "https").unwrap_or(false) { continue; }
+        let health = crate::net::probe_node(node).await;
+        if health.reachable && health.server_node == current_health.server_node {
+            crate::logger::info("update", format!("内网入口使用同后端 HTTPS 更新节点: {}", node.server_url));
+            return Ok(node.server_url.trim_end_matches('/').to_string());
+        }
+    }
+    Err("当前使用 HTTP 入口，未找到同一后端的可用 HTTPS 更新节点；请配置 HTTPS 节点后重试".into())
+}
+
 async fn check(app: &AppHandle, config: &SharedSyncConfig, state: &SharedUpdate) -> Result<UpdateStatus, String> {
-    let (base, token, device_id) = {
+    let (base, token, device_id, nodes) = {
         let cfg = config.read();
         if cfg.token.is_empty() { return Err("请先登录再检查更新".into()); }
-        (cfg.server_url.trim_end_matches('/').to_string(), cfg.token.clone(), cfg.device_id.clone())
+        (cfg.server_url.trim_end_matches('/').to_string(), cfg.token.clone(), cfg.device_id.clone(), cfg.nodes.clone())
     };
     let (platform, arch, bundle, version) = {
         let mut s = state.lock();
@@ -101,8 +159,11 @@ async fn check(app: &AppHandle, config: &SharedSyncConfig, state: &SharedUpdate)
         (s.status.platform.clone(), s.status.arch.clone(), s.status.bundle_type.clone(), s.status.current_version.clone())
     };
     notify(app, state);
+    crate::logger::info("update", format!("检查更新: 当前版本={version} 平台={platform}/{arch}/{bundle}"));
     let outcome = async {
-        let mut endpoint = reqwest::Url::parse(&format!("{base}/v1/update/desktop")).map_err(|e| e.to_string())?;
+        // 更新器保留 HTTPS 和签名校验。HTTP 同步入口不变，只为更新选择已确认同后端的 HTTPS 节点。
+        let update_base = secure_update_base(&base, &nodes).await?;
+        let mut endpoint = reqwest::Url::parse(&format!("{update_base}/v1/update/desktop")).map_err(|e| e.to_string())?;
         endpoint.query_pairs_mut().extend_pairs([
             ("platform", platform.as_str()), ("arch", arch.as_str()), ("bundle_type", bundle.as_str()), ("version", version.as_str()),
         ]);
@@ -114,7 +175,7 @@ async fn check(app: &AppHandle, config: &SharedSyncConfig, state: &SharedUpdate)
         if let Some(u) = update.as_mut() {
             // 不信任 manifest 的任意下载域名；固定当前入口，保留 /file 与 :8443。
             let id = u.raw_json.get("release_id").and_then(|v| v.as_u64()).ok_or("更新包 ID 无效")?;
-            u.download_url = package_url(&base, id)?;
+            u.download_url = package_url(&update_base, id)?;
             u.timeout = Some(Duration::from_secs(600));
         }
         Ok::<_, String>(update)
@@ -131,6 +192,10 @@ async fn check(app: &AppHandle, config: &SharedSyncConfig, state: &SharedUpdate)
         s.pending = update;
     }
     notify(app, state);
+    let status = state.lock().status.clone();
+    crate::logger::info("update", if status.stage == "available" {
+        format!("发现新版本: {} → {}", status.current_version, status.version)
+    } else { format!("检查完成: 当前版本 {} 无可用更新", status.current_version) });
     Ok(state.lock().status.clone())
 }
 

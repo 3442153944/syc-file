@@ -28,7 +28,7 @@ import com.sunyuanling.filesync.core.SyncPlanner
 import com.sunyuanling.filesync.network.Request
 import com.sunyuanling.filesync.util.Blake3Util
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Channel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -50,6 +50,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request as OkRequest
 import okhttp3.RequestBody.Companion.toRequestBody

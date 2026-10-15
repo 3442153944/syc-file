@@ -180,12 +180,11 @@ fn start_quick_share(
     file: std::path::PathBuf, temporary: bool, app: tauri::AppHandle, config: SharedSyncConfig,
 ) -> Result<String, String> {
     use crate::chunked_uploader::{quick_share_upload as upload_inner, ProgressFn, UploadOptions};
-    let (client, device_id, base_url) = {
+    let (client, device_id) = {
         let cfg = config.read();
         (
             crate::commands::support::make_client(&cfg)?,
             cfg.device_id.clone(),
-            cfg.server_url.trim_end_matches('/').to_string(),
         )
     };
     let total = file.metadata().map_err(|e| e.to_string())?.len() as i64;
@@ -209,7 +208,7 @@ fn start_quick_share(
             let cancelled = map.get(&task_id).map(|s| *s.borrow() == Control::Cancelled).unwrap_or(true);
             match result {
                 Some(Ok(data)) if !cancelled => {
-                    let url = format!("{}{}", base_url, data.url_path);
+                    let url = format!("{}{}", data.entry_url, data.url_path);
                     crate::transfers::quick_share_result(&task_id, url.clone());
                     let clipboard = app.state::<crate::clipboard_sync::SharedClipboardState>();
                     if let Err(e) = crate::clipboard_sync::apply_to_clipboard(&clipboard, &url) {

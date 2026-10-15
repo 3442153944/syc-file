@@ -25,6 +25,7 @@ pub const FILE_THUMBNAIL: &str = "/file/thumbnail";
 pub const FILE_UPLOAD_INIT: &str = "/file/upload/init";
 pub const FILE_UPLOAD_STATUS: &str = "/file/upload/status";
 pub const FILE_UPLOAD_CHUNK: &str = "/file/upload/chunk";
+pub const FILE_UPLOAD_ABANDON: &str = "/file/upload/abandon";
 pub const FILE_UPLOAD_COMPLETE: &str = "/file/upload/complete";
 pub const FILE_DELETE: &str = "/file/delete";
 pub const FILE_DOWNLOAD_HISTORY: &str = "/file/download-history";

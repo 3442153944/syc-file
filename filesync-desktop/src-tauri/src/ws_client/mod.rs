@@ -373,6 +373,7 @@ fn route_text(text: &str, app: &AppHandle, sync_tx: &mpsc::UnboundedSender<serde
         // 弹 naive-ui 通知，不在 Rust 侧解析字段——以后这条通道加别的通知类型
         // 也不用跟着改 Rust。
         "app_update" => {
+            crate::desktop_update::on_release(app, &content);
             let _ = app.emit("app-update", content);
         }
         "notification" => {
@@ -444,6 +445,10 @@ fn emit_ws_status(app: &AppHandle, connected: bool, message: &str) {
         },
     )
     .ok();
+    if connected {
+        // 重连补查断线期间发布的版本，执行不依赖 WebView 是否存在。
+        crate::desktop_update::auto_check(app.clone(), app.state::<SharedSyncConfig>().inner().clone());
+    }
 }
 
 fn urlenc(s: &str) -> String {

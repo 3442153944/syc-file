@@ -13,8 +13,8 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
 )
@@ -24,7 +24,7 @@ import (
 // 传参：upload_id 与 index 走 query 或 header，分片二进制走请求 body（raw）。
 // 落盘：synccore.ChunkWrite 先用会话里该片的叶子哈希做 blake3 早校验，通过后按
 // offset = index*chunk_size 定位写；校验不过则拒绝且不置位，客户端重传该片即可。
-func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
+func HandlerFuncUploadChunk(db *gorm.DB, rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
@@ -37,6 +37,11 @@ func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 		indexStr := firstNonEmpty(c.Query("index"), c.GetHeader("Chunk-Index"))
 		if uploadID == "" || indexStr == "" {
 			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少 upload_id 或 index", "data": nil})
+			return
+		}
+		attemptID := firstNonEmpty(c.Query("attempt_id"), c.GetHeader("Chunk-Attempt-Id"))
+		if len(attemptID) > 128 {
+			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "attempt_id 过长"})
 			return
 		}
 		index, err := strconv.Atoi(indexStr)
@@ -96,6 +101,47 @@ func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 			return
 		}
 
+		// 请求体读取期间可被放弃。锁内重查会话/尝试/位图，再执行不可分割的写入提交。
+		unlock := lockUploadCommit(uploadID)
+		defer unlock()
+		if c.Request.Context().Err() != nil {
+			return
+		}
+		sess, err = upload_store.Global.Get(ctx, uploadID)
+		if errors.Is(err, upload_store.ErrNotFound) {
+			c.JSON(http.StatusOK, gin.H{"code": 404, "message": "会话已结束"})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询会话失败"})
+			return
+		}
+		if attemptID != "" {
+			abandoned, err := rdb.HExists(c.Request.Context(), "upload:abandoned:"+uploadID, strconv.Itoa(index)+":"+attemptID).Result()
+			if err != nil {
+				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "检查分片尝试失败"})
+				return
+			}
+			if abandoned {
+				c.JSON(http.StatusOK, gin.H{"code": 409, "message": "该分片尝试已放弃"})
+				return
+			}
+		}
+
+		// 已完成的会话只允许幂等确认，迟到分片不能写入已生成分享的文件。
+		if sess.Status == "completed" {
+			c.JSON(http.StatusOK, gin.H{"code": 409, "message": "上传已完成，不接受迟到分片"})
+			return
+		}
+		bitmap, err := upload_store.Global.Bitmap(ctx, uploadID)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询分片状态失败"})
+			return
+		}
+		if index/8 < len(bitmap) && (bitmap[index/8]>>(7-uint(index%8)))&1 == 1 {
+			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "分片已确认", "data": gin.H{"index": index}})
+			return
+		}
 		offset := uint64(index) * uint64(sess.ChunkSize)
 		if err := synccore.ChunkWrite(sess.TempPath, offset, data, expectedLeaf); err != nil {
 			switch {

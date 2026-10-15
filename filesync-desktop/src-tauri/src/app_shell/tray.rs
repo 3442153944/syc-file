@@ -19,6 +19,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     // Linux 不挂原生顶部菜单栏（见 lib.rs），「工具 → 日志窗口」「网络 → 节点设置」改从托盘进入
     let logs_item = MenuItemBuilder::with_id("tray_logs", "日志窗口").build(app)?;
     let net_item = MenuItemBuilder::with_id("tray_net_settings", "网络节点设置…").build(app)?;
+    let about_item = MenuItemBuilder::with_id("tray_about", "关于私有云 / 检查更新").build(app)?;
     let quit_item = MenuItemBuilder::with_id("tray_quit", "退出").build(app)?;
     let tray_menu = MenuBuilder::new(app)
         .item(&show_item)
@@ -26,6 +27,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .separator()
         .item(&logs_item)
         .item(&net_item)
+        .item(&about_item)
         .separator()
         .item(&quit_item)
         .build()?;
@@ -44,6 +46,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             "tray_quick_share" => open_quick_paste_window(app),
             "tray_logs" => crate::app_shell::log_window::open_log_window(app),
             "tray_net_settings" => crate::app_shell::window::open_network_settings(app),
+            "tray_about" => crate::desktop_update::open_update_window(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

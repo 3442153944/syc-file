@@ -253,7 +253,7 @@ fun AboutScreen(
                 tint = MaterialTheme.colorScheme.primary
             )
             Spacer(modifier = Modifier.height(12.dp))
-            Text("云梯", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text("私有云", fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Text(
                 "FileSync · 多端文件同步",
                 fontSize = 13.sp,
