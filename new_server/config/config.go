@@ -45,7 +45,8 @@ type Config struct {
 }
 
 // ThumbnailConfig 图片缩略图配置（见 internal/thumb）。整段缺省即可：默认开启，
-// 缩略图目录取 <首个 allowed_paths 所在盘>/<storage.base_path>/thumbs，ffmpeg 从 PATH 里找。
+// 缩略图目录取 <首个 allowed_paths 所在盘>/<storage.base_path>/thumbs。
+// Windows/Linux amd64 构建默认使用二进制内嵌的 ffmpeg/ffprobe，无需系统安装。
 type ThumbnailConfig struct {
 	// 关闭缩略图功能。默认 false（开启）；找不到 ffmpeg 时也会自动关闭，不影响服务启动。
 	Disabled bool `mapstructure:"disabled"`
@@ -56,9 +57,9 @@ type ThumbnailConfig struct {
 	TempDir string `mapstructure:"temp_dir"`
 	// 临时缩略图保留多久（分钟），每次被访问会顺延。<=0 时按 720（12 小时）处理。
 	TempTTLMinutes int `mapstructure:"temp_ttl_minutes"`
-	// ffmpeg 可执行文件；空则在 PATH 里找 "ffmpeg"。
+	// 外部 ffmpeg 可执行文件；空则优先使用内嵌版本，内嵌不可用时再找 PATH。
 	FFmpeg string `mapstructure:"ffmpeg"`
-	// ffprobe 可执行文件；空则先找 ffmpeg 同目录、再找 PATH。视频/音频封面靠它，找不到只影响这两类。
+	// 外部 ffprobe 可执行文件；空则先找 ffmpeg 同目录、再找 PATH。视频/音频封面靠它，找不到只影响这两类。
 	FFprobe string `mapstructure:"ffprobe"`
 	// 同时运行的 ffmpeg 数量（上传后异步生成与请求时当场生成共用）。<=0 时按 8 处理。
 	// 注意内存：解码一张 4000 万像素的原图可占用数百 MB，机器小的话调低。

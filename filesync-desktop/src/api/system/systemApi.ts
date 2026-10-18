@@ -38,7 +38,7 @@ export const updateGuest = (
   id: number,
   patch: { expire_hours?: number; route_codes?: string[]; status?: number; reset_password?: boolean },
 ) => request<{ password?: string }>('PUT', `/admin/guests/${id}`, { body: patch })
-export const deleteGuest = (id: number) => request<null>('DELETE', `/admin/guests/${id}`)
+export const deleteGuest = (id: number) => request<{ cleanup_pending: boolean }>('DELETE', `/admin/guests/${id}`)
 
 // ── 级别与注册开关 ───────────────────────────────────────────
 /** 仅超级管理员；level: 1 用户 / 2 管理员。超级管理员全系统只有一个，不能再设置。 */

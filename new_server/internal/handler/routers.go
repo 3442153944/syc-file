@@ -19,6 +19,7 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	v1 := r.Group("/v1")
 	// 统一认证中间件：是否需要登录由配置文件 whitelist 决定，无需再手动区分路由组
 	v1.Use(middleware.Auth())
+	v1.Use(middleware.StoragePaths(db))
 
 	// 健康探测：GET/POST 都挂，客户端（桌面端灾备选路）用 GET，老客户端用 POST。
 	// 在白名单里，未登录也能打——登录页切换节点时也要能探测。

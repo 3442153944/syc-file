@@ -9,8 +9,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
+	"syc-file/internal/account"
+	filehandler "syc-file/internal/handler/file"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/internal/ws"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/password"
@@ -131,6 +135,13 @@ func (h *Handler) CreateGuest(c *gin.Context) {
 		CreatedBy: &by,
 	}
 	if err := h.db.Transaction(func(tx *gorm.DB) error {
+		var creator model.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&creator, by).Error; err != nil {
+			return err
+		}
+		if creator.Status != 1 || creator.Level < model.LevelAdmin {
+			return storage.ErrDenied
+		}
 		if err := tx.Create(&u).Error; err != nil {
 			return err
 		}
@@ -227,6 +238,10 @@ func (h *Handler) UpdateGuest(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if g.Status == model.UserDeleting {
+		jsonErr(c, 409, "账号正在删除，不能修改或重新启用")
+		return
+	}
 	var req struct {
 		ExpireHours   *int      `json:"expire_hours"`
 		RouteCodes    *[]string `json:"route_codes"`
@@ -281,7 +296,7 @@ func (h *Handler) UpdateGuest(c *gin.Context) {
 	}
 	if err := h.db.Transaction(func(tx *gorm.DB) error {
 		if len(updates) > 0 {
-			if err := tx.Model(g).Updates(updates).Error; err != nil {
+			if err := tx.Model(g).Where("status <> ?", model.UserDeleting).Updates(updates).Error; err != nil {
 				return err
 			}
 		}
@@ -317,16 +332,14 @@ func (h *Handler) DeleteGuest(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := h.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("user_id = ?", g.ID).Delete(&model.UserRoute{}).Error; err != nil {
-			return err
-		}
-		return tx.Delete(g).Error
-	}); err != nil {
-		jsonErr(c, 500, err.Error())
+	result, err := account.Delete(h.db, callerID(c), g.ID, func(uid uint) error {
+		return filehandler.CleanupAccountShares(h.db, nil, uid)
+	})
+	if err != nil {
+		jsonErr(c, 409, err.Error())
 		return
 	}
 	ws.GetHub().DisconnectUser(g.ID)
 	logger.Logger.Info("已删除访客账号", zap.Uint("guest_id", g.ID))
-	jsonOK(c, nil)
+	jsonOK(c, result)
 }

@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 )
 
@@ -34,6 +35,9 @@ func (e *Engine) HandleScan(userID uint, deviceID string, report ScanReport) err
 		return nil
 	}
 
+	if err := storage.Authorize(e.db, userID, folder.RemotePath); err != nil {
+		return err
+	}
 	remotePrefix := filepath.Clean(folder.RemotePath)
 	var files []model.File
 	// MySQL LIKE 默认以 '\' 为转义符：Windows 路径 'E:\FileSync\%' 里 '\F'/'\%' 全被

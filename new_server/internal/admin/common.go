@@ -10,8 +10,8 @@
 package admin
 
 import (
-	"net/http"
 	"strconv"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -54,17 +54,15 @@ func parsePage(c *gin.Context) pageQuery {
 func (p pageQuery) offset() int { return (p.Page - 1) * p.PageSize }
 
 func jsonPage(c *gin.Context, list interface{}, total int64, p pageQuery) {
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
-		"list": list, "total": total, "page": p.Page, "page_size": p.PageSize,
-	}})
+	response.Page(c, list, total, p.Page, p.PageSize)
 }
 
 func jsonOK(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
+	response.OK(c, data)
 }
 
 func jsonErr(c *gin.Context, code int, msg string) {
-	c.JSON(http.StatusOK, gin.H{"code": code, "message": msg, "data": nil})
+	response.Fail(c, code, msg)
 }
 
 // currentUser 取当前登录用户 ID。

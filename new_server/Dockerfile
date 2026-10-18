@@ -1,5 +1,6 @@
 #
 # 云梯后端一体镜像：Go 后端 + MySQL 8.0 + Redis，一个容器跑完。
+# ffmpeg/ffprobe 用仓库内固定版本的归档嵌入 Go 后端，运行阶段不再依赖系统 ffmpeg。
 # 构建统一用脚本：  bash docker/build.sh   （VS Code 运行配置「构建: 后端 Docker 镜像」）
 # 手动构建时上下文是 new_server/，国内需要 --build-arg GOPROXY=... --build-arg GO_DL=...，参数见脚本。
 # 运行：  docker run -d --name filesync -p 9999:9999 -v filesync-data:/data filesync-server
@@ -20,6 +21,11 @@ RUN go mod download
 # Rust 核心单独成层：只改 Go 代码时不重编 Rust
 COPY sync_core ./sync_core
 RUN bash sync_core/build.sh
+# ffmpeg 归档随仓库提交并固定版本：只复制并校验，不联网下载
+COPY tools ./tools
+COPY internal/thumb/embedded/FFMPEG.lock ./internal/thumb/embedded/FFMPEG.lock
+COPY internal/thumb/embedded/linux_amd64/ffmpeg.tar.xz ./internal/thumb/embedded/linux_amd64/ffmpeg.tar.xz
+RUN bash tools/fetch-ffmpeg.sh linux
 COPY . .
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/syc-file ./cmd
 
@@ -28,7 +34,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive TZ=Asia/Shanghai LANG=C.UTF-8 SYC_MODE=prod
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        mysql-server redis-server supervisor openssl curl ca-certificates tzdata ffmpeg \
+        mysql-server redis-server supervisor openssl curl ca-certificates tzdata \
     && rm -rf /var/lib/mysql /var/lib/apt/lists/* \
     && mkdir -p /opt/syc /data
 

@@ -51,9 +51,18 @@ pub struct TraverseDirectoryData {
     pub current_path: String,
     #[serde(rename = "parent_path")]
     pub parent_path: String,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub items: Vec<FileItem>,
     #[serde(rename = "total_count")]
     pub total_count: i32,
+}
+
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 // ==================== 分片上传 ====================

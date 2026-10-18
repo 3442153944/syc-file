@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syc-file/pkg/response"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,14 +32,14 @@ const thumbRequestTimeout = 30 * time.Second
 func HandlerFuncThumbnail(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if claims, ok := c.Get("UserInfo"); !ok || claims == nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusUnauthorized, 401, "请先登录", nil)
 			return
 		}
 
 		path := c.Query("path")
 		name := c.Query("name")
 		if path == "" || name == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "缺少必要参数 path 或 name", "data": nil})
+			response.WriteHTTP(c, http.StatusBadRequest, 400, "缺少必要参数 path 或 name", nil)
 			return
 		}
 		width, _ := strconv.Atoi(c.Query("w"))
@@ -50,14 +51,15 @@ func HandlerFuncThumbnail(db *gorm.DB, redisClient *redis.Client) gin.HandlerFun
 		} else {
 			fullPath = filepath.Join(path, name)
 		}
-		if !isPathAllowedDownload(fullPath) {
-			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
+		var allowed bool
+		fullPath, allowed = resolveFilePath(c, db, fullPath)
+		if !allowed {
 			return
 		}
 
 		svc := thumb.Global
 		if svc == nil || !thumb.Supported(fullPath) {
-			c.JSON(http.StatusUnsupportedMediaType, gin.H{"code": 415, "message": "该文件不支持缩略图", "data": nil})
+			response.WriteHTTP(c, http.StatusUnsupportedMediaType, 415, "该文件不支持缩略图", nil)
 			return
 		}
 
@@ -67,13 +69,13 @@ func HandlerFuncThumbnail(db *gorm.DB, redisClient *redis.Client) gin.HandlerFun
 		if err != nil {
 			switch {
 			case errors.Is(err, os.ErrNotExist):
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "文件不存在", "data": nil})
+				response.WriteHTTP(c, http.StatusNotFound, 404, "文件不存在", nil)
 			case errors.Is(err, thumb.ErrUnsupported):
-				c.JSON(http.StatusUnsupportedMediaType, gin.H{"code": 415, "message": "该文件不支持缩略图", "data": nil})
+				response.WriteHTTP(c, http.StatusUnsupportedMediaType, 415, "该文件不支持缩略图", nil)
 			case errors.Is(err, context.DeadlineExceeded):
-				c.JSON(http.StatusGatewayTimeout, gin.H{"code": 504, "message": "缩略图生成超时", "data": nil})
+				response.WriteHTTP(c, http.StatusGatewayTimeout, 504, "缩略图生成超时", nil)
 			default:
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "缩略图生成失败", "data": nil})
+				response.WriteHTTP(c, http.StatusInternalServerError, 500, "缩略图生成失败", nil)
 			}
 			return
 		}

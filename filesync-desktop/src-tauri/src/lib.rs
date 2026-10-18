@@ -6,6 +6,7 @@ mod catch_up;
 mod chunked_uploader;
 mod clipboard_sync;
 mod commands;
+mod catalog_download;
 mod config;
 mod device;
 mod desktop_update;
@@ -289,6 +290,7 @@ pub fn run() {
             commands::file::upload_file,
             commands::file::delete_file,
             commands::file::build_download_url,
+            commands::catalog_download::download_catalog_file,
             commands::file::build_thumbnail_url,
             commands::file::get_download_history,
             commands::file::delete_download_history,

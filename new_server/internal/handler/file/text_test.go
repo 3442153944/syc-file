@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	gosync "sync"
 	"testing"
@@ -16,8 +17,8 @@ import (
 	"go.uber.org/zap"
 
 	"syc-file/config"
-	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/token"
 )
 
@@ -358,7 +359,7 @@ func TestTextSavePreservesEOLBOMAndMode(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("应保留 BOM 和 CRLF：期望 %q 实际 %q", want, got)
 	}
-	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o640 {
+	if fi, _ := os.Stat(p); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o640 {
 		t.Errorf("权限应保持 0640，实际 %v", fi.Mode().Perm())
 	}
 }

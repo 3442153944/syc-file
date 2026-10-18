@@ -2,7 +2,7 @@
 // 文件在线预览：图片（滚轮缩放 / 拖动 / 双击放大）、视频、音频、文本（查看 + 在线编辑，见 TextEditor）。
 // 图片打开时先垫一张缩略图（列表里已缓存，几乎立刻出来），原图加载完再替换；
 // 视频用封面当海报、音频显示专辑封面。←/→ 切换同目录里上一个/下一个可预览的文件。
-// 不支持预览的类型由调用方走下载，这里只在被误开时给个提示。
+// 不支持预览的类型在应用内说明，由用户明确点击下载，不自动打开外部浏览器。
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { NModal, NButton, NSpace, NSpin, NEmpty, NText, useDialog } from 'naive-ui'
 import type { FileItem } from '@/api/file/fileTypes'

@@ -1,6 +1,9 @@
 # 构建上下文 = new_server/，这些都不要进上下文
 sync_core/target
 sync_core/lib
+internal/thumb/embedded/*/*.zip
+internal/thumb/embedded/*/*.ready
+internal/thumb/embedded/*/*.part
 syc-file
 syc-file.exe
 venv

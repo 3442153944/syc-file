@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -10,6 +11,8 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
+	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 )
 
@@ -208,6 +211,21 @@ func (c *Connection) heartbeatCheck() {
 }
 
 func (c *Connection) Send(data []byte) error {
+	// 实时同步和监控同样不能暴露实际系统路径；按接收者的当前权限分别转换。
+	if Handler != nil && Handler.db != nil && (bytes.Contains(data, []byte(`"path"`)) || bytes.Contains(data, []byte(`"remote_path"`)) || bytes.Contains(data, []byte(`"storage_path"`)) || bytes.Contains(data, []byte(`"file_path"`)) || bytes.Contains(data, []byte(`"disks"`))) {
+		u, err := storage.User(Handler.db, c.UserID)
+		if err != nil || u.Level < model.LevelSuper {
+			root := ""
+			if s, p, err := storage.Load(Handler.db, c.UserID); err == nil {
+				root = storage.Root(p, s)
+			}
+			cleaned, err := json.Marshal(storage.ClientData(root, json.RawMessage(data)))
+			if err != nil {
+				return err
+			}
+			data = cleaned
+		}
+	}
 	c.mu.RLock()
 	if !c.IsAlive {
 		c.mu.RUnlock()

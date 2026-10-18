@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syc-file/internal/storage"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -52,7 +54,7 @@ func HandlerFuncFileVersions(db *gorm.DB) gin.HandlerFunc {
 
 		var versions []model.FileVersion
 		if err := db.Where("file_id = ?", file.ID).Order("version desc").Find(&versions).Error; err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": err.Error(), "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, err.Error(), nil)
 			return
 		}
 
@@ -70,10 +72,10 @@ func HandlerFuncFileVersions(db *gorm.DB) gin.HandlerFunc {
 			}
 			rows = append(rows, row)
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 			"file":     file,
 			"versions": rows,
-		}})
+		})
 	}
 }
 
@@ -86,7 +88,7 @@ func HandlerFuncDownloadVersion(db *gorm.DB) gin.HandlerFunc {
 		}
 		vid, err := strconv.ParseUint(c.Query("version_id"), 10, 64)
 		if err != nil || vid == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的 version_id", "data": nil})
+			response.WriteHTTP(c, http.StatusBadRequest, 400, "无效的 version_id", nil)
 			return
 		}
 		v, file, ok := lookupVersion(c, db, userID, vid)
@@ -94,11 +96,11 @@ func HandlerFuncDownloadVersion(db *gorm.DB) gin.HandlerFunc {
 			return
 		}
 		if v.StoragePath == nil || *v.StoragePath == "" {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "该版本没有留存内容（早于版本仓库上线）", "data": nil})
+			response.WriteHTTP(c, http.StatusNotFound, 404, "该版本没有留存内容（早于版本仓库上线）", nil)
 			return
 		}
 		if _, err := os.Stat(*v.StoragePath); err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "版本内容已丢失", "data": nil})
+			response.WriteHTTP(c, http.StatusNotFound, 404, "版本内容已丢失", nil)
 			return
 		}
 		// 下载名带上版本号，避免和当前版本混淆
@@ -125,7 +127,7 @@ func HandlerFuncRollbackVersion(db *gorm.DB, engine *syncpkg.Engine) gin.Handler
 			DeviceID  string `json:"device_id"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "参数解析失败: " + err.Error(), "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "参数解析失败: "+err.Error(), nil)
 			return
 		}
 		v, file, ok := lookupVersion(c, db, userID, req.VersionID)
@@ -133,38 +135,50 @@ func HandlerFuncRollbackVersion(db *gorm.DB, engine *syncpkg.Engine) gin.Handler
 			return
 		}
 		if v.StoragePath == nil || *v.StoragePath == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "该版本没有留存内容，无法回滚", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "该版本没有留存内容，无法回滚", nil)
 			return
 		}
 		if _, err := os.Stat(*v.StoragePath); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "版本内容已丢失，无法回滚", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "版本内容已丢失，无法回滚", nil)
 			return
 		}
 		if uint(v.Version) == file.Version {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "该版本已是当前版本", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "该版本已是当前版本", nil)
 			return
 		}
 		if engine == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "同步引擎未就绪", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "同步引擎未就绪", nil)
 			return
 		}
 
 		// 找出这个文件属于哪个同步 folder：回滚要走同步引擎才能派发给其它设备
 		folder, rel, inSync := engine.FolderForPath(userID, file.FilePath)
 		if !inSync {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "该文件不在任何同步文件夹内，暂不支持回滚", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "该文件不在任何同步文件夹内，暂不支持回滚", nil)
 			return
 		}
 
 		// 覆盖目标文件：先写同目录的 .rollback 临时文件再原子改名，中途失败不会毁掉现有文件
-		tmp := file.FilePath + ".rollback"
-		if err := copyFile(*v.StoragePath, tmp); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入回滚内容失败: " + err.Error(), "data": nil})
+		blobInfo, err := os.Stat(*v.StoragePath)
+		if err != nil {
+			response.Fail(c, 404, "版本内容不存在")
 			return
 		}
-		if err := os.Rename(tmp, file.FilePath); err != nil {
-			_ = os.Remove(tmp)
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "落盘回滚内容失败: " + err.Error(), "data": nil})
+		err = storage.Allocate(db, userID, file.FilePath, blobInfo.Size(), func() error {
+			temp, err := os.CreateTemp(filepath.Dir(file.FilePath), ".rollback-*.part")
+			if err != nil {
+				return err
+			}
+			tmp := temp.Name()
+			temp.Close()
+			defer os.Remove(tmp)
+			if err := copyFile(*v.StoragePath, tmp); err != nil {
+				return err
+			}
+			return os.Rename(tmp, file.FilePath)
+		})
+		if err != nil {
+			response.Fail(c, 400, err.Error())
 			return
 		}
 
@@ -187,15 +201,15 @@ func HandlerFuncRollbackVersion(db *gorm.DB, engine *syncpkg.Engine) gin.Handler
 			BaseHash: derefStrValue(file.FileHash),
 		}
 		if err := engine.HandleFileChange(userID, req.DeviceID, report); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "回滚已落盘但同步派发失败: " + err.Error(), "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "回滚已落盘但同步派发失败: "+err.Error(), nil)
 			return
 		}
 		logger.Logger.Info("文件已回滚到历史版本",
 			zap.String("path", file.FilePath), zap.Int("to_version", v.Version))
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 			"restored_version": v.Version,
 			"file_hash":        hash,
-		}})
+		})
 	}
 }
 
@@ -204,7 +218,7 @@ func HandlerFuncRollbackVersion(db *gorm.DB, engine *syncpkg.Engine) gin.Handler
 func currentUserID(c *gin.Context) (uint, bool) {
 	claims, ok := c.Get("UserInfo")
 	if !ok || claims == nil {
-		c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 		return 0, false
 	}
 	return uint(claims.(*token.Claims).UserID), true
@@ -220,11 +234,14 @@ func lookupFile(c *gin.Context, db *gorm.DB, userID uint, fileID uint64, path st
 	case path != "":
 		q = q.Where("file_path = ?", filepath.Clean(path))
 	default:
-		c.JSON(http.StatusOK, gin.H{"code": 400, "message": "需要 path 或 file_id", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 400, "需要 path 或 file_id", nil)
 		return file, false
 	}
 	if err := q.First(&file).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 404, "message": "文件记录不存在", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 404, "文件记录不存在", nil)
+		return file, false
+	}
+	if !checkFilePath(c, db, file.FilePath) {
 		return file, false
 	}
 	return file, true
@@ -234,12 +251,15 @@ func lookupFile(c *gin.Context, db *gorm.DB, userID uint, fileID uint64, path st
 func lookupVersion(c *gin.Context, db *gorm.DB, userID uint, versionID uint64) (model.FileVersion, model.File, bool) {
 	var v model.FileVersion
 	if err := db.First(&v, versionID).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 404, "message": "版本不存在", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 404, "版本不存在", nil)
 		return v, model.File{}, false
 	}
 	var file model.File
 	if err := db.Where("id = ? AND user_id = ?", v.FileID, userID).First(&file).Error; err != nil {
-		c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该版本", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 403, "无权访问该版本", nil)
+		return v, file, false
+	}
+	if !checkFilePath(c, db, file.FilePath) {
 		return v, file, false
 	}
 	return v, file, true

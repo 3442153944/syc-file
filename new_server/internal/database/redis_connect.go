@@ -16,6 +16,7 @@ func InitRedis(cfg config.RedisConfig) (*redis.Client, error) {
 
 	// 测试连接
 	if err := client.Ping(context.Background()).Err(); err != nil {
+		_ = client.Close()
 		return nil, err
 	}
 

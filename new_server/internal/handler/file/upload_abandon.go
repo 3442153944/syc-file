@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"syc-file/pkg/response"
 	"sync"
 	"time"
 
@@ -57,7 +58,7 @@ func HandlerFuncUploadAbandon(rdb *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录"})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		var req struct {
@@ -66,7 +67,7 @@ func HandlerFuncUploadAbandon(rdb *redis.Client) gin.HandlerFunc {
 		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 		if c.ShouldBindJSON(&req) != nil || req.UploadID == "" || len(req.Attempts) == 0 || len(req.Attempts) > 128 {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "放弃参数无效"})
+			response.WriteHTTP(c, http.StatusOK, 400, "放弃参数无效", nil)
 			return
 		}
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -75,21 +76,21 @@ func HandlerFuncUploadAbandon(rdb *redis.Client) gin.HandlerFunc {
 		defer unlock()
 		sess, err := upload_store.Global.Get(ctx, req.UploadID)
 		if errors.Is(err, upload_store.ErrNotFound) {
-			c.JSON(http.StatusOK, gin.H{"code": 404, "message": "会话不存在"})
+			response.WriteHTTP(c, http.StatusOK, 404, "会话不存在", nil)
 			return
 		}
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询会话失败"})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询会话失败", nil)
 			return
 		}
 		if sess.UserID != uint(claims.(*token.Claims).UserID) {
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该上传会话"})
+			response.WriteHTTP(c, http.StatusOK, 403, "无权访问该上传会话", nil)
 			return
 		}
 		fields := make(map[string]interface{}, len(req.Attempts))
 		for _, a := range req.Attempts {
 			if a.Index < 0 || a.Index >= sess.ChunkCount || len(a.AttemptID) == 0 || len(a.AttemptID) > 128 {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "分片尝试无效"})
+				response.WriteHTTP(c, http.StatusOK, 400, "分片尝试无效", nil)
 				return
 			}
 			fields[strconv.Itoa(a.Index)+":"+a.AttemptID] = "1"
@@ -99,9 +100,9 @@ func HandlerFuncUploadAbandon(rdb *redis.Client) gin.HandlerFunc {
 		pipe.HSet(ctx, key, fields)
 		pipe.Expire(ctx, key, uploadSessionTTL)
 		if _, err := pipe.Exec(ctx); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "记录放弃失败"})
+			response.WriteHTTP(c, http.StatusOK, 500, "记录放弃失败", nil)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "已放弃分片尝试", "data": gin.H{"count": len(req.Attempts)}})
+		response.WriteHTTP(c, http.StatusOK, 200, "已放弃分片尝试", gin.H{"count": len(req.Attempts)})
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/config"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
 )
@@ -29,7 +31,7 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
@@ -40,7 +42,7 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			ExpireMinutes int    `json:"expire_minutes"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil || req.Path == "" || req.Name == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少必要参数 path 或 name", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "缺少必要参数 path 或 name", nil)
 			return
 		}
 
@@ -49,33 +51,34 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			maxExpire = 30 * 24 * 60
 		}
 		if req.ExpireMinutes <= 0 || req.ExpireMinutes > maxExpire {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "有效期不合法", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "有效期不合法", nil)
 			return
 		}
 
 		fullPath := filepath.Join(req.Path, req.Name)
-		if !config.Conf.IsPathAllowed(fullPath) {
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "路径不被允许", "data": nil})
+		var allowed bool
+		fullPath, allowed = resolveFilePath(c, db, fullPath)
+		if !allowed {
 			return
 		}
 
 		info, err := os.Stat(fullPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				c.JSON(http.StatusOK, gin.H{"code": 404, "message": "文件不存在", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 404, "文件不存在", nil)
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "读取文件失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "读取文件失败", nil)
 			return
 		}
 
 		tempDir := config.Conf.Share.TempPath
 		if tempDir == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "未配置分享临时目录 share.temp_path", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "未配置分享临时目录 share.temp_path", nil)
 			return
 		}
 		if err := os.MkdirAll(tempDir, 0o755); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "创建临时目录失败: " + err.Error(), "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "创建临时目录失败: "+err.Error(), nil)
 			return
 		}
 
@@ -92,7 +95,7 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			materializedSize, err = zipFolder(fullPath, tempPath)
 			if err != nil {
 				logger.Logger.Error("打包目录失败", zap.String("dir", fullPath), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "打包目录失败: " + err.Error(), "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, "打包目录失败: "+err.Error(), nil)
 				return
 			}
 		} else {
@@ -110,7 +113,7 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			if err != nil {
 				_ = os.Remove(tempPath)
 				logger.Logger.Error("生成分享临时文件失败", zap.String("src", fullPath), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "生成分享临时文件失败", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, "生成分享临时文件失败", nil)
 				return
 			}
 		}
@@ -120,15 +123,11 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 		if err != nil {
 			_ = os.Remove(tempPath)
 			logger.Logger.Error("写入分享链接记录失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入分享链接记录失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "写入分享链接记录失败", nil)
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "ok",
-			"data":    data,
-		})
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", data)
 	}
 }
 
@@ -148,6 +147,12 @@ func zipFolder(srcDir, dstZip string) (int64, error) {
 	base := filepath.Dir(srcDir)
 
 	err = filepath.Walk(srcDir, func(p string, fi os.FileInfo, walkErr error) error {
+		if walkErr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return storage.ErrDenied
+		}
+		if walkErr == nil && fi.IsDir() && (fi.Name() == ".uploads" || fi.Name() == ".children" || fi.Name() == ".versions") {
+			return filepath.SkipDir
+		}
 		if walkErr != nil {
 			return walkErr
 		}

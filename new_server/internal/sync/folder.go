@@ -8,8 +8,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
-	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 )
 
@@ -29,7 +29,12 @@ func (e *Engine) folderByID(id uint64) (model.SyncFolder, bool) {
 // UpsertFolder 创建或更新该用户唯一的同步文件夹配置（DB 唯一约束 user_id 保证幂等）。
 // 不覆盖 excludes：避免每次保存把用户/系统已生效的排除规则重置成默认值。
 func (e *Engine) UpsertFolder(userID uint, ownerDeviceID, name, localPath, remotePath, direction string) (*model.SyncFolder, error) {
-	if !config.Conf.IsPathAllowed(remotePath) {
+	var resolveErr error
+	remotePath, resolveErr = storage.ResolveVirtual(e.db, userID, remotePath)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	if err := storage.Authorize(e.db, userID, remotePath); err != nil {
 		return nil, fmt.Errorf("remote path not allowed: %s", remotePath)
 	}
 	if direction == "" {
@@ -86,8 +91,20 @@ func (e *Engine) GetFolder(userID uint) (*model.SyncFolder, error) {
 
 // UpdateFolder 更新该用户唯一的同步文件夹配置（如改远端路径则校验白名单）。
 func (e *Engine) UpdateFolder(userID uint, updates map[string]interface{}) error {
+	allowed := map[string]bool{"name": true, "local_path": true, "remote_path": true, "direction": true, "owner_device_id": true, "enabled": true, "excludes": true}
+	for field := range updates {
+		if !allowed[field] {
+			return fmt.Errorf("不允许修改字段 %s", field)
+		}
+	}
 	if rp, ok := updates["remote_path"].(string); ok && rp != "" {
-		if !config.Conf.IsPathAllowed(rp) {
+		resolved, err := storage.ResolveVirtual(e.db, userID, rp)
+		if err != nil {
+			return err
+		}
+		rp = resolved
+		updates["remote_path"] = rp
+		if err := storage.Authorize(e.db, userID, rp); err != nil {
 			return fmt.Errorf("remote path not allowed: %s", rp)
 		}
 	}

@@ -1,6 +1,6 @@
 # 云梯后端 Docker 镜像使用说明
 
-一体镜像：Go 后端 + MySQL 8.0 + Redis + supervisord + ffmpeg（缩略图），一个容器跑完。
+一体镜像：Go 后端 + MySQL 8.0 + Redis + supervisord，ffmpeg/ffprobe 已嵌入 Go 后端，一个容器跑完。
 所有数据（数据库、文件、版本库、配置、密钥）都在 `/data` 数据卷里，删除/重建容器不丢数据。
 
 ---
@@ -12,7 +12,7 @@ bash docker/build.sh                          # 默认 filesync-server:dev
 bash docker/build.sh filesync-server:1.0.0    # 指定 镜像名:标签
 ```
 
-- 构建上下文固定为 `new_server/`；首次构建要编译 Rust 核心 + Go 并安装 MySQL/ffmpeg，需几分钟。
+- 构建上下文固定为 `new_server/`；内嵌 ffmpeg 归档随仓库提交，构建只校验不下载，编译 Rust 核心 + Go 需几分钟。
 - 国内默认走 `goproxy.cn` / `golang.google.cn`；境外构建可覆盖：
   `GOPROXY=https://proxy.golang.org,direct GO_DL=https://go.dev/dl bash docker/build.sh ...`
 - VS Code 里有对应运行配置「构建: 后端 Docker 镜像」。
@@ -126,14 +126,14 @@ docker run -d --name filesync --restart unless-stopped \
 | --- | --- |
 | 启动后一直 unhealthy | `docker logs filesync`，看 `[init]` 走到哪一步；MySQL 初始化失败会打印原因 |
 | 改了配置不生效 | 确认改的是**数据卷里**的 config.yaml（不是仓库里的模板），改完必须 restart |
-| 缩略图失败 | `docker exec filesync ffmpeg -version` 应输出版本；调低 `thumbnail.workers` 减少内存压力 |
+| 缩略图失败 | `docker logs filesync` 查看内嵌 ffmpeg 解压/启动日志；调低 `thumbnail.workers` 减少内存压力 |
 | 时间不对 | `-e TZ=...` |
 | 端口冲突 | `server.port` + `-p` 一起改 |
 
 ## 10. 冒烟验证记录（1.0）
 
 - 首次启动 → healthy 约 20 秒；初始化码 / 向导 / 登录正常
-- 上传 → 下载 字节级一致；PNG 上传后按需生成 256×192 JPEG 缩略图（ffmpeg 6.1.1）
+- 上传 → 下载 字节级一致；PNG 上传后按需生成 256×192 JPEG 缩略图（内嵌固定版本 ffmpeg）
 - WebSocket 升级返回 101
 - 容器重启后 10 秒恢复 healthy，登录态与文件均保持
 - 空闲资源：约 415MB 内存（主要是 MySQL buffer pool 256M）/ 1.2% CPU

@@ -34,6 +34,12 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	a.GET("/storage", h.ListStorage)
 	a.PUT("/storage/:id", h.UpdateQuota)
 	a.POST("/storage/:id/recalc", h.RecalcStorage)
+	a.GET("/storage-pools", h.ListStoragePools)
+	a.POST("/storage-pools", h.CreateStoragePool)
+	a.PUT("/storage-pools/:id", h.UpdateStoragePool)
+	a.GET("/storage-partitions", h.StoragePartitions)
+	a.GET("/upload-spaces", h.ListUploadSpaces)
+	a.PUT("/upload-spaces/:id", h.PutUploadSpace)
 	// 角色权限
 	a.GET("/roles", h.ListRoles)
 	a.POST("/roles", h.CreateRole)
@@ -52,6 +58,7 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	rg.POST("/devices/:id/kick", h.KickDevice)
 	rg.DELETE("/devices/:id", h.DeleteDevice)
 	rg.GET("/storage/mine", h.MyStorage)
+	rg.GET("/storage/space", h.MyUploadSpace)
 
 	// 监控（只读，登录即可看）
 	m := rg.Group("/monitor")

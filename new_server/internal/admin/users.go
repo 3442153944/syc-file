@@ -7,6 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"syc-file/internal/account"
+	filehandler "syc-file/internal/handler/file"
 	"syc-file/internal/middleware"
 	"syc-file/internal/model"
 	"syc-file/internal/ws"
@@ -113,6 +115,10 @@ func (h *APIHandler) UpdateUser(c *gin.Context) {
 		return
 	}
 	updates := map[string]interface{}{}
+	if target.Status == model.UserDeleting {
+		jsonErr(c, 409, "账号正在删除，不能修改或重新启用")
+		return
+	}
 	if req.Role != nil {
 		// role 与 level 必须同步，直接改 role 会让两者不一致；级别调整统一走 PUT /admin/users/:id/level（仅超级管理员）
 		jsonErr(c, 400, "不能直接修改 role，请使用 PUT /v1/admin/users/:id/level 调整级别")
@@ -135,7 +141,7 @@ func (h *APIHandler) UpdateUser(c *gin.Context) {
 		jsonErr(c, 400, "没有需要更新的字段")
 		return
 	}
-	if err := h.db.Model(&target).Updates(updates).Error; err != nil {
+	if err := h.db.Model(&target).Where("status <> ?", model.UserDeleting).Updates(updates).Error; err != nil {
 		jsonErr(c, 500, err.Error())
 		return
 	}
@@ -193,9 +199,7 @@ func (h *APIHandler) ResetPassword(c *gin.Context) {
 }
 
 // DeleteUser DELETE /v1/admin/users/:id
-//
-// 只删 user 行与其角色绑定；**不动它的文件和同步记录**——那些数据可能仍被其它设备引用，
-// 静默连带删除是不可逆的破坏。需要清数据时走文件管理，不在这里顺手做。
+// 同时清理账号的隔离空间和关联记录，文件清理失败时保留可重试状态。
 func (h *APIHandler) DeleteUser(c *gin.Context) {
 	adminID, ok := requireAdmin(c)
 	if !ok {
@@ -217,14 +221,15 @@ func (h *APIHandler) DeleteUser(c *gin.Context) {
 	if !canManage(c, adminID, &target) {
 		return
 	}
-	if err := h.db.Delete(&target).Error; err != nil {
-		jsonErr(c, 500, err.Error())
+	result, err := account.Delete(h.db, adminID, uint(id), func(uid uint) error {
+		return filehandler.CleanupAccountShares(h.db, h.redisClient, uid)
+	})
+	if err != nil {
+		jsonErr(c, 409, err.Error())
 		return
 	}
-	h.db.Where("user_id = ?", id).Delete(&model.UserRole{})
-	ws.GetHub().DisconnectUser(uint(id))
 	logger.Logger.Warn("管理员删除了用户", zap.Uint64("user_id", id), zap.String("username", target.Username))
-	jsonOK(c, nil)
+	jsonOK(c, result)
 }
 
 // canManage 调用者能否管理 target：超级管理员能管所有人；管理员只能管用户和访客，

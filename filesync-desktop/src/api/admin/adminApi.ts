@@ -27,7 +27,8 @@ export const updateUser = (
 export const resetUserPassword = (id: number, newPassword: string) =>
   request<null>('POST', `/admin/users/${id}/reset-password`, { body: { new_password: newPassword } })
 
-export const deleteUser = (id: number) => request<null>('DELETE', `/admin/users/${id}`)
+export interface AccountDeletionResult { cleanup_pending: boolean }
+export const deleteUser = (id: number) => request<AccountDeletionResult>('DELETE', `/admin/users/${id}`)
 
 // ── 设备管理 ──────────────────────────────────────────────
 /** admin=true 时走管理员视角（可跨用户）；否则只看自己的设备。 */

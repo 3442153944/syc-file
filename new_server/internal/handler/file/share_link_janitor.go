@@ -13,9 +13,11 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 )
 
@@ -64,7 +66,16 @@ func finalizeShareLink(
 		IsQuickShare: isQuickShare,
 		StorageKind:  storageKind,
 	}
-	if createErr := db.Create(link).Error; createErr != nil {
+	if createErr := storage.LockedTransaction(db, func(tx *gorm.DB) error {
+		var owner model.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&owner, userID).Error; err != nil {
+			return err
+		}
+		if _, err := storage.User(tx, userID); err != nil {
+			return err
+		}
+		return tx.Create(link).Error
+	}); createErr != nil {
 		return "", nil, createErr
 	}
 

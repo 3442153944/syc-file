@@ -2,9 +2,10 @@
 # 后端非 Docker 部署（本机，由 systemd 的 syc-file.service 托管）：
 #   检查端口 → 构建 → 原子替换二进制 → 重启服务 → 健康检查，失败自动回滚到上一版。
 #
-# 用法：  bash deploy.sh [--build-only] [--no-sync_core]
+# 用法：  bash deploy.sh [--build-only] [--no-sync_core|--no-filecore] [--ffmpeg-source PATH]
 #   --build-only   只构建并校验能编译，不替换二进制、不重启服务
 #   --no-sync_core  跳过 Rust 核心库（libsync_core.a）重建；sync_core 没改过时可加，省一点时间
+#   --ffmpeg-source PATH  指定 ffmpeg 目录或压缩包；不指定时校验仓库内置的固定版本归档
 #
 # 说明：
 #   - 端口取自 config/config.yaml 的 server.port（默认 8991）。
@@ -21,13 +22,17 @@ SERVICE=syc-file
 BIN=syc-file
 BUILD_ONLY=0
 FILECORE=1
-for a in "$@"; do
-    case "$a" in
+FFMPEG_SOURCE="${FFMPEG_SOURCE:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --build-only) BUILD_ONLY=1 ;;
-        --no-filecore) FILECORE=0 ;;
+        --no-filecore|--no-sync_core) FILECORE=0 ;;
+        --ffmpeg-source) FFMPEG_SOURCE="${2:?--ffmpeg-source 需要路径}"; shift ;;
+        --ffmpeg-source=*) FFMPEG_SOURCE="${1#--ffmpeg-source=}" ;;
         -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
-        *) echo "未知参数: $a（--help 查看用法）" >&2; exit 2 ;;
+        *) echo "未知参数: $1（--help 查看用法）" >&2; exit 2 ;;
     esac
+    shift
 done
 
 PORT="$(awk '/^server:/{f=1;next} f&&/^[^ #]/{f=0} f&&$1=="port:"{print $2;exit}' config/config.yaml 2>/dev/null || true)"
@@ -63,6 +68,12 @@ fi
 if [ "$FILECORE" = 1 ]; then
     step "构建 Rust 核心库 libsync_core.a"
     bash sync_core/build.sh
+fi
+step "校验内嵌 ffmpeg 归档（固定版本）"
+if [[ -n "$FFMPEG_SOURCE" ]]; then
+    bash tools/fetch-ffmpeg.sh linux --source "$FFMPEG_SOURCE"
+else
+    bash tools/fetch-ffmpeg.sh linux
 fi
 step "构建后端（go build）"
 CGO_ENABLED=1 CC=gcc go build -trimpath -o "$BIN.new" ./cmd

@@ -452,15 +452,24 @@ fn emit_ws_status(app: &AppHandle, connected: bool, message: &str) {
 }
 
 fn urlenc(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                vec![c]
-            } else {
-                format!("%{:02X}", c as u32).chars().collect()
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*byte as char),
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod urlenc_tests {
+    use super::urlenc;
+
+    #[test]
+    fn urlenc_encodes_utf8_and_reserved_bytes() {
+        assert_eq!(urlenc("设备 名称"), "%E8%AE%BE%E5%A4%87%20%E5%90%8D%E7%A7%B0");
+    }
 }
 
 /// 收到别的设备推来的剪贴板内容：始终发事件给前端（进历史列表），

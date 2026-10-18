@@ -2,6 +2,9 @@ package model
 
 import "time"
 
+// UserDeleting 表示已撤销访问、等待文件清理的账号；清理成功后才物理删除记录。
+const UserDeleting int8 = -1
+
 // User 用户表
 type User struct {
 	ID        uint       `gorm:"primaryKey;autoIncrement" json:"id"`

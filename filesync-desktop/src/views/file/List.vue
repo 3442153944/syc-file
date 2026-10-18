@@ -2,27 +2,38 @@
 import {ref, onMounted} from "vue"
 import {getAvailableDisks} from "@/api/file/fileApi"
 import type {DiskInfo} from "@/api/file/fileTypes"
+import {formatBytes} from '@/utils/speedMeter'
+import {Folder} from '@vicons/fa'
 import {
   NSpin, NGrid, NGi, NCard, NProgress,
-  NButton, NEmpty
+  NButton, NEmpty, NAlert, NIcon
 } from "naive-ui"
 import {useRouter} from "vue-router"
 
 const router = useRouter()
 const disk_list = ref<DiskInfo[]>([])
 const loading = ref(false)
+const loadError = ref('')
+const isVirtual = (disk: DiskInfo) => disk.path === '/@space'
+const percentage = (disk: DiskInfo) => {
+  const value = disk.total > 0 ? disk.used / disk.total * 100 : disk.used_percent
+  return Number.isFinite(value) ? Math.min(100, Math.max(0, Number(value.toFixed(1)))) : 0
+}
 
-onMounted(async () => {
+async function loadDisks() {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await getAvailableDisks()
-    disk_list.value = res.all_disks
+    disk_list.value = res.all_disks || []
   } catch (error) {
-    console.error("获取磁盘列表失败", error)
+    disk_list.value = []
+    loadError.value = String(error)
   } finally {
     loading.value = false
   }
-})
+}
+onMounted(loadDisks)
 
 
 const handleOpenDisk = (disk: DiskInfo) => {
@@ -44,10 +55,12 @@ const getProgressColor = (percent: number) => {
   <div class="disk-container">
     <div class="header">
       <h2>存储空间节点</h2>
+      <n-button size="small" :loading="loading" @click="loadDisks">刷新</n-button>
     </div>
 
     <n-spin :show="loading">
-      <n-empty v-if="!loading && disk_list.length === 0" description="暂无可用磁盘"/>
+      <n-alert v-if="loadError" type="error" title="读取存储空间失败">{{ loadError }}</n-alert>
+      <n-empty v-else-if="!loading && disk_list.length === 0" description="暂无可用存储空间，请联系管理员分配"/>
 
       <n-grid v-else x-gap="16" y-gap="16" cols="1 640:2 960:3 1280:4" responsive="self">
         <n-gi v-for="disk in disk_list" :key="disk.path">
@@ -60,8 +73,8 @@ const getProgressColor = (percent: number) => {
           >
             <div class="disk-header">
               <div class="disk-title">
-                <span class="disk-icon">🖴</span>
-                <span class="disk-path" :title="disk.path">本地磁盘 ({{ disk.path }})</span>
+                <n-icon class="disk-icon"><folder /></n-icon>
+                <span class="disk-path" :title="isVirtual(disk) ? '管理员分配的独立文件空间' : disk.path">{{ isVirtual(disk) ? '我的文件空间' : `本地磁盘 (${disk.path})` }}</span>
               </div>
               <!-- 挂载点和路径通常是同一个值，重复显示只会挤占标题 -->
               <span v-if="disk.mountpoint && disk.mountpoint !== disk.path" class="disk-mount"
@@ -71,8 +84,8 @@ const getProgressColor = (percent: number) => {
             <div class="disk-progress">
               <n-progress
                   type="line"
-                  :percentage="Number(disk.used_percent.toFixed(1))"
-                  :color="getProgressColor(disk.used_percent)"
+                  :percentage="percentage(disk)"
+                  :color="getProgressColor(percentage(disk))"
                   :indicator-placement="'inside'"
                   :height="16"
                   border-radius="8px"
@@ -80,8 +93,9 @@ const getProgressColor = (percent: number) => {
             </div>
 
             <div class="disk-info">
-              <span>可用 {{ disk.free_gb }} / 共 {{ disk.total_gb }}</span>
+              <span>可用 {{ formatBytes(disk.free) }} / 共 {{ formatBytes(disk.total) }}</span>
             </div>
+            <div v-if="isVirtual(disk)" class="disk-info">已用容量包含文件、上传预占和已分配给下级的额度</div>
 
             <template #footer>
               <div class="disk-action">
@@ -114,6 +128,9 @@ const getProgressColor = (percent: number) => {
 
 .header {
   margin-bottom: 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .header h2 {

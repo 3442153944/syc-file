@@ -9,6 +9,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"syc-file/config"
 	"syc-file/internal/model"
@@ -101,11 +102,12 @@ func TestAndroidCheckStillIgnoresDesktopArchitectures(t *testing.T) {
 func TestSameVersionDifferentTargetsDoNotOverwrite(t *testing.T) {
 	db, r := fixture(t)
 	old := config.Conf.File.AllowedPaths
-	config.Conf.File.AllowedPaths = []string{"/tmp"}
+	dir := t.TempDir()
+	config.Conf.File.AllowedPaths = []string{dir}
 	t.Cleanup(func() { config.Conf.File.AllowedPaths = old })
 	sig := base64.StdEncoding.EncodeToString(make([]byte, 128))
 	for _, arch := range []string{"x86_64", "aarch64", "x86_64"} {
-		payload := map[string]interface{}{"platform": "windows", "arch": arch, "bundle_type": "nsis", "signature": sig, "version_code": 101, "version_name": "0.1.1", "file_path": "/tmp/setup.exe", "file_name": "setup.exe", "enabled": false}
+		payload := map[string]interface{}{"platform": "windows", "arch": arch, "bundle_type": "nsis", "signature": sig, "version_code": 101, "version_name": "0.1.1", "file_path": filepath.Join(dir, "setup.exe"), "file_name": "setup.exe", "enabled": false}
 		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest("POST", "/publish", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

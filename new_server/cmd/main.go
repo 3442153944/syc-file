@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syc-file/config"
+	"syc-file/internal/account"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
 	filehandler "syc-file/internal/handler/file"
@@ -78,7 +79,7 @@ func main() {
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type", "Token", "Device-Id"},
-		ExposeHeaders:    []string{"New-Token", "Token-Refreshed"},
+		ExposeHeaders:    []string{"New-Token", "Token-Refreshed", "Content-Disposition"},
 		AllowCredentials: false,
 		MaxAge:           86400 * time.Second,
 	}))
@@ -117,6 +118,8 @@ func main() {
 		&model.DictData{},
 		&model.OperationLog{},
 		&model.StorageConfig{},
+		&model.StoragePool{},
+		&model.UploadSpace{},
 		&model.ShareRecord{},
 		&model.SyncFolder{},
 		&model.AppRelease{},
@@ -199,7 +202,10 @@ func main() {
 	upload_store.Init(redisClient)
 
 	//启动临时文件清理器（清理过期上传遗留的 .part）
-	filehandler.StartTempJanitor()
+	filehandler.StartTempJanitor(db)
+	account.StartCleanupWorker(db, func(uid uint) error {
+		return filehandler.CleanupAccountShares(db, redisClient, uid)
+	})
 
 	//启动分享链接清理器（30 分钟兜底扫描；每条链接另有独立协程到期自毁）
 	filehandler.StartShareLinkJanitor(db, redisClient)
@@ -236,14 +242,7 @@ func main() {
 		logger.Logger.Info("静态资源已挂载", zap.String("url", "/"+rel), zap.String("dir", filepath.Join(wd, filepath.FromSlash(rel))))
 	}
 
-	// 分享链接临时目录：与 nginx /temp/ 的 alias 保持一致。
-	// 挂载后任何直达本服务的入口（Tauri 本地、无 nginx 的开发环境）都能取到分享文件。
-	if tempPath := config.Conf.Share.TempPath; tempPath != "" {
-		if err := os.MkdirAll(tempPath, 0o755); err == nil {
-			r.Static("/temp", tempPath)
-			logger.Logger.Info("分享临时目录已挂载", zap.String("url", "/temp"), zap.String("dir", tempPath))
-		}
-	}
+	// 分享文件统一经过下载接口校验，不公开挂载临时目录。
 
 	handler.RegisterRouters(r, db, redisClient, syncEngine)
 
