@@ -14,6 +14,8 @@
 | Android `Android/` | Kotlin + Compose；Rust JNI（`sync_core_jni`） | 双向（inotify 递归 watcher） |
 | 鸿蒙 `harmony/` | ArkTS + ArkUI；Rust NAPI（`libfilecore.so`） | 仅下行 download_only（无 root、无监听） |
 
+2026-10-19 起增加**组网（WireGuard 覆盖网）**子系统：云端做协调与兜底中继，客户端之间打洞直连，网段 `172.1.0.0/16`（§9）。
+
 同步核心已闭环（三端真机验证）：base CAS、冲突保留两者、scan 离线追赶、同内容幂等吸收 / 回声抑制、物理文件缺失自愈。四端统一用 **blake3 分片上传协议**，哈希由同一份 `sync_core` 实现（cgo / 原生 / JNI / NAPI），均有纯语言回退。
 
 ---
@@ -42,6 +44,8 @@
 **一体镜像（Docker，开发中，暂不用于线上）**：`new_server/Dockerfile` 把 Go 后端 + MySQL 8.0 + Redis 打进一个镜像（不含 nginx），构建统一用 `bash new_server/docker/build.sh`（VS Code 运行配置「构建: 后端 Docker 镜像」）。首次启动由 `docker/entrypoint.sh` 生成随机 DB / Redis 密码并从范例生成 `/data/config/config.yaml`，之后改配置只需编辑数据卷再重启；默认端口 9999（改 `server.port` + `-p`）；`SYC_MODE=prod` 固定在镜像里（Gin release、不读旧 key.yaml、不托管 frpc/ddns-go），开发直接启动默认 `dev`，行为不变。
 
 **Windows 主机**：后端 / MySQL / Redis / nginx / frpc / ddns-go 均已停止，仅作客户端开发环境与数据备份。客户端域名端口不变，无需改配置。
+
+**组网（2026-10-19 上线）**：与 `syc-file` 同进程，`vpn.server_interface: syc0` 由 systemd 以 root 运行；服务器节点 `172.1.0.254/16`，UDP `51820`（WireGuard）+ `3478`（STUN-lite）需在防火墙放行。配置段 `vpn:`（pool / stun_port / server_address / server_pubkey / server_endpoint / server_interface），`server_endpoint` 留空时按客户端请求实际使用的 Host 推导，避免绑死某一个入口。私钥只在服务端存密文，解密密钥来自 `/etc/syc-file.env` 的 `SYC_VPN_MASTER_KEY`（systemd EnvironmentFile 注入）。
 
 ---
 
@@ -273,8 +277,64 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 - Android `cleartext` 全开、manifest 过度权限；DataStore 名 `secure_prefs` 实际未加密。
 - 冲突 `keep_local` 的子目录回放（Android 按根目录名回放，靠重扫兜底）。
 
+**组网（§9）待办**
+- Windows 内嵌隧道 / 自启 / NSIS 卸载清理目前仅 `cargo check` 通过，需 Windows 真机验证（重点：`wireguard.exe` 资源路径、注册表 Run 项、`syc0` 服务安装）。
+- 组网无自动化集成测试；纯 IPv4 入口无法直连服务器节点（服务器 AAAA 可达时才行）。
+- 生产路由表已初始化，新增「组网」页需在「系统管理 → 路由管理」手动补两条（`/vpn` 分组 + `views/vpn/Mesh.vue`）。
+
 **P3 / 清理**
 - 死代码：`middleware/jwt.go`（硬编码 secret）、Android `router/AppRoute.kt`、拼写 `toekn.go`；`websocket.kt` 的 package 仍为 `com.example.filesync.data.sync`；空目录 `repository/ service/ internal_config/ pkg/{e,jwtutil,response}`；handler 的 `redisClient` 形参多处未使用。
 - `init_mysql.sql` 与 AutoMigrate 漂移（见 §3.5）；README 仍写 PostgreSQL。
 
 **下一步（按记录顺序）**：文件底层操作统一到 Rust 核心（仅记录，未实现）→ 安卓重编译验证 → 鸿蒙对齐。
+
+
+---
+
+## 9. 组网（WireGuard 覆盖网，2026-10-19）
+
+目标：多设备组成一张虚拟内网，同组设备同网段二层互通、跨组按三层路由；管理员决定谁能互通；能打洞就直连，打不通由云端中继，避免绕路。云端只做协调与兜底，不承载正常流量。
+
+### 9.1 数据模型（`new_server/internal/model/vpn.go`）
+
+`VPNOrg`（机构）→ `VPNGroup`（组，各自一个 /24）→ `VPNMember`（用户+组+角色）→ `VPNDevice`（设备身份）。另有 `VPNEnrollToken`（一次性入组码）、`VPNInterop`（机构间互通策略）、`VPNDeviceHistory`。关键字段：`address`（覆盖网 IP）、`pubkey`、`priv_key_enc`（AES-GCM 密文）、`key_source`（server/client）、`endpoint`（心跳上报的公网地址）、`last_seen`、`session_expires_at`、`suspended_until`、`status`（active/suspended/banned/revoked）。
+
+### 9.2 地址与互通（`internal/vpn/acl.go`、`pool.go`）
+
+- 池 `172.1.0.0/16`，按组切 /24；服务器固定 `172.1.0.254`。
+- 同组设备互相可见；`org_admin` 角色对全机构可见；两个机构间由 `VPNInterop` 决定 `admins_only` / `full`。
+- 设备地址**持久**：分配时统计该组所有状态（含 revoked），吊销不交回地址；只有 `DELETE /v1/vpn/devices/:id`（本人或管理员）才释放。
+
+### 9.3 密钥与身份
+
+- X25519（clamp 后）生成密钥对；私钥用 AES-256-GCM 加密入库，AAD 绑 `device_id`；主密钥只从环境变量 `SYC_VPN_MASTER_KEY` 读（见 `keys.go`）。
+- 设备入组有两条路：管理端发一次性入组码（`enroll` → `register`），或桌面端 `POST /v1/vpn/auto-enroll`（按登录 `Device-Id` 自动选组登记；管理员无组时自动落到第一个组/默认组）。
+- **身份不落盘**：`GET /v1/vpn/identity` 用当前 JWT 换回解密后的私钥，启动隧道时现取现用；私钥仍只在服务端存密文。
+- 会话有效期 `session_expires_at`：注册写入、`heartbeat`（30s）续期；`peers` / `server-peers` 只返回未过期设备。会话过期只移除 peer，设备与地址保留。
+
+### 9.4 服务器 peer 维护（`internal/vpn/reconciler.go`）
+
+配置 `vpn.server_interface`（生产 `syc0`）后，后端每 30s 对账：会话有效的设备补进服务器 WireGuard 接口，过期/吊销/停用的移除；`suspended` 到期自动恢复 `active`。只用 `172.1.x/32` 明细路由，不接管默认路由与 DNS。另有 `kick`（即时移除 peer，可重连）/ `suspend`（定时）/ `ban`（需解封）/ `release`（删设备并释放 IP）四个管理动作。
+
+### 9.5 API（均在 `/v1/vpn`）
+
+| 域 | 端点 |
+|---|---|
+| 设备 | `enroll`、`register`、`auto-enroll`、`peers`、`heartbeat`、`identity`、`link`、`devices/my`、`DELETE devices/:id`（释放） |
+| 管理 | `orgs`、`groups`、`members`、`devices`、`revoke`、`interops`、`server-peers`、`overview`（组网总览） |
+| 生命周期 | `POST admin/devices/:id/{kick,suspend,ban}`、`DELETE admin/devices/:id` |
+| 探测 | UDP `3478`：发 `SYC?` 回 `SYC1 <ip:port>`（`stun.go`） |
+
+### 9.6 客户端
+
+- **CLI** `filesync-cli/`（bin `syc`）：`login/status/devices/groups/enroll/register/peers/link/nat/wg-config/up/down/netcheck/ping`；`up` 用 `wg setconf` + 临时 `ListenPort=0`，`wg-config` 输出 wg-quick 格式；`netcheck` 一次看公网端点、链路模式、对端；`ping` 可 `--iface` 强制走隧道。
+- **桌面端**：Tauri 命令 `vpn_nat/link/wg_config/up/down/stun/ping/ping_stream/tunnel_status/up_embedded/down_embedded`；独立「组网」页（`views/vpn/Mesh.vue`）：总览（服务器置顶）、任意地址 ping（逐行实时输出）、踢/停用（可选时长）/封禁/释放。`NodeSwitcher` 显示直连/中继。
+- **Windows 内嵌隧道**：`src-tauri/resources/wireguard/wireguard.exe` 固定 **WireGuard for Windows 1.1.1**（仓库入库，sha256 见 `VERSION`），只认自依赖、不回退 `Program Files`；生成配置写 `%ProgramData%\syc\syc0.conf` 后调 `/installtunnelservice`，只操作 `syc0`，不影响用户其它 WireGuard 隧道。
+- **自启与自动组网**：`tauri-plugin-autostart`（Windows 注册表 / Linux `~/.config/autostart`）；启动后若开关开启且隧道未起，自动用会话换身份拉起隧道；NSIS 卸载钩子清理 Run 项、`syc0` 服务与 ProgramData 配置。
+
+### 9.7 验证与边界
+
+- 已验证：`internal/vpn` 单测 21 项；E2E 32/32、角色 23/23；锥形 NAT 打洞双向 5039 包；对称 NAT 随机端口 0 包、中继 928 字节；端口预测无干扰 100%、1 个并发 38–48%、2 个 6–15%、5 个约 0%；netns 数据面握手成功、`ping 0% 丢包`。
+- 边界：**纯 IPv4 入口连不到服务器节点**（`server_endpoint` 解析 AAAA 时），但客户端之间仍可 v4 打洞；Windows 内嵌分支需在真机构建验证；组网尚无自动化集成测试。
+- 设计细节与 NAT 实验数据：工作区 `docs/mesh-vpn-design.md`（不入仓库）。
+
