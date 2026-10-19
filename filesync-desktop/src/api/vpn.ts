@@ -30,15 +30,8 @@ export async function ensureVpnDevice(): Promise<string> {
     const cached = localStorage.getItem('syc_vpn_device')
     if (cached) return cached
 
-    const data = await httpPost<{ device_id: string; private_key?: string }>('/vpn/auto-enroll')
+    const data = await httpPost<{ device_id: string }>('/vpn/auto-enroll')
     const device = data?.device_id
-    // 首次登记才有私钥：交给 Tauri 保存，Windows 内嵌隧道启动时需要
-    if (device && data?.private_key) {
-        try {
-            const {invoke} = await import('@tauri-apps/api/core')
-            await invoke('vpn_save_key', {device, key: data.private_key})
-        } catch { /* Web 模式没有 Tauri，忽略 */ }
-    }
     if (!device) throw new Error('自动入组响应缺少 device_id')
     localStorage.setItem('syc_vpn_device', device)
     return device
@@ -92,12 +85,27 @@ export interface VpnPeersResult {
     peers: { pubkey: string; allowed_ips: string[]; endpoint?: string }[]
 }
 
-/** Windows：用内嵌/已安装的 WireGuard 启动隧道（Linux 请用 syc up）。 */
+interface VpnIdentity {
+    device_id: string
+    address: string
+    subnet: string
+    pubkey: string
+    private_key: string
+}
+
+/**
+ * Windows：用内嵌/已安装的 WireGuard 启动隧道（Linux 请用 syc up）。
+ * 私钥不落盘：每次用当前 JWT 向 /vpn/identity 换取，身份跟着会话走。
+ */
 export async function startEmbeddedTunnel(device: string): Promise<string> {
-    const data = await httpGet<VpnPeersResult>('/vpn/peers', {device_id: device})
+    const [identity, data] = await Promise.all([
+        httpGet<VpnIdentity>('/vpn/identity', {device_id: device}),
+        httpGet<VpnPeersResult>('/vpn/peers', {device_id: device}),
+    ])
     const {invoke} = await import('@tauri-apps/api/core')
     return invoke<string>('vpn_up_embedded', {
         device,
+        private_key: identity.private_key,
         address: data.self.address,
         subnet: data.self.subnet,
         keepalive: data.self.keepalive ?? 5,

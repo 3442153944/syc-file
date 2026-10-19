@@ -200,29 +200,6 @@ pub fn vpn_tunnel_status() -> Result<bool, String> {
     }
 }
 
-/// 保存设备私钥到应用配置目录（Windows: %APPDATA%\<app>\vpn\<device>.key）。
-/// auto-enroll 只在首次返回私钥，必须在这里落盘，后续启动隧道才能用。
-#[tauri::command]
-pub fn vpn_save_key(app: tauri::AppHandle, device: String, key: String) -> Result<(), String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("vpn");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{device}.key"));
-    std::fs::write(&path, key.trim()).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn read_key(app: &tauri::AppHandle, device: &str) -> Result<String, String> {
-    let path = app
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?
-        .join("vpn")
-        .join(format!("{device}.key"));
-    std::fs::read_to_string(&path)
-        .map(|s| s.trim().to_string())
-        .map_err(|e| format!("读不到设备私钥 {}: {e}", path.display()))
-}
-
 #[derive(serde::Deserialize)]
 pub struct VpnPeerInput {
     pub pubkey: String,
@@ -236,6 +213,7 @@ pub struct VpnPeerInput {
 pub fn vpn_up_embedded(
     app: tauri::AppHandle,
     device: String,
+    private_key: String,
     address: String,
     subnet: String,
     keepalive: Option<u32>,
@@ -243,12 +221,12 @@ pub fn vpn_up_embedded(
 ) -> Result<String, String> {
     #[cfg(not(windows))]
     {
-        let _ = (app, device, address, subnet, keepalive, peers);
+        let _ = (app, device, private_key, address, subnet, keepalive, peers);
         Err("内嵌隧道仅 Windows 使用；Linux 请用 syc up".to_string())
     }
     #[cfg(windows)]
     {
-        let key = read_key(&app, &device)?;
+        let key = private_key;
         let bits = subnet.rsplit('/').next().unwrap_or("24");
         let ka = keepalive.unwrap_or(5);
         let mut conf = String::new();

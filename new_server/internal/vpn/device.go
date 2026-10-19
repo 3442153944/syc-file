@@ -722,3 +722,33 @@ func (a *API) ReleaseDevice(c *gin.Context) {
 	}
 	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }
+
+// Identity 用当前会话换取本设备的 WireGuard 身份（私钥由服务端解密后下发）。
+// 私钥只存服务端密文，客户端不落盘；身份生命周期跟 JWT/设备记录走。
+func (a *API) Identity(c *gin.Context) {
+	u, ok := a.currentUser(c)
+	if !ok {
+		return
+	}
+	deviceID := strings.TrimSpace(c.Query("device_id"))
+	var dev model.VPNDevice
+	if err := a.db.Where("user_id = ? AND device_id = ?", u.ID, deviceID).First(&dev).Error; err != nil {
+		response.Fail(c, 404, "设备未登记")
+		return
+	}
+	if strings.TrimSpace(dev.PrivKeyEnc) == "" {
+		response.Fail(c, 409, "该设备是客户端托管私钥，服务端无法下发")
+		return
+	}
+	priv, err := DecryptPrivate(mustMasterKey(), dev.PrivKeyEnc, dev.DeviceID)
+	if err != nil {
+		response.Fail(c, 500, "私钥解密失败（主密钥是否变更？）")
+		return
+	}
+	var group model.VPNGroup
+	a.db.First(&group, dev.GroupID)
+	response.OK(c, gin.H{
+		"device_id": dev.DeviceID, "address": dev.Address, "pubkey": dev.PubKey,
+		"subnet": group.Subnet, "private_key": priv,
+	})
+}

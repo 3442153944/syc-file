@@ -20,6 +20,7 @@ func RegisterVPNRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	g.GET("/devices/my", h.MyDevices)
 	g.DELETE("/devices/:id", h.ReleaseDevice)
 	g.GET("/link", h.Link)
+	g.GET("/identity", h.Identity)
 
 	// 管理侧
 	a := g.Group("/admin")

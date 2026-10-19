@@ -245,7 +245,6 @@ pub fn run() {
             vpn::vpn_ping,
             vpn::vpn_ping_stream,
             vpn::vpn_tunnel_status,
-            vpn::vpn_save_key,
             vpn::vpn_up_embedded,
             vpn::vpn_down_embedded,
             transfers::get_transfers,
