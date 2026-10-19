@@ -268,6 +268,13 @@ pub fn vpn_up_embedded(
 #[cfg(windows)]
 fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let mut candidates = Vec::new();
+    // 开发模式：直接用源码树里的那份，不依赖安装目录或 Program Files
+    candidates.push(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("wireguard")
+            .join("wireguard.exe"),
+    );
     if let Ok(res) = app.path().resource_dir() {
         candidates.push(res.join("wireguard").join("wireguard.exe"));
         candidates.push(res.join("wireguard.exe"));
