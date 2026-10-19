@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
+	"syc-file/pkg/token"
 )
 
 // DSH（DeepSeek Harness）访问令牌。
@@ -162,6 +164,35 @@ func requestAuthority(c *gin.Context) string {
 	return strings.ToLower(host)
 }
 
+// dshTokenMinLevel 允许管理/兑换 DSH 令牌的最低权限级别。
+// 默认 3（超级管理员）：普通管理员（level 2）既看不到入口，也不能签发或兑换。
+func dshTokenMinLevel() int8 {
+	v := strings.TrimSpace(os.Getenv("DSH_TOKEN_MIN_LEVEL"))
+	if v == "" {
+		return model.LevelSuper
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < int(model.LevelUser) || n > int(model.LevelSuper) {
+		return model.LevelSuper
+	}
+	return int8(n)
+}
+
+// requireDSHTokenAdmin 令牌管理接口的鉴权：按等级判定，role=="admin" 不再足够。
+func requireDSHTokenAdmin(c *gin.Context) (uint, bool) {
+	claimsAny, exists := c.Get("UserInfo")
+	if !exists || claimsAny == nil {
+		jsonErr(c, 401, "未授权")
+		return 0, false
+	}
+	claims := claimsAny.(*token.Claims)
+	if claims.EffectiveLevel() < dshTokenMinLevel() {
+		jsonErr(c, 403, "权限不足，仅超级管理员可管理 DSH 令牌")
+		return 0, false
+	}
+	return uint(claims.UserID), true
+}
+
 // ── 管理端接口 ──────────────────────────────────────────────
 
 type dshTokenDTO struct {
@@ -184,7 +215,7 @@ func dshTokenStatus(t model.DSHToken, now time.Time) string {
 
 // ListDSHTokens GET /v1/admin/dsh/tokens
 func (h *APIHandler) ListDSHTokens(c *gin.Context) {
-	if _, ok := requireAdmin(c); !ok {
+	if _, ok := requireDSHTokenAdmin(c); !ok {
 		return
 	}
 	p := parsePage(c)
@@ -208,7 +239,7 @@ func (h *APIHandler) ListDSHTokens(c *gin.Context) {
 
 // CreateDSHToken POST /v1/admin/dsh/tokens
 func (h *APIHandler) CreateDSHToken(c *gin.Context) {
-	uid, ok := requireAdmin(c)
+	uid, ok := requireDSHTokenAdmin(c)
 	if !ok {
 		return
 	}
@@ -284,7 +315,7 @@ func (h *APIHandler) CreateDSHToken(c *gin.Context) {
 
 // RevokeDSHToken DELETE /v1/admin/dsh/tokens/:id
 func (h *APIHandler) RevokeDSHToken(c *gin.Context) {
-	if _, ok := requireAdmin(c); !ok {
+	if _, ok := requireDSHTokenAdmin(c); !ok {
 		return
 	}
 	id, ok := idParam(c)
@@ -342,6 +373,13 @@ func (h *APIHandler) DSHAuth(c *gin.Context) {
 	authority := requestAuthority(c)
 	if !dshAllowedHosts()[authority] {
 		c.String(http.StatusForbidden, "不支持的访问入口")
+		return
+	}
+	// 令牌只在签发者仍具备管理级别时有效：签发人被降级、停用或删除后，旧链接立即失效。
+	var creator model.User
+	if err := h.db.Select("id", "level", "status").First(&creator, row.CreatedBy).Error; err != nil ||
+		creator.Status != 1 || creator.Level < dshTokenMinLevel() {
+		c.String(http.StatusForbidden, "令牌已失效")
 		return
 	}
 	name, value, expires, err := dshSessionCookie(authority, dshCookieMaxAgeDays*24*time.Hour)
