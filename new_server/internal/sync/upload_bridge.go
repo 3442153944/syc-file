@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 )
 
 // findFolderForPath 找到包含 fullPath 的启用中同步文件夹，返回文件夹、相对路径（/ 分隔）、是否命中。
@@ -137,10 +137,13 @@ func (e *Engine) HandleMirrorEdit(userID uint, fullPath, fileName string, size i
 		return false, nil
 	}
 	trunkPath := joinRemotePath(folder.RemotePath, rel)
-	if !config.Conf.IsPathAllowed(trunkPath) {
+	if err := storage.Authorize(e.db, userID, trunkPath); err != nil {
 		return false, fmt.Errorf("path not allowed: %s", trunkPath)
 	}
-	if err := copyFileAtomic(fullPath, trunkPath); err != nil {
+	if err := storage.Authorize(e.db, userID, fullPath); err != nil {
+		return false, err
+	}
+	if err := storage.Allocate(e.db, userID, trunkPath, size, func() error { return copyFileAtomic(fullPath, trunkPath) }); err != nil {
 		return false, fmt.Errorf("复制到 trunk 失败: %w", err)
 	}
 	r := FileChangeReport{

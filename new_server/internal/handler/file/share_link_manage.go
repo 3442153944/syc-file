@@ -2,6 +2,7 @@ package file
 
 import (
 	"net/http"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -18,7 +19,7 @@ func HandlerFuncShareLinkList(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
@@ -28,14 +29,14 @@ func HandlerFuncShareLinkList(db *gorm.DB) gin.HandlerFunc {
 			PageSize int `json:"pageSize"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "参数错误", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "参数错误", nil)
 			return
 		}
 
 		var total int64
 		if err := db.Model(&model.ShareLink{}).Where("user_id = ?", userID).Count(&total).Error; err != nil {
 			logger.Logger.Error("查询分享链接总数失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询分享链接失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询分享链接失败", nil)
 			return
 		}
 
@@ -47,19 +48,15 @@ func HandlerFuncShareLinkList(db *gorm.DB) gin.HandlerFunc {
 		var list []model.ShareLink
 		if err := query.Find(&list).Error; err != nil {
 			logger.Logger.Error("查询分享链接失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询分享链接失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询分享链接失败", nil)
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "ok",
-			"data": gin.H{
-				"list":     list,
-				"total":    total,
-				"pageNum":  req.PageNum,
-				"pageSize": req.PageSize,
-			},
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
+			"list":     list,
+			"total":    total,
+			"pageNum":  req.PageNum,
+			"pageSize": req.PageSize,
 		})
 	}
 }
@@ -70,7 +67,7 @@ func HandlerFuncShareLinkRevoke(db *gorm.DB, redisClient *redis.Client) gin.Hand
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
@@ -79,28 +76,28 @@ func HandlerFuncShareLinkRevoke(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			ShareCode string `json:"share_code"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil || req.ShareCode == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少必要参数 share_code", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "缺少必要参数 share_code", nil)
 			return
 		}
 
 		var link model.ShareLink
 		if err := db.Where("share_code = ?", req.ShareCode).First(&link).Error; err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 404, "message": "分享链接不存在", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 404, "分享链接不存在", nil)
 			return
 		}
 		if link.UserID != userID {
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权操作该分享链接", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 403, "无权操作该分享链接", nil)
 			return
 		}
 		if link.Status != shareStatusActive {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "该分享链接已失效", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "该分享链接已失效", nil)
 			return
 		}
 
 		destroyShareLink(db, redisClient, link.ShareCode, resolveShareTempPath(link), shareStatusRevoked)
 
 		logger.Logger.Info("分享链接已吊销", zap.Uint("user_id", userID), zap.String("share_code", link.ShareCode))
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", nil)
 	}
 }
 

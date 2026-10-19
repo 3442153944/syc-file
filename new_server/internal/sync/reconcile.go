@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/internal/thumb"
 	"syc-file/pkg/logger"
 )
@@ -24,6 +25,9 @@ import (
 // 设备回报的 complete 会把 hash 填回 trunk）；trunk 已有的路径不动，避免覆盖真实同步产生的
 // 版本历史。收编完成后立即给该用户所有在线设备派发缺失内容，不必等它们下次重连触发 scan。
 func (e *Engine) ReconcileFolderFilesystem(folder model.SyncFolder) (adopted int, err error) {
+	if err := storage.Authorize(e.db, folder.UserID, folder.RemotePath); err != nil {
+		return 0, err
+	}
 	root := filepath.Clean(folder.RemotePath)
 	info, statErr := os.Stat(root)
 	if statErr != nil || !info.IsDir() {
@@ -39,6 +43,12 @@ func (e *Engine) ReconcileFolderFilesystem(folder model.SyncFolder) (adopted int
 			return nil
 		}
 		name := d.Name()
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() && (name == ".uploads" || name == ".children" || name == ".versions") {
+			return filepath.SkipDir
+		}
 		if d.IsDir() && (name == ".synctmp" || name == ".syncpending") {
 			return filepath.SkipDir
 		}

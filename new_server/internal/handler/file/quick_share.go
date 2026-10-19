@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -31,7 +32,7 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
@@ -43,7 +44,7 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 
 		qs := config.Conf.QuickShare
 		if qs.BasePath == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "未配置粘贴快传目录 quick_share.base_path", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "未配置粘贴快传目录 quick_share.base_path", nil)
 			return
 		}
 		maxCapacity := qs.MaxCapacityBytes
@@ -54,12 +55,12 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 		used, err := quickShareUsedBytes(db, userID)
 		if err != nil {
 			logger.Logger.Error("查询快传配额失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询配额失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询配额失败", nil)
 			return
 		}
 		remaining := maxCapacity - used
 		if remaining <= 0 {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "快速共享空间已满，请等待旧分享过期或前往分享管理提前清理", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "快速共享空间已满，请等待旧分享过期或前往分享管理提前清理", nil)
 			return
 		}
 
@@ -78,15 +79,15 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 		if err != nil {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "超出剩余配额", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "超出剩余配额", nil)
 				return
 			}
 			logger.Logger.Error("读取粘贴内容失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "读取内容失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "读取内容失败", nil)
 			return
 		}
 		if size == 0 {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "内容为空", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "内容为空", nil)
 			return
 		}
 
@@ -106,14 +107,14 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 				_ = os.Remove(diskPath)
 			}
 			logger.Logger.Error("写入快传分享记录失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入分享记录失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "写入分享记录失败", nil)
 			return
 		}
 		if !onDisk {
 			quickShareMemStore.Store(shareCode, data)
 		}
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": respData})
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", respData)
 	}
 }
 
@@ -122,7 +123,7 @@ func HandlerFuncQuickShareQuota(db *gorm.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
@@ -130,7 +131,7 @@ func HandlerFuncQuickShareQuota(db *gorm.DB) gin.HandlerFunc {
 		used, err := quickShareUsedBytes(db, userID)
 		if err != nil {
 			logger.Logger.Error("查询快传配额失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询配额失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询配额失败", nil)
 			return
 		}
 		maxCapacity := config.Conf.QuickShare.MaxCapacityBytes
@@ -138,13 +139,9 @@ func HandlerFuncQuickShareQuota(db *gorm.DB) gin.HandlerFunc {
 			maxCapacity = defaultQuickShareCapacityBytes
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "ok",
-			"data": gin.H{
-				"used_bytes": used,
-				"max_bytes":  maxCapacity,
-			},
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
+			"used_bytes": used,
+			"max_bytes":  maxCapacity,
 		})
 	}
 }

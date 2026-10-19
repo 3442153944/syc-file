@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"syc-file/pkg/response"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,7 +35,7 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
@@ -48,7 +49,7 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		deviceID := firstNonEmpty(req.DeviceID, c.Query("device_id"), c.GetHeader("Device-Id"), c.PostForm("device_id"))
 		uploadID := firstNonEmpty(req.UploadID, c.Query("upload_id"), c.GetHeader("Upload-Id"), c.PostForm("upload_id"))
 		if uploadID == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少 upload_id", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "缺少 upload_id", nil)
 			return
 		}
 
@@ -57,15 +58,21 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		ctx := context.Background()
 		sess, err := upload_store.Global.Get(ctx, uploadID)
 		if errors.Is(err, upload_store.ErrNotFound) {
-			c.JSON(http.StatusOK, gin.H{"code": 404, "message": "会话不存在，请重新初始化上传", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 404, "会话不存在，请重新初始化上传", nil)
 			return
 		}
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询会话失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询会话失败", nil)
 			return
 		}
 		if sess.UserID != userID {
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该上传会话", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 403, "无权访问该上传会话", nil)
+			return
+		}
+		if !sess.QuickShare && !checkFilePath(c, db, sess.TargetPath) {
+			return
+		}
+		if !checkUploadStage(c, db, sess) {
 			return
 		}
 
@@ -73,15 +80,15 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		if sess.Status == "completed" && sess.QuickShare {
 			var result gin.H
 			if json.Unmarshal([]byte(sess.ResultJSON), &result) != nil {
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "完成结果损坏"})
+				response.WriteHTTP(c, http.StatusOK, 500, "完成结果损坏", nil)
 				return
 			}
 			shareCode, _ := result["share_code"].(string)
 			if _, active := lookupShareLink(db, redisClient, shareCode); !active {
-				c.JSON(http.StatusOK, gin.H{"code": 404, "message": "分享已失效"})
+				response.WriteHTTP(c, http.StatusOK, 404, "分享已失效", nil)
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": result})
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", result)
 			return
 		}
 
@@ -89,21 +96,21 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		bitmap, _ := upload_store.Global.Bitmap(ctx, uploadID)
 		missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
 		if len(missing) > 0 {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "分片未收齐", "data": gin.H{
+			response.WriteHTTP(c, http.StatusOK, 400, "分片未收齐", gin.H{
 				"missing": missing, "received": sess.ChunkCount - len(missing), "chunk_count": sess.ChunkCount,
-			}})
+			})
 			return
 		}
 
 		// 解码会话里的叶子哈希与树根，做整体校验
 		leaves, err := hex.DecodeString(sess.Leaves)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "会话叶子哈希损坏", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "会话叶子哈希损坏", nil)
 			return
 		}
 		expectedRoot, err := hex.DecodeString(sess.MerkleRoot)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "会话树根损坏", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "会话树根损坏", nil)
 			return
 		}
 
@@ -116,16 +123,16 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 				// 定位到坏块：清其置位，让客户端只重传该片
 				_ = upload_store.Global.ClearChunk(ctx, uploadID, int(badIndex))
 				logger.Logger.Warn("finalize 分片校验失败", zap.String("upload_id", uploadID), zap.Int64("bad_index", badIndex))
-				c.JSON(http.StatusOK, gin.H{"code": 422, "message": "分片校验失败，请重传指定分片", "data": gin.H{
+				response.WriteHTTP(c, http.StatusOK, 422, "分片校验失败，请重传指定分片", gin.H{
 					"bad_index": badIndex,
-				}})
+				})
 			case errors.Is(err, synccore.ErrRootMismatch), errors.Is(err, synccore.ErrSizeMismatch):
 				// 树根/尺寸对不上：按既定取舍让客户端整份重传
 				logger.Logger.Warn("finalize 整体校验失败", zap.String("upload_id", uploadID), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 422, "message": "整体校验失败，请重新上传", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 422, "整体校验失败，请重新上传", nil)
 			default:
 				logger.Logger.Error("finalize 失败", zap.String("upload_id", uploadID), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "文件校验失败", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, "文件校验失败", nil)
 			}
 			return
 		}
@@ -135,14 +142,17 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		if sess.FileHash != "" && fileHashHex != sess.FileHash {
 			logger.Logger.Warn("整文件哈希与描述不一致", zap.String("upload_id", uploadID),
 				zap.String("got", fileHashHex), zap.String("want", sess.FileHash))
-			c.JSON(http.StatusOK, gin.H{"code": 422, "message": "整体校验失败，请重新上传", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 422, "整体校验失败，请重新上传", nil)
 			return
 		}
 
 		// 原子落盘
+		if !sess.QuickShare && !checkFilePath(c, db, sess.TargetPath) {
+			return
+		}
 		if err := synccore.Move(sess.TempPath, sess.TargetPath); err != nil {
 			logger.Logger.Error("落盘失败", zap.String("upload_id", uploadID), zap.String("dst", sess.TargetPath), zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "落盘失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "落盘失败", nil)
 			return
 		}
 
@@ -156,23 +166,23 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 				_ = upload_store.Global.Delete(ctx, uploadID)
 				_ = os.Remove(sess.TargetPath)
 				logger.Logger.Error("写入快传分享记录失败", zap.String("upload_id", uploadID), zap.Error(serr))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "写入分享记录失败", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, "写入分享记录失败", nil)
 				return
 			}
 
 			resultJSON, encodeErr := json.Marshal(respData)
 			if encodeErr != nil {
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "序列化完成结果失败"})
+				response.WriteHTTP(c, http.StatusOK, 500, "序列化完成结果失败", nil)
 				return
 			}
 			if err := upload_store.Global.Complete(ctx, uploadID, string(resultJSON), time.Duration(expireMinutes)*time.Minute); err != nil {
 				logger.Logger.Error("保存快传完成结果失败", zap.String("upload_id", uploadID), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "保存完成结果失败"})
+				response.WriteHTTP(c, http.StatusOK, 500, "保存完成结果失败", nil)
 				return
 			}
 			logger.Logger.Info("快传分片上传完成", zap.Uint("user_id", userID), zap.String("path", sess.TargetPath),
 				zap.Int64("size", sess.TotalSize))
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": respData})
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", respData)
 			return
 		}
 
@@ -216,10 +226,10 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		logger.Logger.Info("分片上传完成", zap.Uint("user_id", userID), zap.String("path", sess.TargetPath),
 			zap.Int64("size", sess.TotalSize), zap.Uint64("file_id", fileID), zap.Bool("synced", handled))
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "上传成功", "data": gin.H{
+		response.WriteHTTP(c, http.StatusOK, 200, "上传成功", gin.H{
 			"file_id": fileID, "file_name": sess.FileName, "storage_path": sess.TargetPath,
 			"file_size": sess.TotalSize, "file_hash": fileHashHex, "synced": handled,
-		}})
+		})
 	}
 }
 

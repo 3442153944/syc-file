@@ -1,0 +1,9 @@
+# 内嵌 ffmpeg 版本锁（归档随仓库提交，构建只校验，不联网）
+#
+# 来源：BtbN/FFmpeg-Builds 的 master 快照，Windows 与 Linux 为同一构建批次。
+# 升级步骤见同目录 README.md。
+version=N-127650-geceaa54a38-20261018
+built=2026-10-18
+source=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+linux_amd64_sha256=6150c1deeccc767ad9d9a26bab5071e6a1fdecbb491b9f727d6b19a4e2d97499
+windows_amd64_sha256=0f8aa57f5e8b49110fee71d2cff61c9e0c5fd09064d3e4f61c6355379ccea8df

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syc-file/pkg/response"
 	gosync "sync"
 	"unicode/utf8"
 
@@ -16,9 +17,10 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
+	"syc-file/internal/storage"
 	"syc-file/internal/sync"
-	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/token"
 )
 
@@ -183,11 +185,11 @@ func textFullPath(path, name string) string {
 }
 
 func textFail(c *gin.Context, e *textError) {
-	c.JSON(http.StatusOK, gin.H{"code": e.code, "message": e.msg, "data": nil})
+	response.WriteHTTP(c, http.StatusOK, e.code, e.msg, nil)
 }
 
 // resolveTextTarget 校验登录、参数、扩展名、路径白名单，返回完整路径。失败时已写好响应。
-func resolveTextTarget(c *gin.Context, path, name string) (string, *token.Claims, bool) {
+func resolveTextTarget(c *gin.Context, db *gorm.DB, path, name string) (string, *token.Claims, bool) {
 	claimsAny, ok := c.Get("UserInfo")
 	if !ok || claimsAny == nil {
 		textFail(c, &textError{401, "请先登录"})
@@ -203,8 +205,9 @@ func resolveTextTarget(c *gin.Context, path, name string) (string, *token.Claims
 		return "", nil, false
 	}
 	full := textFullPath(path, name)
-	if !isPathAllowedDownload(full) {
-		textFail(c, &textError{403, "无权访问该路径"})
+	var allowed bool
+	full, allowed = resolveFilePath(c, db, full)
+	if !allowed {
 		return "", nil, false
 	}
 	return full, claims, true
@@ -213,7 +216,7 @@ func resolveTextTarget(c *gin.Context, path, name string) (string, *token.Claims
 // HandlerFuncTextRead GET /v1/file/text/read?path=&name=
 func HandlerFuncTextRead(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		full, _, ok := resolveTextTarget(c, c.Query("path"), c.Query("name"))
+		full, _, ok := resolveTextTarget(c, db, c.Query("path"), c.Query("name"))
 		if !ok {
 			return
 		}
@@ -222,7 +225,7 @@ func HandlerFuncTextRead(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 			textFail(c, terr)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": snap})
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", snap)
 	}
 }
 
@@ -246,7 +249,7 @@ func HandlerFuncTextSave(db *gorm.DB, redisClient *redis.Client, engine *sync.En
 			textFail(c, &textError{400, "参数错误"})
 			return
 		}
-		full, claims, ok := resolveTextTarget(c, req.Path, req.Name)
+		full, claims, ok := resolveTextTarget(c, db, req.Path, req.Name)
 		if !ok {
 			return
 		}
@@ -268,7 +271,7 @@ func HandlerFuncTextSave(db *gorm.DB, redisClient *redis.Client, engine *sync.En
 			return
 		}
 		if !req.Force && req.BaseHash != cur.Hash {
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"saved": false, "conflict": true, "current": cur}})
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{"saved": false, "conflict": true, "current": cur})
 			return
 		}
 
@@ -283,15 +286,15 @@ func HandlerFuncTextSave(db *gorm.DB, redisClient *redis.Client, engine *sync.En
 			return
 		}
 		if newHash == cur.Hash { // 内容没变：不写盘、不升版本、不派发
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 				"saved": true, "unchanged": true, "hash": cur.Hash, "size": cur.Size, "mtime_ms": cur.MTimeMs,
-			}})
+			})
 			return
 		}
 
-		if err := writeFileAtomic(full, raw, cur.mode); err != nil {
+		if err := storage.Allocate(db, uint(claims.UserID), full, int64(len(raw)), func() error { return writeFileAtomic(full, raw, cur.mode) }); err != nil {
 			logger.Logger.Error("保存文本文件失败", zap.String("path", full), zap.Error(err))
-			textFail(c, &textError{500, "保存失败"})
+			textFail(c, &textError{400, err.Error()})
 			return
 		}
 		fi, _ := os.Stat(full)
@@ -304,9 +307,9 @@ func HandlerFuncTextSave(db *gorm.DB, redisClient *redis.Client, engine *sync.En
 		logger.Logger.Info("文本文件已保存", zap.Int64("user_id", claims.UserID), zap.String("path", full),
 			zap.Int("size", len(raw)), zap.Bool("force", req.Force), zap.Bool("synced", synced))
 
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 			"saved": true, "hash": newHash, "size": len(raw), "mtime_ms": mtimeMs, "synced": synced,
-		}})
+		})
 	}
 }
 

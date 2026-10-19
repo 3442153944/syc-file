@@ -14,7 +14,11 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/config"
+	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/response"
+	"syc-file/pkg/token"
 )
 
 type diskInfoBrief struct {
@@ -35,6 +39,38 @@ type diskInfoBrief struct {
 
 func HandlerFuncAvailableDisks(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		claims, exists := c.Get("UserInfo")
+		if !exists || claims == nil {
+			response.Fail(c, 401, "请先登录")
+			return
+		}
+		uid := uint(claims.(*token.Claims).UserID)
+		u, err := storage.User(db, uid)
+		if err != nil {
+			response.Fail(c, 403, "账号不可用")
+			return
+		}
+		if u.Level < model.LevelSuper {
+			space, err := storage.Mine(db, uid)
+			if err != nil || space.Frozen {
+				response.Fail(c, 403, "上传空间尚未分配、已到期或不可用，请联系系统管理员")
+				return
+			}
+			quota := uint64(space.QuotaBytes)
+			used := uint64(space.UsedBytes)
+			free := uint64(0)
+			if quota > used {
+				free = quota - used
+			}
+			d := diskInfoBrief{Path: space.Path, Mountpoint: space.Path, Device: space.PoolName, Total: quota, Used: used, Free: free, IsAllowed: true, IsAccessible: true}
+			d.TotalGB = formatBytesForDisk(quota)
+			d.FreeGB = formatBytesForDisk(free)
+			if quota > 0 {
+				d.UsedPercent = float64(used) / float64(quota) * 100
+			}
+			response.OK(c, gin.H{"total": 1, "allowed_count": 1, "allowed_disks": []diskInfoBrief{d}, "all_disks": []diskInfoBrief{d}})
+			return
+		}
 		var req struct {
 			DiskPath string `json:"disk_path"`
 			Detailed bool   `json:"detailed"`
@@ -50,17 +86,17 @@ func HandlerFuncAvailableDisks(db *gorm.DB, redisClient *redis.Client) gin.Handl
 			detail, err := getDetailedDiskInfo(req.DiskPath)
 			if err != nil {
 				logger.Logger.Error("获取磁盘详细信息失败", zap.String("disk", req.DiskPath), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": err.Error(), "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, err.Error(), nil)
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": detail})
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", detail)
 			return
 		}
 
 		disks, err := getBriefDiskList()
 		if err != nil {
 			logger.Logger.Error("获取磁盘列表失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "获取磁盘信息失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "获取磁盘信息失败", nil)
 			return
 		}
 
@@ -73,15 +109,11 @@ func HandlerFuncAvailableDisks(db *gorm.DB, redisClient *redis.Client) gin.Handl
 			}
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"code":    200,
-			"message": "ok",
-			"data": gin.H{
-				"total":         len(allDisks),
-				"allowed_count": len(allowedDisks),
-				"allowed_disks": allowedDisks,
-				"all_disks":     allDisks,
-			},
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
+			"total":         len(allDisks),
+			"allowed_count": len(allowedDisks),
+			"allowed_disks": allowedDisks,
+			"all_disks":     allDisks,
 		})
 	}
 }

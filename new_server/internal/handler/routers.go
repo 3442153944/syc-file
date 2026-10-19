@@ -12,6 +12,7 @@ import (
 	"syc-file/internal/sync"
 	"syc-file/internal/system"
 	"syc-file/internal/update"
+	"syc-file/internal/vpn"
 	"syc-file/internal/ws"
 )
 
@@ -19,6 +20,7 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	v1 := r.Group("/v1")
 	// 统一认证中间件：是否需要登录由配置文件 whitelist 决定，无需再手动区分路由组
 	v1.Use(middleware.Auth())
+	v1.Use(middleware.StoragePaths(db))
 
 	// 健康探测：GET/POST 都挂，客户端（桌面端灾备选路）用 GET，老客户端用 POST。
 	// 在白名单里，未登录也能打——登录页切换节点时也要能探测。
@@ -41,8 +43,12 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	update.RegisterUpdateRouter(v1, db)
 	// 管理域：用户/设备/操作日志/存储配额/角色权限/粘贴快传缓存 + 系统监控
 	admin.RegisterAdminRouter(v1, db, redisClient)
+	// DSH 令牌兑换入口：/dsh/auth?t=...，公开访问（不经过 /v1 认证）
+	admin.RegisterDSHPublicRouter(r, db)
 	// 剪贴板同步（纯转发 + Redis 短期历史，不落 MySQL）
 	clipboard.RegisterClipboardRouter(v1, redisClient)
+	// 组网：设备入组、对端下发、组与互通管理（密钥只入库，不落配置文件）
+	vpn.RegisterVPNRouter(v1, db)
 	// 注：/monitor 的 HTTP 路由在 admin.RegisterAdminRouter 里注册，此处不要重复挂
 	// （重复注册同一路径 gin 会直接 panic）。实时刷新走 WS 推送（monitor/broadcaster.go）。
 }

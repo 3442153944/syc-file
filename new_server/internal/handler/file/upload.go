@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -14,6 +15,7 @@ import (
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/internal/ws"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/token"
@@ -23,7 +25,7 @@ func HandlerFuncUpload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userClaims := claims.(*token.Claims)
@@ -42,17 +44,17 @@ func HandlerFuncUpload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 			req.Action = c.PostForm("action")
 		} else {
 			if err := c.ShouldBindJSON(&req); err != nil {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "参数解析失败", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "参数解析失败", nil)
 				return
 			}
 		}
 
 		if req.Path == "" || req.Name == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少必要参数 path 或 name", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "缺少必要参数 path 或 name", nil)
 			return
 		}
 		if req.Action != "check" && req.Action != "upload" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "无效的 action 参数（可选: check / upload）", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "无效的 action 参数（可选: check / upload）", nil)
 			return
 		}
 
@@ -66,20 +68,20 @@ func HandlerFuncUpload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 			fullPath = filepath.Join(normalizedPath, req.Name)
 		}
 
-		if !isPathAllowedDownload(fullPath) {
-			logger.Logger.Warn("上传路径访问被拒绝", zap.Uint("user_id", userID), zap.String("path", fullPath))
-			c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
+		var allowed bool
+		fullPath, allowed = resolveFilePath(c, db, fullPath)
+		if !allowed {
 			return
 		}
 
 		ext := filepath.Ext(req.Name)
 		if !config.Conf.IsExtensionAllowed(ext) {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "不允许上传该类型的文件", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "不允许上传该类型的文件", nil)
 			return
 		}
 
 		if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": fmt.Sprintf("文件名过长（最大 %d 字符）", config.Conf.File.Upload.MaxFilenameLength), "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, fmt.Sprintf("文件名过长（最大 %d 字符）", config.Conf.File.Upload.MaxFilenameLength), nil)
 			return
 		}
 
@@ -96,58 +98,50 @@ func handleCheck(c *gin.Context, fullPath, fileName string) {
 	fileInfo, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(http.StatusOK, gin.H{
-				"code":    200,
-				"message": "ok",
-				"data": gin.H{
-					"exists":     false,
-					"can_upload": true,
-					"file_name":  fileName,
-					"path":       fullPath,
-				},
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
+				"exists":     false,
+				"can_upload": true,
+				"file_name":  fileName,
+				"path":       fullPath,
 			})
 		} else {
 			logger.Logger.Error("检查文件状态失败", zap.Error(err), zap.String("path", fullPath))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "检查文件状态失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "检查文件状态失败", nil)
 		}
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "ok",
-		"data": gin.H{
-			"exists":      true,
-			"can_upload":  false,
-			"file_name":   fileName,
-			"file_size":   fileInfo.Size(),
-			"path":        fullPath,
-			"modified_at": fileInfo.ModTime(),
-		},
+	response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
+		"exists":      true,
+		"can_upload":  false,
+		"file_name":   fileName,
+		"file_size":   fileInfo.Size(),
+		"path":        fullPath,
+		"modified_at": fileInfo.ModTime(),
 	})
 }
 
 func handleUpload(c *gin.Context, db *gorm.DB, fullPath, fileName string, userID uint) {
 	if _, err := os.Stat(fullPath); err == nil {
-		c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件已存在，请先删除或重命名", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 400, "文件已存在，请先删除或重命名", nil)
 		return
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		logger.Logger.Error("获取上传文件失败", zap.Error(err), zap.Uint("user_id", userID))
-		c.JSON(http.StatusOK, gin.H{"code": 400, "message": "请选择要上传的文件", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 400, "请选择要上传的文件", nil)
 		return
 	}
 
 	if fileHeader.Size > config.Conf.File.Upload.MaxFileSize {
-		c.JSON(http.StatusOK, gin.H{"code": 400, "message": fmt.Sprintf("文件大小超过限制（最大 %d MB）", config.Conf.File.Upload.MaxFileSize/1024/1024), "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 400, fmt.Sprintf("文件大小超过限制（最大 %d MB）", config.Conf.File.Upload.MaxFileSize/1024/1024), nil)
 		return
 	}
 
 	targetDir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		logger.Logger.Error("创建目标目录失败", zap.Error(err), zap.String("path", targetDir))
-		c.JSON(http.StatusOK, gin.H{"code": 500, "message": "创建目标目录失败", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 500, "创建目标目录失败", nil)
 		return
 	}
 
@@ -175,7 +169,7 @@ func handleUpload(c *gin.Context, db *gorm.DB, fullPath, fileName string, userID
 		"storage_path": fullPath,
 	})
 
-	if err := c.SaveUploadedFile(fileHeader, fullPath); err != nil {
+	if err := storage.Allocate(db, userID, fullPath, fileHeader.Size, func() error { return c.SaveUploadedFile(fileHeader, fullPath) }); err != nil {
 		logger.Logger.Error("保存文件失败", zap.Error(err), zap.String("path", fullPath))
 		if history.ID > 0 {
 			errMsg := "保存文件失败: " + err.Error()
@@ -189,7 +183,7 @@ func handleUpload(c *gin.Context, db *gorm.DB, fullPath, fileName string, userID
 			"file_name":  fileName,
 			"history_id": history.ID,
 		})
-		c.JSON(http.StatusOK, gin.H{"code": 500, "message": "保存文件失败", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 500, "保存文件失败", nil)
 		return
 	}
 
@@ -210,15 +204,11 @@ func handleUpload(c *gin.Context, db *gorm.DB, fullPath, fileName string, userID
 
 	logger.Logger.Info("文件上传完成", zap.Uint("user_id", userID), zap.String("file_name", fileName), zap.Int64("file_size", fileHeader.Size), zap.String("path", fullPath))
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    200,
-		"message": "上传成功",
-		"data": gin.H{
-			"history_id":    history.ID,
-			"file_name":     fileName,
-			"original_name": fileHeader.Filename,
-			"file_size":     fileHeader.Size,
-			"storage_path":  fullPath,
-		},
+	response.WriteHTTP(c, http.StatusOK, 200, "上传成功", gin.H{
+		"history_id":    history.ID,
+		"file_name":     fileName,
+		"original_name": fileHeader.Filename,
+		"file_size":     fileHeader.Size,
+		"storage_path":  fullPath,
 	})
 }

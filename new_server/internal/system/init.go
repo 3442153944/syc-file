@@ -2,7 +2,6 @@ package system
 
 import (
 	"crypto/subtle"
-	"net/http"
 	"strings"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"syc-file/internal/model"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/password"
+	"syc-file/pkg/response"
 )
 
 // Handler 本包全部 HTTP 处理器的载体。
@@ -22,11 +22,11 @@ type Handler struct {
 }
 
 func jsonOK(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
+	response.OK(c, data)
 }
 
 func jsonErr(c *gin.Context, code int, msg string) {
-	c.JSON(http.StatusOK, gin.H{"code": code, "message": msg, "data": nil})
+	response.Fail(c, code, msg)
 }
 
 // RegistrationOpen 当前是否开放自助注册：已初始化，且至少有一个超级管理员打开了 allow_register。

@@ -306,13 +306,25 @@ async fn send_and_parse<T: DeserializeOwned>(
 }
 
 fn urlenc(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| {
-            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
-                vec![c]
-            } else {
-                format!("%{:02X}", c as u32).chars().collect()
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*byte as char),
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::urlenc;
+
+    #[test]
+    fn urlenc_encodes_utf8_and_reserved_bytes() {
+        assert_eq!(
+            urlenc("/@space/我的文件/a b.png"),
+            "%2F%40space%2F%E6%88%91%E7%9A%84%E6%96%87%E4%BB%B6%2Fa%20b.png"
+        );
+    }
 }

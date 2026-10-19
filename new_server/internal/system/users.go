@@ -5,8 +5,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/password"
 )
@@ -98,7 +101,16 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	if req.Email != "" {
 		u.Email = &req.Email
 	}
-	if err := h.db.Create(&u).Error; err != nil {
+	if err := storage.LockedTransaction(h.db, func(tx *gorm.DB) error {
+		var creator model.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&creator, by).Error; err != nil {
+			return err
+		}
+		if creator.Status != 1 || creator.Level <= u.Level {
+			return storage.ErrDenied
+		}
+		return tx.Create(&u).Error
+	}); err != nil {
 		logger.Logger.Error("创建用户失败", zap.Error(err))
 		jsonErr(c, 500, "创建失败: "+err.Error())
 		return

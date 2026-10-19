@@ -12,6 +12,7 @@ func RegisterFileRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cli
 	f := rg.Group("/file")
 	f.POST("/available-disks", HandlerFuncAvailableDisks(db, redisClient))
 	f.POST("/traverse-directory", HandlerFuncTraverseDirectory(db, redisClient))
+	f.POST("/create-directory", HandlerFuncCreateDirectory(db))
 	f.GET("/download", HandlerFuncDownload(db, redisClient))
 	// 图片缩略图：外网/流量下列表只拉几 KB，点进详情再拉原图（见 internal/thumb）
 	f.GET("/thumbnail", HandlerFuncThumbnail(db, redisClient))

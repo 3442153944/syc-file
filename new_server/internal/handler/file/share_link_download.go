@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"syc-file/pkg/response"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,12 +13,14 @@ import (
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 )
 
 // shareLinkMeta 对应创建时写入 Redis 的 JSON 结构（见 share_link_janitor.go 的 finalizeShareLink），
 // 下载热路径优先读它：命中即代表未过期（TTL 到点 key 自动消失），不用每次都查 MySQL。
 type shareLinkMeta struct {
 	TempName     string `json:"temp_name"`
+	OriginalPath string `json:"original_path"`
 	FileName     string `json:"file_name"`
 	IsQuickShare bool   `json:"is_quick_share"`
 	StorageKind  string `json:"storage_kind"`
@@ -43,16 +46,25 @@ func HandlerFuncShareDownload(db *gorm.DB, redisClient *redis.Client) gin.Handle
 	return func(c *gin.Context) {
 		code := c.Param("code")
 		if code == "" {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "链接不存在", "data": nil})
+			response.WriteHTTP(c, http.StatusNotFound, 404, "链接不存在", nil)
 			return
 		}
 
 		link, ok := lookupShareLink(db, redisClient, code)
 		if !ok {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "链接不存在或已过期", "data": nil})
+			response.WriteHTTP(c, http.StatusNotFound, 404, "链接不存在或已过期", nil)
+			return
+		}
+		// Redis 中的分享缓存不能让已删除账号继续公开文件。
+		if _, err := storage.User(db, link.UserID); err != nil {
+			response.WriteHTTP(c, http.StatusNotFound, 404, "链接所属账号已失效", nil)
 			return
 		}
 
+		if !link.IsQuickShare && storage.SharedPathActive(db, link.OriginalPath) != nil {
+			response.WriteHTTP(c, http.StatusForbidden, 403, "文件所属空间不可访问或已到期", nil)
+			return
+		}
 		c.Header("Content-Disposition", "attachment; filename="+link.FileName)
 		c.Header("Content-Type", getMimeType(link.FileName))
 		// 分享内容会到期失效，中间的 CDN/浏览器都不应该替我们缓存过期前的响应。
@@ -61,7 +73,7 @@ func HandlerFuncShareDownload(db *gorm.DB, redisClient *redis.Client) gin.Handle
 		if link.StorageKind == "memory" {
 			data, found := quickShareMemStore.Load(code)
 			if !found {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "文件不存在或已被清理", "data": nil})
+				response.WriteHTTP(c, http.StatusNotFound, 404, "文件不存在或已被清理", nil)
 				return
 			}
 			c.Data(http.StatusOK, getMimeType(link.FileName), data.([]byte))
@@ -70,7 +82,7 @@ func HandlerFuncShareDownload(db *gorm.DB, redisClient *redis.Client) gin.Handle
 
 		tempPath := resolveShareTempPath(link)
 		if _, err := os.Stat(tempPath); err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "文件不存在或已被清理", "data": nil})
+			response.WriteHTTP(c, http.StatusNotFound, 404, "文件不存在或已被清理", nil)
 			return
 		}
 
@@ -94,6 +106,7 @@ func lookupShareLink(db *gorm.DB, redisClient *redis.Client, code string) (model
 			if json.Unmarshal(data, &meta) == nil && meta.TempName != "" {
 				return model.ShareLink{
 					ShareCode:    code,
+					OriginalPath: meta.OriginalPath,
 					UserID:       meta.UserID,
 					FileName:     meta.FileName,
 					TempName:     meta.TempName,

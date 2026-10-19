@@ -6,12 +6,14 @@ mod catch_up;
 mod chunked_uploader;
 mod clipboard_sync;
 mod commands;
+mod catalog_download;
 mod config;
 mod device;
 mod desktop_update;
 mod hotkey_codec;
 mod logger;
 mod net;
+mod vpn;
 mod speedtest;
 mod sync_engine;
 mod transfers;
@@ -46,6 +48,10 @@ pub fn run() {
         app_shell::window::show_main_window(app);
     }));
     builder
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -233,6 +239,20 @@ pub fn run() {
             app_shell::log_window::get_recent_logs,
             // 主窗口生命周期 / 传输状态
             app_shell::window::take_pending_network_settings,
+            // 组网（薄封装，实际协议在 filesync-cli）
+            vpn::vpn_nat,
+            vpn::vpn_link,
+            vpn::vpn_wg_config,
+            vpn::vpn_up,
+            vpn::vpn_down,
+            vpn::vpn_stun,
+            vpn::vpn_ping,
+            vpn::vpn_ping_stream,
+            vpn::vpn_tunnel_status,
+            vpn::vpn_up_embedded,
+            vpn::vpn_down_embedded,
+            vpn::autostart_get,
+            vpn::autostart_set,
             transfers::get_transfers,
             transfers::transfer_upload_begin,
             transfers::transfer_upload_progress,
@@ -289,6 +309,7 @@ pub fn run() {
             commands::file::upload_file,
             commands::file::delete_file,
             commands::file::build_download_url,
+            commands::catalog_download::download_catalog_file,
             commands::file::build_thumbnail_url,
             commands::file::get_download_history,
             commands::file::delete_download_history,

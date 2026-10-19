@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 	"syc-file/pkg/volroot"
 )
@@ -55,7 +57,31 @@ func (e *Engine) appendVersionWithContent(fileID uint64, version int, size int64
 		cb := createdBy
 		v.CreatedBy = &cb
 	}
-	if blob := preserveBlob(currentPath, hash, size); blob != "" {
+	blob := ""
+	var file model.File
+	if currentPath != "" && e.db.Select("id, user_id").First(&file, fileID).Error == nil {
+		if space, pool, err := storage.Load(e.db, file.UserID); err == nil && storage.Within(storage.Root(pool, space), currentPath) {
+			if digest, err := hex.DecodeString(hash); err == nil && len(digest) == 32 {
+				if info, err := os.Stat(currentPath); err == nil && info.Size() <= maxVersionedSize {
+					target := filepath.Join(storage.Root(pool, space), ".versions", hash[:2], hash)
+					err := storage.Allocate(e.db, file.UserID, target, info.Size(), func() error {
+						blob = preserveBlobAt(currentPath, hash, info.Size(), target)
+						if blob == "" {
+							return os.ErrInvalid
+						}
+						return nil
+					})
+					if err != nil {
+						blob = ""
+						logger.Logger.Warn("空间容量不足或不可用，保留版本元数据但未留存版本内容", zap.Uint("user_id", file.UserID), zap.Error(err))
+					}
+				}
+			}
+		} else {
+			blob = preserveBlob(currentPath, hash, size)
+		}
+	}
+	if blob != "" {
 		v.StoragePath = &blob
 	}
 	if err := e.db.Create(v).Error; err != nil {
@@ -66,6 +92,11 @@ func (e *Engine) appendVersionWithContent(fileID uint64, version int, size int64
 // preserveBlob 把 srcPath 的内容按内容寻址存进版本仓库，返回 blob 路径；
 // 不满足条件（无路径/无哈希/过大/复制失败）时返回空串，调用方按「本版无内容」处理。
 func preserveBlob(srcPath, hash string, size int64) string {
+	return preserveBlobAt(srcPath, hash, size, BlobPathFor(srcPath, hash))
+}
+
+// preserveBlobAt 支持将版本内容保存在用户空间内，配额由调用方统一检查。
+func preserveBlobAt(srcPath, hash string, size int64, blobPath string) string {
 	if srcPath == "" || hash == "" {
 		return ""
 	}
@@ -79,7 +110,9 @@ func preserveBlob(srcPath, hash string, size int64) string {
 		return ""
 	}
 
-	blobPath := BlobPathFor(srcPath, hash)
+	if digest, err := hex.DecodeString(hash); err != nil || len(digest) != 32 {
+		return ""
+	}
 	if blobPath == "" {
 		return ""
 	}

@@ -2,10 +2,14 @@ package database
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"syc-file/pkg/logger"
 )
@@ -66,5 +70,62 @@ func TestRetryFirstTrySuccessNoDelay(t *testing.T) {
 	}
 	if time.Since(start) > 100*time.Millisecond {
 		t.Fatal("第一次就成功不应有等待")
+	}
+}
+
+func TestRetryConfigurationErrorsStopImmediately(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		hint string
+	}{
+		{"Redis", errors.New("NOAUTH Authentication required."), "尚未认证"},
+		{"Redis", fmt.Errorf("ping: %w", errors.New("WRONGPASS invalid username-password pair or user is disabled.")), "认证失败"},
+		{"Redis", errors.New("NOPERM this user has no permissions to run the 'ping' command"), "权限不足"},
+		{"Redis", errors.New("ERR AUTH <password> called without any password configured for the default user."), "不匹配"},
+		{"Redis", errors.New("ERR DB index is out of range"), "逻辑库范围"},
+		{"MySQL", &mysql.MySQLError{Number: 1045, Message: "Access denied"}, "认证失败"},
+		{"MySQL", &mysql.MySQLError{Number: 1044, Message: "Access denied to database"}, "权限"},
+		{"MySQL", fmt.Errorf("connect: %w", &mysql.MySQLError{Number: 1049, Message: "Unknown database"}), "数据库不存在"},
+	} {
+		t.Run(tc.name+"/"+tc.hint, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			previous := logger.Logger
+			logger.Logger = zap.New(core)
+			t.Cleanup(func() { logger.Logger = previous })
+			calls := 0
+			err := Retry(tc.name, time.Minute, func() error { calls++; return tc.err })
+			if calls != 1 || !errors.Is(err, tc.err) || !strings.Contains(err.Error(), tc.hint) {
+				t.Fatalf("calls=%d, err=%v; expected immediate classified error", calls, err)
+			}
+			entries := logs.All()
+			if len(entries) != 1 || entries[0].Level != zap.ErrorLevel || !strings.Contains(entries[0].Message, "停止重试") {
+				t.Fatalf("expected one actionable error log, got %v", entries)
+			}
+		})
+	}
+}
+
+func TestTemporaryConnectionErrorsStillRetry(t *testing.T) {
+	fast(t)
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"Redis", errors.New("LOADING Redis is loading the dataset in memory")},
+		{"Redis", errors.New("dial tcp: connection refused")},
+		{"MySQL", &mysql.MySQLError{Number: 1040, Message: "Too many connections"}},
+	} {
+		calls := 0
+		err := Retry(tc.name, time.Second, func() error {
+			calls++
+			if calls == 1 {
+				return tc.err
+			}
+			return nil
+		})
+		if err != nil || calls != 2 {
+			t.Fatalf("%s: calls=%d err=%v", tc.name, calls, err)
+		}
 	}
 }

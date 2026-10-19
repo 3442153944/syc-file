@@ -28,24 +28,52 @@ func IsProd() bool { return Conf.Server.Mode == ModeProd }
 
 // Config 根节点配置，完全对齐你的 YAML
 type Config struct {
-	DB         DBConfig         `mapstructure:"db"`
-	Log        LogConfig        `mapstructure:"log"`
-	Whitelist  []string         `mapstructure:"whitelist"` // 白名单路由
-	Auth       AuthConfig       `mapstructure:"auth"`
-	Server     ServerConfig     `mapstructure:"server"`
-	Redis      RedisConfig      `mapstructure:"redis"`
-	File       FileConfig       `mapstructure:"file"`
-	User       UserCfg          `mapstructure:"user"`
-	Share      ShareConfig      `mapstructure:"share"`
-	QuickShare QuickShareConfig `mapstructure:"quick_share"`
-	Sync       SyncConfig       `mapstructure:"sync"`
+	DB         DBConfig          `mapstructure:"db"`
+	Log        LogConfig         `mapstructure:"log"`
+	Whitelist  []string          `mapstructure:"whitelist"` // 白名单路由
+	Auth       AuthConfig        `mapstructure:"auth"`
+	Server     ServerConfig      `mapstructure:"server"`
+	Redis      RedisConfig       `mapstructure:"redis"`
+	File       FileConfig        `mapstructure:"file"`
+	User       UserCfg           `mapstructure:"user"`
+	Share      ShareConfig       `mapstructure:"share"`
+	QuickShare QuickShareConfig  `mapstructure:"quick_share"`
+	Sync       SyncConfig        `mapstructure:"sync"`
 	Supervisor supervisor.Config `mapstructure:"supervisor"`
-	Monitor    MonitorConfig    `mapstructure:"monitor"`
-	Thumbnail  ThumbnailConfig  `mapstructure:"thumbnail"`
+	Monitor    MonitorConfig     `mapstructure:"monitor"`
+	Thumbnail  ThumbnailConfig   `mapstructure:"thumbnail"`
+	// Vpn 组网地址池。整段缺省即可：默认从 172.1.0.0/16 里按 /24 切分给各个组。
+	Vpn VpnConfig `mapstructure:"vpn"`
+}
+
+// VpnConfig 组网配置。主密钥不放这里，走环境变量 SYC_VPN_MASTER_KEY。
+type VpnConfig struct {
+	// Pool 组网地址池（IPv4）。建组时未指定 subnet 就从池里自动分配一个 /24；
+	// 显式指定的 subnet 必须落在池内，避免不同环境之间地址重叠。
+	Pool string `mapstructure:"pool"`
+	// StunPort STUN-lite 的 UDP 端口：客户端探测自己的公网端点后随 heartbeat 上报。
+	// 0 表示默认 3478；负数表示关闭。
+	StunPort int `mapstructure:"stun_port"`
+	// ServerAddress 服务器在覆盖网里的固定地址（默认 172.1.0.254），
+	// 让普通 HTTP/DB 等业务也能走 P2P 直达，而不是绕公网域名。
+	ServerAddress string `mapstructure:"server_address"`
+	// ServerPubKey / ServerEndpoint 服务器自身 WireGuard 接口的公钥与公网端点。
+	// 两者都配置后，所有客户端的 peers 里都会带上服务器节点。
+	ServerPubKey string `mapstructure:"server_pubkey"`
+	// ServerEndpoint 可选：显式覆盖服务器 peer 的端点。留空时按每次请求实际使用的
+	// Host（含 X-Forwarded-Host）拼 <host>:ServerWGPort，这样从 LAN/DDNS/任何入口
+	// 进来的客户端都会拿到与入口一致的端点，不把组网绑死在某一个供应商。
+	ServerEndpoint string `mapstructure:"server_endpoint"`
+	// ServerWGPort 服务器 WireGuard 监听端口（默认 51820）。
+	ServerWGPort int `mapstructure:"server_wg_port"`
+	// ServerInterface 服务器本机的 WireGuard 接口名（如 syc0）。配置后后端会自己
+	// 按「会话有效」维护 peer，不再需要外部脚本拿 token 轮询。
+	ServerInterface string `mapstructure:"server_interface"`
 }
 
 // ThumbnailConfig 图片缩略图配置（见 internal/thumb）。整段缺省即可：默认开启，
-// 缩略图目录取 <首个 allowed_paths 所在盘>/<storage.base_path>/thumbs，ffmpeg 从 PATH 里找。
+// 缩略图目录取 <首个 allowed_paths 所在盘>/<storage.base_path>/thumbs。
+// Windows/Linux amd64 构建默认使用二进制内嵌的 ffmpeg/ffprobe，无需系统安装。
 type ThumbnailConfig struct {
 	// 关闭缩略图功能。默认 false（开启）；找不到 ffmpeg 时也会自动关闭，不影响服务启动。
 	Disabled bool `mapstructure:"disabled"`
@@ -56,9 +84,9 @@ type ThumbnailConfig struct {
 	TempDir string `mapstructure:"temp_dir"`
 	// 临时缩略图保留多久（分钟），每次被访问会顺延。<=0 时按 720（12 小时）处理。
 	TempTTLMinutes int `mapstructure:"temp_ttl_minutes"`
-	// ffmpeg 可执行文件；空则在 PATH 里找 "ffmpeg"。
+	// 外部 ffmpeg 可执行文件；空则优先使用内嵌版本，内嵌不可用时再找 PATH。
 	FFmpeg string `mapstructure:"ffmpeg"`
-	// ffprobe 可执行文件；空则先找 ffmpeg 同目录、再找 PATH。视频/音频封面靠它，找不到只影响这两类。
+	// 外部 ffprobe 可执行文件；空则先找 ffmpeg 同目录、再找 PATH。视频/音频封面靠它，找不到只影响这两类。
 	FFprobe string `mapstructure:"ffprobe"`
 	// 同时运行的 ffmpeg 数量（上传后异步生成与请求时当场生成共用）。<=0 时按 8 处理。
 	// 注意内存：解码一张 4000 万像素的原图可占用数百 MB，机器小的话调低。
@@ -260,6 +288,20 @@ func Init() error {
 
 	if v := strings.TrimSpace(os.Getenv("SYC_MODE")); v != "" {
 		Conf.Server.Mode = v
+	}
+
+	// 组网地址池：整段缺省时用 172.1.0.0/16，避免各环境各自写一份还写不一致。
+	if strings.TrimSpace(Conf.Vpn.Pool) == "" {
+		Conf.Vpn.Pool = "172.1.0.0/16"
+	}
+	if strings.TrimSpace(Conf.Vpn.ServerAddress) == "" {
+		Conf.Vpn.ServerAddress = "172.1.0.254"
+	}
+	if Conf.Vpn.StunPort == 0 {
+		Conf.Vpn.StunPort = 3478
+	}
+	if Conf.Vpn.ServerWGPort == 0 {
+		Conf.Vpn.ServerWGPort = 51820
 	}
 	Conf.Server.Mode = strings.ToLower(strings.TrimSpace(Conf.Server.Mode))
 	switch Conf.Server.Mode {

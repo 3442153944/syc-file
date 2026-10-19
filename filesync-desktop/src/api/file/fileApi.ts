@@ -1,6 +1,7 @@
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {httpPost, httpGet, buildGetUrl} from '../http'
 import {getDeviceId} from '../platform'
+import {request} from '../request'
 import {uploadChunked as uploadChunkedWeb, DEFAULT_CHUNK_SIZE, DEFAULT_CONCURRENCY} from './chunkedUploader'
 import type {AvailableDisksData, TraverseDirectoryData, UploadCompleteData, DownloadHistoryData, CreateShareLinkData, ShareLinkListData} from './fileTypes'
 
@@ -51,6 +52,30 @@ export async function uploadFile(
 export async function deleteFile(path: string, name: string): Promise<void> {
     if (isTauri()) return invoke('delete_file', {path, name})
     await httpPost('/file/delete', {path, name})
+}
+
+export const createDirectory = (path: string, name: string) =>
+    request<{ path: string; name: string }>('POST', '/file/create-directory', { body: { path, name } })
+
+/** 桌面端由 Rust 流式保存，文件内容不经过 WebView。 */
+export async function downloadFile(path: string, name: string, localPath?: string): Promise<void> {
+    if (isTauri()) {
+        if (!localPath) throw new Error('请选择保存位置')
+        await invoke('download_catalog_file', { path, name, localPath })
+        return
+    }
+    const res = await fetch(await buildDownloadUrl(path, name, ''))
+    if (!res.ok || !res.headers.has('Content-Disposition')) {
+        throw new Error(`下载失败（HTTP ${res.status}），请检查登录状态和文件权限`)
+    }
+    const blobUrl = URL.createObjectURL(await res.blob())
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = name
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 30_000)
 }
 
 export async function buildDownloadUrl(path: string, name: string, deviceId: string): Promise<string> {

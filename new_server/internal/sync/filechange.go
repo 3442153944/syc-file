@@ -11,8 +11,8 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/pkg/logger"
 )
 
@@ -36,7 +36,7 @@ func (e *Engine) HandleFileChange(userID uint, sourceDeviceID string, r FileChan
 		return fmt.Errorf("folder is download_only, ignore upload report")
 	}
 	remotePath := joinRemotePath(folder.RemotePath, r.RelativePath)
-	if !config.Conf.IsPathAllowed(remotePath) {
+	if err := storage.Authorize(e.db, userID, remotePath); err != nil {
 		return fmt.Errorf("path not allowed: %s", remotePath)
 	}
 

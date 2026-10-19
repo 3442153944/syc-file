@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -25,7 +26,7 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusUnauthorized, 401, "请先登录", nil)
 			return
 		}
 		userClaims := claims.(*token.Claims)
@@ -40,7 +41,7 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 		// 表现为"下载成功但 hash 不匹配"（所有失败的 actual hash 相同），
 		// 同步任务永远失败 + Reaper 无限重试。
 		if path == "" || name == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "缺少必要参数 path 或 name", "data": nil})
+			response.WriteHTTP(c, http.StatusBadRequest, 400, "缺少必要参数 path 或 name", nil)
 			return
 		}
 
@@ -58,25 +59,25 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 			fullPath = filepath.Join(path, name)
 		}
 
-		if !isPathAllowedDownload(fullPath) {
-			logger.Logger.Warn("下载路径访问被拒绝", zap.Uint("user_id", userID), zap.String("path", fullPath))
-			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
+		var allowed bool
+		fullPath, allowed = resolveFilePath(c, db, fullPath)
+		if !allowed {
 			return
 		}
 
 		fileInfo, err := os.Stat(fullPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "文件不存在", "data": nil})
+				response.WriteHTTP(c, http.StatusNotFound, 404, "文件不存在", nil)
 			} else {
 				logger.Logger.Error("获取文件信息失败", zap.Error(err), zap.String("path", fullPath))
-				c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "获取文件信息失败", "data": nil})
+				response.WriteHTTP(c, http.StatusInternalServerError, 500, "获取文件信息失败", nil)
 			}
 			return
 		}
 
 		if fileInfo.IsDir() {
-			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "不能下载目录", "data": nil})
+			response.WriteHTTP(c, http.StatusBadRequest, 400, "不能下载目录", nil)
 			return
 		}
 
@@ -96,7 +97,7 @@ func HandlerFuncDownload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc
 		file, err := os.Open(fullPath)
 		if err != nil {
 			logger.Logger.Error("打开文件失败", zap.Error(err), zap.String("path", fullPath))
-			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "打开文件失败", "data": nil})
+			response.WriteHTTP(c, http.StatusInternalServerError, 500, "打开文件失败", nil)
 			return
 		}
 		defer file.Close()
@@ -160,14 +161,14 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 	ranges := strings.TrimPrefix(rangeHeader, "bytes=")
 	parts := strings.Split(ranges, "-")
 	if len(parts) != 2 {
-		c.JSON(http.StatusOK, gin.H{"code": 400, "message": "无效的 Range 请求", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 400, "无效的 Range 请求", nil)
 		return
 	}
 
 	start, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil || start < 0 || start >= fileSize {
 		c.Header("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-		c.JSON(http.StatusOK, gin.H{"code": 416, "message": "Range 超出范围", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 416, "Range 超出范围", nil)
 		return
 	}
 
@@ -183,14 +184,14 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 
 	if start > end {
 		c.Header("Content-Range", fmt.Sprintf("bytes */%d", fileSize))
-		c.JSON(http.StatusOK, gin.H{"code": 416, "message": "Range 起始位置大于结束位置", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 416, "Range 起始位置大于结束位置", nil)
 		return
 	}
 
 	contentLength := end - start + 1
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
 		logger.Logger.Error("文件定位失败", zap.Error(err))
-		c.JSON(http.StatusOK, gin.H{"code": 500, "message": "文件定位失败", "data": nil})
+		response.WriteHTTP(c, http.StatusOK, 500, "文件定位失败", nil)
 		return
 	}
 
@@ -225,7 +226,7 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 		})
 		if err != nil {
 			logger.Logger.Error("发送 Range 下载完成消息失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "服务器异常，发送 Range 下载完成消息失败", "data": "failed"})
+			response.WriteHTTP(c, http.StatusOK, 500, "服务器异常，发送 Range 下载完成消息失败", "failed")
 			return
 		}
 	}

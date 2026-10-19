@@ -4,6 +4,7 @@
 // command，直接长在那些文件里，不搬来这里）的域才放在这个目录下。
 pub mod credential;
 pub mod file;
+pub mod catalog_download;
 pub mod support;
 pub mod sync_domain;
 pub mod update;

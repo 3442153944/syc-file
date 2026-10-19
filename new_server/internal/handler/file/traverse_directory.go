@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syc-file/pkg/response"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -45,34 +46,34 @@ func HandlerFuncTraverseDirectory(db *gorm.DB, redisClient *redis.Client) gin.Ha
 			PageSize int    `json:"page_size"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "参数错误", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "参数错误", nil)
 			return
 		}
 
-		req.Path = filepath.Clean(req.Path)
-		if len(req.Path) == 2 && req.Path[1] == ':' {
-			req.Path = req.Path + string(filepath.Separator)
+		var allowed bool
+		req.Path, allowed = resolveFilePath(c, db, req.Path)
+		if !allowed {
+			return
 		}
-
 		fileInfo, err := os.Stat(req.Path)
 		if os.IsNotExist(err) {
-			c.JSON(http.StatusOK, gin.H{"code": 404, "message": "目录不存在", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 404, "目录不存在", nil)
 			return
 		}
 		if err != nil {
 			logger.Logger.Error("无法访问目录", zap.String("path", req.Path), zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "无法访问目录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "无法访问目录", nil)
 			return
 		}
 		if !fileInfo.IsDir() {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "路径不是目录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "路径不是目录", nil)
 			return
 		}
 
 		result, err := traverseSingleLevel(req.Path)
 		if err != nil {
 			logger.Logger.Error("遍历目录失败", zap.String("path", req.Path), zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "遍历目录失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "遍历目录失败", nil)
 			return
 		}
 
@@ -89,29 +90,25 @@ func HandlerFuncTraverseDirectory(db *gorm.DB, redisClient *redis.Client) gin.Ha
 			prewarmThumbnails(pagedItems)
 			totalPages := (result.TotalCount + req.PageSize - 1) / req.PageSize
 
-			c.JSON(http.StatusOK, gin.H{
-				"code":    200,
-				"message": "ok",
-				"data": gin.H{
-					"current_path": result.CurrentPath,
-					"parent_path":  result.ParentPath,
-					"items":        pagedItems,
-					"total_count":  result.TotalCount,
-					"dir_count":    result.DirCount,
-					"file_count":   result.FileCount,
-					"pagination": gin.H{
-						"page":        req.Page,
-						"page_size":   req.PageSize,
-						"total_pages": totalPages,
-						"has_more":    req.Page < totalPages,
-					},
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
+				"current_path": result.CurrentPath,
+				"parent_path":  result.ParentPath,
+				"items":        pagedItems,
+				"total_count":  result.TotalCount,
+				"dir_count":    result.DirCount,
+				"file_count":   result.FileCount,
+				"pagination": gin.H{
+					"page":        req.Page,
+					"page_size":   req.PageSize,
+					"total_pages": totalPages,
+					"has_more":    req.Page < totalPages,
 				},
 			})
 			return
 		}
 
 		prewarmThumbnails(result.Items)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": result})
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", result)
 	}
 }
 
@@ -136,10 +133,13 @@ func traverseSingleLevel(path string) (*traverseResponse, error) {
 
 	logger.Logger.Info("读取目录", zap.String("path", path), zap.Int("entries_count", len(entries)))
 
-	var items []fileItem
+	items := make([]fileItem, 0, len(entries))
 	var dirCount, fileCount int
 
 	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || entry.Name() == ".uploads" || entry.Name() == ".children" || entry.Name() == ".versions" {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			logger.Logger.Warn("无法获取文件信息", zap.String("name", entry.Name()), zap.Error(err))

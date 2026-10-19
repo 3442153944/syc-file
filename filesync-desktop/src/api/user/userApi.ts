@@ -13,6 +13,8 @@ export async function login(username: string, password: string): Promise<LoginDa
   }
   const data = await httpPost<LoginData>('/user/login', { username, password, device_id: getDeviceId() })
   setToken(data.token)
+  // 登录后自动登记组网设备：没加入任何组时静默失败，不阻塞登录
+  import('@/api/vpn').then(m => m.ensureVpnDevice()).catch(() => {})
   return data
 }
 

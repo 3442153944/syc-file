@@ -98,7 +98,7 @@ monitor:
 supervisor:
   enabled: false
 
-# 图片缩略图（ffmpeg，镜像已内置）：上传/同步落盘后异步生成，外网下列表只拉几 KB。
+# 图片缩略图（ffmpeg 已内嵌在后端二进制中）：上传/同步落盘后异步生成，外网下列表只拉几 KB。
 # 整段可省略，默认就是开启；缓存存在 <数据卷>/file_sync/thumbs，随数据卷持久化。
 thumbnail:
   disabled: false                # true = 关闭缩略图

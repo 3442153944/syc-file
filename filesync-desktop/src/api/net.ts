@@ -18,6 +18,7 @@
 
 import {isTauri} from '@tauri-apps/api/core'
 import {reactive} from 'vue'
+import {getDeviceId} from './platform'
 
 // ── 类型（字段名与 Rust net.rs 的序列化结果一一对应） ──────────────────────────
 
@@ -59,6 +60,8 @@ export interface NetStatus {
     health: NodeHealth[]
     offline: boolean
     epoch: number
+    /** 组网链路状态：direct=直连 / relay=中继 / idle=没有对端 / off=未启用 */
+    vpnMode: 'off' | 'direct' | 'relay' | 'idle' | 'unknown'
 }
 
 /** ping 接口返回的简要信息 */
@@ -138,6 +141,45 @@ const empty: NetStatus = {
     health: [],
     offline: false,
     epoch: 0,
+    vpnMode: 'off',
+}
+
+/** 组网链路状态：供菜单栏「直连/中继」指示器读取 */
+export function setVpnMode(mode: NetStatus['vpnMode']): void {
+    netState.vpnMode = mode
+}
+
+/**
+ * 从服务端拉当前设备的链路模式。
+ * 设备名约定放在 localStorage.syc_vpn_device，由组网模块注册设备后写入；
+ * 没写就说明桌面端还没启用组网，指示器显示「未启用」。
+ */
+export async function refreshVpnMode(): Promise<void> {
+    const device = localStorage.getItem('syc_vpn_device')
+    if (!device || !localStorage.getItem('token')) {
+        netState.vpnMode = 'off'
+        return
+    }
+    try {
+        // Tauri 模式直接问本地 CLI（它会按当前选中的节点拼服务器端点）；
+        // Web 模式没有 CLI，退化为后端 /v1/vpn/link。
+        if (isTauri()) {
+            const {invoke} = await import('@tauri-apps/api/core')
+            const out = await invoke<string>('vpn_link', {device})
+            netState.vpnMode = out.includes('中继') ? 'relay' : out.includes('直连') ? 'direct' : 'idle'
+            return
+        }
+        // 直接用 fetch 而不是 http.ts：http.ts 反过来依赖 net.ts（registerAbort），
+        // 互相 import 会在模块初始化时拿到 undefined。
+        const res = await fetch(
+            `${netState.serverUrl}/v1/vpn/link?device_id=${encodeURIComponent(device)}`,
+            {headers: {Token: localStorage.getItem('token') || '', 'Device-Id': getDeviceId()}},
+        )
+        const body = await res.json()
+        netState.vpnMode = (body?.data?.mode as NetStatus['vpnMode']) ?? 'unknown'
+    } catch {
+        netState.vpnMode = 'unknown'
+    }
 }
 
 /** 响应式网络状态，菜单栏指示灯 / 网络面板直接绑它 */

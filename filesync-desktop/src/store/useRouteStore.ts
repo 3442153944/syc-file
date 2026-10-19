@@ -4,7 +4,7 @@
 // 路由表加载策略：
 //   1. 登录后 / 应用启动时，由路由守卫调 load() 拉 GET /v1/routes，注册成动态路由；
 //   2. 拉取失败（服务器暂时不可达）时，回退到上次成功缓存（同一用户才用，防止串号）；
-//   3. refresh() 定时重拉，版本号（version）变了才重新注册——管理员改了路由表，在线客户端几分钟内跟上，不必重新登录。
+//   3. refresh() 定时重拉，版本、级别或实际路由内容变化时重新注册，避免同版本的错误响应一直残留。
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { Router } from 'vue-router'
@@ -13,6 +13,7 @@ import type { ServerStatus, RouteItem } from '@/api/system/systemTypes'
 import { baseUrl } from '@/api/net'
 import { registerRoutes, removeDynamicRoutes, buildMenu, defaultLandingPath } from '@/router/dynamic'
 import { currentUserId } from '@/utils/level'
+import { shouldApplyRouteSnapshot } from '@/utils/routeSnapshot'
 
 const CACHE_KEY = 'routes_cache'
 /** 状态探测失败后多久内不再重试，避免服务器不可达时每次导航都卡一次超时 */
@@ -81,6 +82,10 @@ export const useRouteStore = defineStore('routes', () => {
     version.value = ver
     level.value = lv
     loaded.value = true
+    try {
+      const cache: RoutesCache = { userId: currentUserId(), version: ver, level: lv, routes: list }
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cache))
+    } catch { /* 缓存写失败不影响当前路由 */ }
   }
 
   /** 首次加载。成功（含缓存回退）返回 true；token 失效或无缓存时返回 false，原因见 loadError。 */
@@ -94,12 +99,6 @@ export const useRouteStore = defineStore('routes', () => {
       }
       apply(router, data.routes, data.version, data.level)
       fromCache.value = false
-      try {
-        const cache: RoutesCache = {
-          userId: currentUserId(), version: data.version, level: data.level, routes: data.routes,
-        }
-        localStorage.setItem(CACHE_KEY, JSON.stringify(cache))
-      } catch { /* 缓存写失败不影响使用 */ }
       return true
     } catch (e) {
       const cached = readCache()
@@ -114,7 +113,7 @@ export const useRouteStore = defineStore('routes', () => {
     }
   }
 
-  /** 定时刷新：版本没变就什么都不做；拉取失败静默忽略（继续用现有路由表）。 */
+  /** 定时刷新：核对版本、级别和内容；恢复成功后同步覆盖旧缓存。 */
   async function refresh(router: Router): Promise<void> {
     if (!loaded.value) return
     try {
@@ -124,7 +123,7 @@ export const useRouteStore = defineStore('routes', () => {
         loaded.value = false // 让下一次导航走重新加载 → 回登录
         return
       }
-      if (data.version === version.value && !fromCache.value) return
+      if (!shouldApplyRouteSnapshot({ version: version.value, level: level.value, routes: routes.value }, data, fromCache.value)) return
       apply(router, data.routes, data.version, data.level)
       fromCache.value = false
     } catch { /* 网络抖动：保持现状 */ }

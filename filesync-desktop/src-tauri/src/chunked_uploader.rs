@@ -427,14 +427,42 @@ async fn run_planned(
         Some(c) => c as usize,
         None => return Err("上传规划失败：无法确定分片大小".to_string()),
     };
-    log_plan_start(&pool, &state, &main_node, chunk_size as u64, total);
+    log_plan_start(
+        &pool,
+        &state,
+        &main_node,
+        chunk_size as u64,
+        total,
+        options.quick_share,
+    );
     // 传输期后台探测的样本聚合，结束时统一打一行规划日志。
-    let mut probe_rtt: HashMap<String, u64> = HashMap::new();
-    let mut probe_bps: HashMap<String, f64> = HashMap::new();
+    // 先用持久化的新鲜样本打底：本次跳过探测的节点也能在日志里给出 rtt/bw/后端。
+    let now = now_ms();
+    let mut probe_rtt: HashMap<String, u64> = state
+        .nodes
+        .iter()
+        .filter(|n| now - n.measured_at_ms <= planner::STATE_FRESH_MS && n.rtt_ms > 0.0)
+        .map(|n| (n.id.clone(), n.rtt_ms as u64))
+        .collect();
+    let mut probe_bps: HashMap<String, f64> = state
+        .nodes
+        .iter()
+        .filter(|n| now - n.measured_at_ms <= planner::STATE_FRESH_MS && n.bps > 0.0)
+        .map(|n| (n.id.clone(), n.bps))
+        .collect();
     // 每节点探测返回的后端节点名：收尾日志用它判定"同后端校验"把谁踢出了上传池。
-    let mut probe_backend: HashMap<String, String> = HashMap::new();
+    let mut probe_backend: HashMap<String, String> = state
+        .nodes
+        .iter()
+        .filter(|n| now - n.measured_at_ms <= planner::STATE_FRESH_MS && !n.backend_node.is_empty())
+        .map(|n| (n.id.clone(), n.backend_node.clone()))
+        .collect();
     // 每节点实际派出的分片数/字节：收尾日志里用它证明多链路到底有没有跑起来。
     let mut node_dispatch: HashMap<String, (u64, u64)> = HashMap::new();
+    // 每节点成功/失败/慢片/均速实绩；与派发量分开，成功才算有效吞吐。
+    let mut node_stats: HashMap<String, NodeStat> = HashMap::new();
+    let mut probes_started: usize = 0;
+    let mut probes_finished: usize = 0;
 
     let desc = describe_async(file, chunk_size).await?;
     on_progress(0, desc.total_size);
@@ -507,6 +535,7 @@ async fn run_planned(
     p.begin_transfer(&init.upload_id, &missing);
     let mut upload_id = init.upload_id.clone();
     log_initial_windows(&p);
+    let transfer_started = Instant::now();
 
     // ── 统一传输循环：Chunk 与后台 Probe 都派 tokio task（channel 回报），Wait 挂 channel ──
     let (tx, mut rx) = mpsc::channel::<Outcome>(64);
@@ -521,6 +550,7 @@ async fn run_planned(
                     let e = node_dispatch.entry(t.node.clone()).or_insert((0, 0));
                     e.0 += 1;
                     e.1 += t.bytes;
+                    node_stats.entry(t.node.clone()).or_default().dispatched += 1;
                 }
                 let tx = tx.clone();
                 let client = client.clone();
@@ -541,6 +571,16 @@ async fn run_planned(
             // 边传边测：探测与分片并发派发（planner 数据未传完就优先给探测），
             // 结果回来经 report 并入 DRR 池——多线路能否用起来全靠它。
             planner::Task::Probe(t) => {
+                probes_started += 1;
+                logger::info(
+                    "upload",
+                    format!(
+                        "[upload] 探测开始 node={} kind={} bytes={}",
+                        t.node,
+                        if t.kind == planner::ProbeKind::Tiny { "rtt" } else { "bw" },
+                        t.bytes
+                    ),
+                );
                 let tx = tx.clone();
                 let client = client.clone();
                 tasks.spawn(async move {
@@ -594,6 +634,13 @@ async fn run_planned(
                                 }
                             }
                             if !confirmed { break Err("无法确认后端已放弃旧分片尝试，停止上传以避免迟到写入".into()); }
+                        }
+                        record_outcome(&r, &chunk_handles, &mut node_stats);
+                        if matches!(
+                            &r,
+                            planner::Report::ProbeOk { .. } | planner::Report::ProbeFailed { .. }
+                        ) {
+                            probes_finished += 1;
                         }
                         record_probe_sample(&r, &mut probe_rtt, &mut probe_bps, &mut probe_backend);
                         let reason = report_reason(&r);
@@ -709,6 +756,16 @@ async fn run_planned(
     };
 
     // 异常退出（Fatal/停滞）时在途分片/探测不再有意义的，全部放弃
+    let probes_pending = probes_started.saturating_sub(probes_finished);
+    if probes_pending > 0 {
+        logger::info(
+            "upload",
+            format!(
+                "[upload] 探测收尾: 完成 {}/{}，{} 个未完成（随传输结束取消）",
+                probes_finished, probes_started, probes_pending
+            ),
+        );
+    }
     tasks.abort_all();
     // 计划日志放在传输结束后：此时才聚合齐后台探测样本（首字节早已发出，不受其阻塞）
     log_plan(
@@ -720,6 +777,18 @@ async fn run_planned(
         &main_node,
         chunk_size as u64,
         &node_dispatch,
+    );
+    let main_backend = probe_backend.get(&main_node).cloned().unwrap_or_default();
+    log_transfer_summary(
+        &pool,
+        &p.windows(),
+        &node_stats,
+        &probe_rtt,
+        &probe_bps,
+        &probe_backend,
+        &main_backend,
+        transfer_started.elapsed(),
+        options.quick_share,
     );
     persist_planner_state(config, &p);
     result
@@ -754,6 +823,159 @@ fn record_probe_sample(
                 }
             }
         }
+    }
+}
+
+/// 每节点传输实绩：派发量、成功量、失败量、慢片数和累计传输耗时。
+/// 收尾日志用它给出「每个节点到底跑了多少、均速多少」，而不是只看规划时的窗口。
+#[derive(Default)]
+struct NodeStat {
+    dispatched: u64,
+    ok: u64,
+    failed: u64,
+    slow: u64,
+    bytes: u64,
+    active_ms: u64,
+    last_error: String,
+}
+
+/// 把一次分片结果记到对应节点上。分片回报只带 seq，节点要从派发句柄表反查。
+fn record_outcome(
+    r: &planner::Report,
+    handles: &HashMap<u64, (planner::ChunkTask, String, tokio::task::AbortHandle)>,
+    stats: &mut HashMap<String, NodeStat>,
+) {
+    let seq = match r {
+        planner::Report::ChunkOk { seq, .. }
+        | planner::Report::ChunkCongested { seq }
+        | planner::Report::ChunkUnavailable { seq }
+        | planner::Report::ChunkDataError { seq }
+        | planner::Report::ChunkSessionGone { seq } => *seq,
+        _ => return,
+    };
+    let Some((task, _, _)) = handles.get(&seq) else {
+        return;
+    };
+    let s = stats.entry(task.node.clone()).or_default();
+    match r {
+        planner::Report::ChunkOk {
+            bytes, elapsed_ms, ..
+        } => {
+            s.ok += 1;
+            s.bytes += *bytes;
+            s.active_ms += *elapsed_ms;
+            if *elapsed_ms > 5_000 {
+                s.slow += 1;
+            }
+        }
+        _ => {
+            s.failed += 1;
+            s.last_error = report_reason(r).to_string();
+        }
+    }
+}
+
+/// 传输结束后的实绩汇总：整体吞吐、每节点成功/失败/慢片/均速、最终离线或未参与的节点。
+fn log_transfer_summary(
+    pool: &[planner::PlannerNodeConfig],
+    windows: &[(String, usize)],
+    stats: &HashMap<String, NodeStat>,
+    probe_rtt: &HashMap<String, u64>,
+    probe_bps: &HashMap<String, f64>,
+    probe_backend: &HashMap<String, String>,
+    main_backend: &str,
+    elapsed: Duration,
+    quick: bool,
+) {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    let sent: u64 = stats.values().map(|s| s.bytes).sum();
+    let ok_chunks: u64 = stats.values().map(|s| s.ok).sum();
+    let failed: u64 = stats.values().map(|s| s.failed).sum();
+    let used = stats.values().filter(|s| s.ok > 0).count();
+    logger::info(
+        "upload",
+        format!(
+            "[upload] 汇总: 模式={} 传输耗时={:.1}s 实传={} 均速={} 成功={}片 失败={} 使用节点={}/{}",
+            if quick { "快传" } else { "同步" },
+            secs,
+            fmt_bytes(sent),
+            fmt_bps(sent as f64 / secs),
+            ok_chunks,
+            failed,
+            used,
+            pool.len()
+        ),
+    );
+    let mut offline: Vec<String> = Vec::new();
+    // 未参与的真实原因：后端不一致 > 已测未入池 > 吞吐探测未完成 > 未探测。
+    let reason_for = |id: &str| -> String {
+        if let Some(nb) = probe_backend.get(id) {
+            if !main_backend.is_empty() && nb != main_backend {
+                format!("后端不一致:{}", nb)
+            } else if probe_bps.contains_key(id) {
+                "已测未入池".to_string()
+            } else {
+                "吞吐探测未完成".to_string()
+            }
+        } else if probe_rtt.contains_key(id) {
+            "吞吐探测未完成".to_string()
+        } else {
+            "未探测".to_string()
+        }
+    };
+    for n in pool {
+        let w = windows
+            .iter()
+            .find(|(id, _)| id == &n.id)
+            .map(|(_, w)| *w)
+            .unwrap_or(0);
+        let Some(s) = stats.get(&n.id) else {
+            if w == 0 {
+                offline.push(format!("{}({})", n.id, reason_for(&n.id)));
+            }
+            continue;
+        };
+        let speed = if s.active_ms > 0 {
+            fmt_bps(s.bytes as f64 / (s.active_ms as f64 / 1000.0))
+        } else {
+            "-".to_string()
+        };
+        logger::info(
+            "upload",
+            format!(
+                "[upload] 节点实绩 node={} 窗口={} 派发={} 成功={}片/{} 失败={} 慢片={} 均速={}{}",
+                n.id,
+                w,
+                s.dispatched,
+                s.ok,
+                fmt_bytes(s.bytes),
+                s.failed,
+                s.slow,
+                speed,
+                if s.last_error.is_empty() {
+                    String::new()
+                } else {
+                    format!(" 最后错误={}", s.last_error)
+                }
+            ),
+        );
+        if w == 0 {
+            offline.push(format!(
+                "{}({})",
+                n.id,
+                if s.failed > 0 {
+                    "失败".to_string()
+                } else {
+                    reason_for(&n.id)
+                }
+            ));
+        }
+    }
+    if !offline.is_empty() {
+        logger::warn(
+            "upload",
+            format!("[upload] 最终离线/未参与节点: {}", offline.join(", ")),
+        );
     }
 }
 
@@ -907,7 +1129,7 @@ async fn execute_chunk(
     let resp = match resp {
         Ok(resp) => resp,
         Err(_) => {
-            logger::warn("upload", format!("[upload] node={} chunk={} 超过10秒，取消该节点在途分片并切换链路", t.node, t.index));
+            logger::warn("upload", format!("[upload] node={} chunk={} 超过10秒未完成（{}B），取消该节点在途分片并切换链路", t.node, t.index, len));
             return Outcome::Report(planner::Report::ChunkUnavailable { seq: t.seq });
         }
     };
@@ -916,13 +1138,31 @@ async fn execute_chunk(
         Err(e) if e.contains(NODE_SWITCHED) => Outcome::Fatal(e),
         Err(e) if e.starts_with("HTTP 502") || e.starts_with("HTTP 503") || e.starts_with("HTTP 504")
             || (!e.starts_with("HTTP ") && !e.starts_with("JSON 解析失败")) => {
-            logger::warn("upload", format!("[upload] node={} chunk={} 链路失败，切换节点: {}", t.node, t.index, e));
+            logger::warn("upload", format!("[upload] node={} chunk={} 链路失败 {}ms {}B，切换节点: {}", t.node, t.index, elapsed_ms, len, e));
             Outcome::Report(planner::Report::ChunkUnavailable { seq: t.seq })
         }
         // HTTP/解析错误：保留原有预算重试，不直接判定节点断链。
-        Err(_) => Outcome::Report(planner::Report::ChunkCongested { seq: t.seq }),
+        Err(e) => {
+            logger::warn(
+                "upload",
+                format!(
+                    "[upload] node={} chunk={} HTTP/解析错误 {}ms {}B，按拥塞处理: {}",
+                    t.node, t.index, elapsed_ms, len, e
+                ),
+            );
+            Outcome::Report(planner::Report::ChunkCongested { seq: t.seq })
+        }
         Ok(resp) => {
             if resp.is_ok() {
+                if elapsed_ms > 5_000 {
+                    logger::warn(
+                        "upload",
+                        format!(
+                            "[upload] node={} chunk={} 慢片 {}ms {}B（>5s，可能链路拥塞）",
+                            t.node, t.index, elapsed_ms, len
+                        ),
+                    );
+                }
                 Outcome::Report(planner::Report::ChunkOk {
                     seq: t.seq,
                     bytes: len as u64,
@@ -934,7 +1174,16 @@ async fn execute_chunk(
                     404 => Outcome::Report(planner::Report::ChunkSessionGone { seq: t.seq }),
                     502 | 503 | 504 => Outcome::Report(planner::Report::ChunkUnavailable { seq: t.seq }),
                     // 其它业务码：HTTP 链路是通的，按拥塞处理占掉一次派发预算
-                    _ => Outcome::Report(planner::Report::ChunkCongested { seq: t.seq }),
+                    _ => {
+                        logger::warn(
+                            "upload",
+                            format!(
+                                "[upload] node={} chunk={} 业务码={} 按拥塞处理: {}",
+                                t.node, t.index, resp.code, resp.message
+                            ),
+                        );
+                        Outcome::Report(planner::Report::ChunkCongested { seq: t.seq })
+                    }
                 }
             }
         }
@@ -1204,6 +1453,7 @@ fn log_plan_start(
     main_node: &str,
     chunk_size: u64,
     total: u64,
+    quick: bool,
 ) {
     let now = now_ms();
     let fresh_ids: Vec<String> = state
@@ -1222,7 +1472,8 @@ fn log_plan_start(
     logger::info(
         "upload",
         format!(
-            "[upload] 规划: 主节点={} 分片={} 大小={} 节点池[{}] 新鲜样本[{}]",
+            "[upload] 规划: 模式={} 主节点={} 分片={} 大小={} 节点池[{}] 新鲜样本[{}]",
+            if quick { "快传" } else { "同步" },
             main_node,
             fmt_chunk(chunk_size),
             fmt_bytes(total),
@@ -1308,7 +1559,7 @@ fn log_plan(
         logger::info(
             "upload",
             format!(
-                "[upload] node={} rtt={} bw={}/s eff={}/s conc={} [{}] 实传={}片/{}",
+                "[upload] node={} rtt={} bw={} eff={} conc={} [{}] 实传={}片/{}",
                 n.id,
                 rtt,
                 b,
@@ -1344,9 +1595,14 @@ fn log_window_changes(
     for (id, w) in &now {
         if let Some((_, old)) = snapshot.iter().find(|(sid, _)| sid == id) {
             if old != w {
+                let (kind, desc) = match (*old, *w) {
+                    (0, n) if n > 0 => ("入池", format!("0→{}", n)),
+                    (n, 0) if n > 0 => ("出池", format!("{}→0", n)),
+                    _ => ("窗口", format!("{}→{}", old, w)),
+                };
                 logger::info(
                     "upload",
-                    format!("[upload] node={} window {}→{} ({})", id, old, w, reason),
+                    format!("[upload] node={} {} {} ({})", id, kind, desc, reason),
                 );
             }
         }
@@ -1358,7 +1614,7 @@ fn log_window_changes(
 fn report_reason(r: &planner::Report) -> &'static str {
     match r {
         planner::Report::ChunkOk { .. } => "streak",
-        planner::Report::ChunkCongested { .. } => "timeout",
+        planner::Report::ChunkCongested { .. } => "congested",
         planner::Report::ChunkUnavailable { .. } => "unavailable",
         planner::Report::ChunkDataError { .. } => "data",
         planner::Report::ChunkSessionGone { .. } => "gone",

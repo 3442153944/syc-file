@@ -8,18 +8,24 @@ export const useCatalogStore = defineStore('catalog', () => {
     const parentPath = ref<string>('')
     const items = ref<FileItem[]>([])
     const loading = ref<boolean>(false)
+    const error = ref('')
+    let requestId = 0
 
     const fetchDirectory = async (targetPath: string) => {
+        const id = ++requestId
         loading.value = true
+        error.value = ''
         try {
             const res = await traverseDirectory(targetPath)
+            // 快速切换目录时，迟到的旧请求不能覆盖当前目录。
+            if (id !== requestId) return
             currentPath.value = res.current_path
             parentPath.value = res.parent_path
             items.value = res.items || []
-        } catch (error) {
-            console.error('读取目录失败', error)
+        } catch (cause) {
+            if (id === requestId) error.value = `${targetPath}：${String(cause)}`
         } finally {
-            loading.value = false
+            if (id === requestId) loading.value = false
         }
     }
 
@@ -43,5 +49,5 @@ export const useCatalogStore = defineStore('catalog', () => {
         return tags
     }
 
-    return { currentPath, parentPath, items, loading, fetchDirectory, goParent, parseMode }
+    return { currentPath, parentPath, items, loading, error, fetchDirectory, goParent, parseMode }
 })

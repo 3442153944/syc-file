@@ -435,10 +435,20 @@ pub fn engine_enqueue_initial_sync(engine: &SharedSyncEngine, config: &SharedSyn
 
     tokio::spawn(async move {
         let mut count = 0usize;
+        let mut skipped = 0usize;
         for (folder_id, root, remote_root) in mappings {
-            count += walk_and_enqueue(&tx, folder_id, &root, &remote_root).await;
+            let (enqueued, having_base) =
+                walk_and_enqueue(&tx, folder_id, &root, &remote_root).await;
+            count += enqueued;
+            skipped += having_base;
         }
-        crate::logger::info("sync", format!("首次全量同步已入队 {} 个文件", count));
+        crate::logger::info(
+            "sync",
+            format!(
+                "首次全量同步检查完成: 入队 {} 个文件，已有基线跳过 {} 个",
+                count, skipped
+            ),
+        );
     });
 }
 
@@ -448,8 +458,9 @@ async fn walk_and_enqueue(
     folder_id: u64,
     root: &PathBuf,
     remote_root: &str,
-) -> usize {
+) -> (usize, usize) {
     let mut count = 0usize;
+    let mut skipped = 0usize;
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let mut rd = match tokio::fs::read_dir(&dir).await {
@@ -471,6 +482,7 @@ async fn walk_and_enqueue(
                 if let Some((rel, remote_dir)) = rel_and_remote(root, remote_root, &path) {
                     // 已有基线视为已同步，跳过，避免重复上传
                     if crate::base_store::get(folder_id, &rel).is_some() {
+                        skipped += 1;
                         continue;
                     }
                     let task = UploadTask {
@@ -487,7 +499,7 @@ async fn walk_and_enqueue(
             }
         }
     }
-    count
+    (count, skipped)
 }
 
 fn rel_and_remote(root: &PathBuf, remote_root: &str, path: &PathBuf) -> Option<(String, String)> {

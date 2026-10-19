@@ -140,16 +140,18 @@ const resetPw = async (g: GuestRow) => {
 const remove = (g: GuestRow) => {
   dialog.warning({
     title: '删除访客',
-    content: `确认删除访客「${g.username}」？对方会立即下线，此操作不可撤销。`,
+    content: `确认删除访客「${g.username}」及其文件空间？文件、历史版本和分享内容将被清理，对方立即下线，此操作不可撤销。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        await deleteGuest(g.id)
-        message.success('已删除')
+        const result = await deleteGuest(g.id)
+        if (result.cleanup_pending) message.warning('账号访问已撤销，空间清理尚未完成，系统会自动重试。', { duration: 8000 })
+        else message.success('访客及文件空间已删除')
         fetchAll()
       } catch (e) {
         message.error(String(e))
+        return false
       }
     },
   })
@@ -162,6 +164,7 @@ const columns: DataTableColumns<GuestRow> = [
   {
     title: '状态', key: 'status', width: 90,
     render(g) {
+      if (g.status === -1) return h(NTag, {size: 'small', type: 'warning'}, {default: () => '清理中'})
       if (g.expired) return h(NTag, {size: 'small', type: 'error'}, {default: () => '已过期'})
       if (g.status !== 1) return h(NTag, {size: 'small', type: 'warning'}, {default: () => '已禁用'})
       return h(NTag, {size: 'small', type: 'success'}, {default: () => '有效'})
@@ -177,7 +180,7 @@ const columns: DataTableColumns<GuestRow> = [
   {title: '最近登录', key: 'last_login', width: 170, render: (g) => fmt(g.last_login)},
   {
     title: '操作', key: 'actions', width: 330,
-    render: (g) => h(NSpace, {size: 6}, {
+    render: (g) => g.status === -1 ? h(NButton, {size: 'small', onClick: () => remove(g)}, {default: () => '重试清理'}) : h(NSpace, {size: 6}, {
       default: () => [
         h(NButton, {size: 'small', onClick: () => { renewTarget.value = g; renewHours.value = 24 }}, {default: () => '续期'}),
         h(NButton, {size: 'small', onClick: () => openEdit(g)}, {default: () => '改授权'}),

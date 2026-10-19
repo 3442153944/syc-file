@@ -1,19 +1,21 @@
 <script setup lang="ts">
-import { onMounted, h, ref, computed } from "vue"
+import { watch, h, ref, computed } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { storeToRefs } from "pinia"
 import { useCatalogStore } from "./composeables/useCatalogStore"
-import { NDataTable, NButton, NSpace, NEmpty, NRadioGroup, NRadioButton, NInputNumber, NSelect, useMessage, useDialog } from "naive-ui"
+import { NDataTable, NButton, NSpace, NEmpty, NRadioGroup, NRadioButton, NInputNumber, NSelect, NModal, NCard, NInput, NAlert, NIcon, useMessage, useDialog } from "naive-ui"
+import { Folder } from '@vicons/fa'
 import type { DataTableColumns } from "naive-ui"
 import type { FileItem } from "@/api/file/fileTypes"
-import { deleteFile, buildDownloadUrl, createShareLink } from "@/api/file/fileApi"
+import { deleteFile, downloadFile, createDirectory, createShareLink } from "@/api/file/fileApi"
 import { isTauri } from "@tauri-apps/api/core"
-import { open } from "@tauri-apps/plugin-dialog"
+import { open, save } from "@tauri-apps/plugin-dialog"
 import { useTransferStore } from "@/store/useTransferStore"
 import { getServerUrl } from "@/api/platform"
 import { copyText } from "@/utils/clipboard"
 import { previewKind } from "@/utils/fileKind"
 import FileThumb from "@/components/file/FileThumb.vue"
+import FileTypeIcon from "@/components/file/FileTypeIcon.vue"
 import FilePreviewModal from "@/components/file/FilePreviewModal.vue"
 
 const route = useRoute()
@@ -26,69 +28,92 @@ const uploading = ref(false)
 const webFileInput = ref<HTMLInputElement | null>(null)
 const transferStore = useTransferStore()
 
-const { currentPath, parentPath, items, loading } = storeToRefs(catalogStore)
+const { currentPath, parentPath, items, loading, error: directoryError } = storeToRefs(catalogStore)
 
-onMounted(() => {
-  const initPath = route.query.path as string
-  if (initPath) catalogStore.fetchDirectory(initPath)
-})
+// URL 是目录导航的唯一入口，前进、后退与文件夹点击保持一致。
+watch(() => route.query.path, path => {
+  if (typeof path === 'string' && path) void catalogStore.fetchDirectory(path)
+}, { immediate: true })
 
 const refresh = () => {
-  if (currentPath.value) catalogStore.fetchDirectory(currentPath.value)
+  const target = typeof route.query.path === 'string' ? route.query.path : currentPath.value
+  if (target) void catalogStore.fetchDirectory(target)
 }
 
-// 预览：当前目录里能预览的文件（图片/视频/音频）组成一个序列，弹窗里可以用 ←/→ 在其中切换
-const previewList = computed(() => items.value.filter((i) => !i.is_dir && previewKind(i.name) !== "none"))
+// 所有文件均在应用内打开；无法预览的类型给出说明，由用户明确选择下载。
+const previewList = ref<FileItem[]>([])
 const previewOpen = ref(false)
 const previewIndex = ref(-1)
 const previewItem = computed(() => previewList.value[previewIndex.value] ?? null)
 
 const openPreview = (row: FileItem) => {
+  // 预览序列固定在打开时，浏览历史改变不能替换正在编辑的文本。
+  previewList.value = items.value.filter(i => !i.is_dir)
   const idx = previewList.value.findIndex((i) => i.path === row.path)
-  if (idx < 0) return handleDownload(row)
+  if (idx < 0) return
   previewIndex.value = idx
   previewOpen.value = true
 }
 
 const handleRowClick = (row: FileItem) => {
   if (row.is_dir) {
-    catalogStore.fetchDirectory(row.path)
-    router.push({ query: { path: row.path } })
-  } else if (previewKind(row.name) !== "none") {
-    openPreview(row)
+    void router.push({ query: { ...route.query, path: row.path } })
   } else {
-    handleDownload(row)
+    openPreview(row)
   }
 }
 
 const handleGoUp = () => {
-  catalogStore.goParent()
-  router.push({ query: { path: parentPath.value } })
+  const target = parentPath.value
+  if (target) void router.push({ query: { ...route.query, path: target } })
 }
 
-// 下载：用后端真实下载地址（带 token 的 query），动态 a 标签触发
+const downloading = ref(new Set<string>())
+// 下载必须明确选择；桌面端使用系统保存对话框并交给 Rust 流式处理。
 const handleDownload = async (row: FileItem) => {
   if (row.is_dir) {
     message.warning("暂不支持直接下载整个文件夹")
     return
   }
+  if (downloading.value.has(row.path)) return
   try {
-    const url = await buildDownloadUrl(currentPath.value, row.name, "")
-    const a = document.createElement("a")
-    a.href = url
-    a.download = row.name
-    a.target = "_blank"
-    a.style.display = "none"
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    message.success(`已开始下载: ${row.name}`)
+    const localPath = inTauri ? await save({ title: '保存文件', defaultPath: row.name }) : undefined
+    if (inTauri && !localPath) return
+    downloading.value.add(row.path)
+    if (inTauri) await transferStore.ensureMirror()
+    await downloadFile(row.path, row.name, localPath || undefined)
+    message.success(inTauri ? `已保存：${row.name}` : `已交给浏览器保存：${row.name}`)
   } catch (e) {
     message.error(String(e))
+  } finally {
+    downloading.value.delete(row.path)
   }
 }
 
+const showCreateFolder = ref(false)
+const folderName = ref('')
+const creatingFolder = ref(false)
+const createParent = ref('')
+function openCreateFolder() {
+  createParent.value = currentPath.value
+  folderName.value = ''
+  showCreateFolder.value = true
+}
+async function submitFolder() {
+  const name = folderName.value.trim()
+  if (!name || creatingFolder.value) return
+  creatingFolder.value = true
+  try {
+    await createDirectory(createParent.value, name)
+    showCreateFolder.value = false
+    message.success('文件夹已创建')
+    if (currentPath.value === createParent.value) refresh()
+  } catch (e) { message.error(String(e)) }
+  finally { creatingFolder.value = false }
+}
+
 const handleDelete = (row: FileItem) => {
+  const directory = currentPath.value
   dialog.warning({
     title: "删除文件",
     content: `确认删除「${row.name}」？此操作不可恢复。`,
@@ -96,7 +121,7 @@ const handleDelete = (row: FileItem) => {
     negativeText: "取消",
     onPositiveClick: async () => {
       try {
-        await deleteFile(currentPath.value, row.name)
+        await deleteFile(directory, row.name)
         message.success("已删除")
         refresh()
       } catch (e) {
@@ -119,6 +144,7 @@ const computeExpireMinutes = (): number => {
 }
 
 const handleCreateShareLink = (row: FileItem) => {
+  const directory = currentPath.value
   expirePreset.value = 60
   dialog.warning({
     title: `创建分享链接：${row.name}`,
@@ -172,7 +198,7 @@ const handleCreateShareLink = (row: FileItem) => {
           message.warning("请填写有效的有效期")
           return
         }
-        const data = await createShareLink(currentPath.value, row.name, expireMinutes)
+        const data = await createShareLink(directory, row.name, expireMinutes)
         const base = isTauri() ? getServerUrl().replace(/\/+$/, "") : window.location.origin
         const url = base + data.url_path
         let copied = true
@@ -271,15 +297,15 @@ const columns: DataTableColumns<FileItem> = [
     render(row) {
       return h("div", {
         style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" },
-        onClick: () => handleRowClick(row),
+        onClick: (event: MouseEvent) => { event.stopPropagation(); handleRowClick(row) },
       }, [
         // 图片/视频/有封面的音频显示缩略图，其余（含加载失败）仍是图标
         row.is_dir
-          ? h("span", { style: { fontSize: "18px" } }, "📁")
+          ? h(NIcon, {size: 22, color: '#f0a020'}, {default: () => h(Folder)})
           : h(FileThumb, { path: row.path, name: row.name, size: row.size, boxSize: 32 }, {
-              default: () => h("span", { style: { fontSize: "18px" } }, "📄"),
+              default: () => h(FileTypeIcon, { name: row.name, size: 22 }),
             }),
-        h("span", { style: { fontWeight: row.is_dir ? "bold" : "normal" } }, row.name),
+        h(NButton, {text: true, style: {fontWeight: row.is_dir ? 'bold' : 'normal'}, onClick: (event: MouseEvent) => {event.stopPropagation();handleRowClick(row)}}, {default: () => row.name}),
       ])
     },
   },
@@ -292,6 +318,7 @@ const columns: DataTableColumns<FileItem> = [
       if (row.is_dir) {
         return h(NSpace, { size: 4 }, {
           default: () => [
+            h(NButton, { size: 'small', onClick: (e: MouseEvent) => {e.stopPropagation();handleRowClick(row)} }, {default: () => '打开'}),
             h(NButton, { size: "small", type: "info", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleCreateShareLink(row) } }, { default: () => "分享" }),
           ],
         })
@@ -301,7 +328,7 @@ const columns: DataTableColumns<FileItem> = [
           previewKind(row.name) !== "none"
             ? h(NButton, { size: "small", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); openPreview(row) } }, { default: () => "预览" })
             : null,
-          h(NButton, { size: "small", type: "primary", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleDownload(row) } }, { default: () => "下载" }),
+          h(NButton, { size: "small", type: "primary", ghost: true, loading: downloading.value.has(row.path), onClick: (e: MouseEvent) => { e.stopPropagation(); handleDownload(row) } }, { default: () => "下载" }),
           h(NButton, { size: "small", type: "info", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleCreateShareLink(row) } }, { default: () => "分享" }),
           h(NButton, { size: "small", type: "error", ghost: true, onClick: (e: MouseEvent) => { e.stopPropagation(); handleDelete(row) } }, { default: () => "删除" }),
         ],
@@ -316,10 +343,11 @@ const columns: DataTableColumns<FileItem> = [
     <div class="toolbar">
       <n-space align="center" justify="space-between">
         <n-space align="center">
+          <n-button size="small" :disabled="!currentPath || loading || !!directoryError" @click="openCreateFolder">新建文件夹</n-button>
           <n-button v-if="parentPath" key="go-up" type="primary" ghost size="small" @click="handleGoUp">⬆ 返回上一级</n-button>
           <div class="current-path">
             <span class="path-label">当前路径：</span>
-            <span class="path-value">{{ currentPath || "请从「文件列表」选择磁盘进入" }}</span>
+            <span class="path-value">{{ currentPath || "请从「文件列表」选择存储空间进入" }}</span>
           </div>
         </n-space>
         <n-space align="center">
@@ -329,12 +357,14 @@ const columns: DataTableColumns<FileItem> = [
       </n-space>
     </div>
 
+    <n-alert v-if="directoryError" type="error" title="读取目录失败" style="margin-bottom: 12px">{{ directoryError }}</n-alert>
     <div class="table-wrapper">
       <n-data-table
           :columns="columns"
           :data="items"
           :loading="loading"
           :row-key="(row) => row.path"
+          :row-props="(row: FileItem) => ({style: {cursor: 'pointer'}, onClick: () => handleRowClick(row)})"
           :bordered="false"
           :striped="true"
           size="small"
@@ -355,6 +385,16 @@ const columns: DataTableColumns<FileItem> = [
         @next="previewIndex++"
         @download="previewItem && handleDownload(previewItem)"
     />
+
+    <n-modal v-model:show="showCreateFolder" :mask-closable="!creatingFolder" :close-on-esc="!creatingFolder">
+      <n-card title="新建文件夹" style="width: min(460px, 90vw)" :closable="!creatingFolder" @close="showCreateFolder = false">
+        <n-space vertical>
+          <span>创建位置：{{ createParent }}</span>
+          <n-input v-model:value="folderName" placeholder="请输入文件夹名称" :disabled="creatingFolder" maxlength="255" autofocus @keyup.enter="submitFolder" />
+        </n-space>
+        <template #footer><n-space justify="end"><n-button :disabled="creatingFolder" @click="showCreateFolder = false">取消</n-button><n-button type="primary" :disabled="!folderName.trim()" :loading="creatingFolder" @click="submitFolder">创建</n-button></n-space></template>
+      </n-card>
+    </n-modal>
 
     <!-- Web 模式上传输入 -->
     <input ref="webFileInput" type="file" multiple style="display:none" @change="onWebFiles" />

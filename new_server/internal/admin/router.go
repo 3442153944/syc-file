@@ -34,6 +34,12 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	a.GET("/storage", h.ListStorage)
 	a.PUT("/storage/:id", h.UpdateQuota)
 	a.POST("/storage/:id/recalc", h.RecalcStorage)
+	a.GET("/storage-pools", h.ListStoragePools)
+	a.POST("/storage-pools", h.CreateStoragePool)
+	a.PUT("/storage-pools/:id", h.UpdateStoragePool)
+	a.GET("/storage-partitions", h.StoragePartitions)
+	a.GET("/upload-spaces", h.ListUploadSpaces)
+	a.PUT("/upload-spaces/:id", h.PutUploadSpace)
 	// 角色权限
 	a.GET("/roles", h.ListRoles)
 	a.POST("/roles", h.CreateRole)
@@ -45,6 +51,10 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	// 缓存管理：粘贴快传的内存/落盘缓存，管理员可跨用户查看、手动清理
 	a.GET("/quick-share", h.ListQuickShare)
 	a.DELETE("/quick-share/:code", h.RevokeQuickShare)
+	// DSH 访问令牌：签发一次性短链 / 长期 token，并支持吊销
+	a.GET("/dsh/tokens", h.ListDSHTokens)
+	a.POST("/dsh/tokens", h.CreateDSHToken)
+	a.DELETE("/dsh/tokens/:id", h.RevokeDSHToken)
 
 	// 当前用户视角
 	rg.GET("/devices", h.ListDevices)
@@ -52,6 +62,7 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	rg.POST("/devices/:id/kick", h.KickDevice)
 	rg.DELETE("/devices/:id", h.DeleteDevice)
 	rg.GET("/storage/mine", h.MyStorage)
+	rg.GET("/storage/space", h.MyUploadSpace)
 
 	// 监控（只读，登录即可看）
 	m := rg.Group("/monitor")

@@ -129,16 +129,18 @@ const doReset = async () => {
 const handleDelete = (u: AdminUser) => {
   dialog.warning({
     title: '删除用户',
-    content: `确认删除「${u.username}」？只删除账号，不会动他的文件和同步记录。此操作不可撤销。`,
-    positiveText: '删除',
+    content: `确认删除「${u.username}」及其文件空间？将清除空间内文件、上传临时文件、历史版本、分享及账号关联记录，对方立即下线。存在下级账号或空间时须先处理下级。此操作不可撤销。`,
+    positiveText: '删除账号和空间',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
-        await deleteUser(u.id)
-        message.success('已删除')
+        const result = await deleteUser(u.id)
+        if (result.cleanup_pending) message.warning('账号访问已撤销，文件正在清理；系统会自动重试，完成后归还空间额度。', { duration: 8000 })
+        else message.success('账号及文件空间已删除，空间额度已归还')
         fetchList()
       } catch (e) {
         message.error(String(e))
+        return false
       }
     },
   })
@@ -207,7 +209,7 @@ const columns: DataTableColumns<AdminUser> = [
     title: '级别', key: 'level', width: 150,
     render(u) {
       // 超级管理员可改非访客、非自己的级别；其余人只读
-      if (isSuper && !isGuest(u) && u.id !== myId) {
+      if (isSuper && !isGuest(u) && u.id !== myId && u.status !== -1) {
         return h(NSelect, {
           size: 'small', value: u.level, options: levelOptions,
           'onUpdate:value': (v: number) => changeLevel(u, v),
@@ -219,6 +221,7 @@ const columns: DataTableColumns<AdminUser> = [
   {
     title: '状态', key: 'status', width: 80,
     render(u) {
+      if (u.status === -1) return h(NTag, {size: 'small', type: 'warning'}, {default: () => '清理中'})
       return h(NSwitch, {
         size: 'small', value: u.status === 1,
         disabled: u.id === myId || !canManage(u),
@@ -232,14 +235,15 @@ const columns: DataTableColumns<AdminUser> = [
   },
   {title: '最近登录', key: 'last_login', width: 170, render: (u) => u.last_login || '-'},
   {
-    title: '操作', key: 'actions', width: 160,
+    title: '操作', key: 'actions', width: 250, fixed: 'right',
     render(u) {
       if (isGuest(u)) return h(NText, {depth: 3}, {default: () => '在访客管理中处理'})
       if (!canManage(u)) return h(NText, {depth: 3}, {default: () => '无权操作'})
+      if (u.status === -1) return h(NButton, {size: 'small', onClick: () => handleDelete(u)}, {default: () => '重试清理'})
       return h(NSpace, {size: 6}, {
         default: () => [
           h(NButton, {size: 'small', onClick: () => openReset(u)}, {default: () => '重置密码'}),
-          u.id === myId ? null : h(NButton, {size: 'small', type: 'error', ghost: true, onClick: () => handleDelete(u)}, {default: () => '删除'}),
+          u.id === myId ? null : h(NButton, {size: 'small', type: 'error', ghost: true, onClick: () => handleDelete(u)}, {default: () => '删除账号和空间'}),
         ],
       })
     },
@@ -264,7 +268,8 @@ const columns: DataTableColumns<AdminUser> = [
       </n-space>
     </n-space>
 
-    <n-data-table :columns="columns" :data="list" :loading="loading" :row-key="(r: AdminUser) => r.id"
+    <n-alert type="warning" :show-icon="false" style="margin-bottom: 12px">删除账号会同时清理其文件空间，无法恢复。请先处理下级账号和空间；文件占用或磁盘暂不可访问时，系统保留清理任务并自动重试。</n-alert>
+    <n-data-table :columns="columns" :data="list" :loading="loading" :row-key="(r: AdminUser) => r.id" :scroll-x="1200"
                   :bordered="false" striped size="small">
       <template #empty>
         <n-empty description="没有用户"/>

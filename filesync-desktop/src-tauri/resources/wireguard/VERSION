@@ -1,0 +1,4 @@
+WireGuard for Windows 1.1.1
+source: https://download.wireguard.com/windows-client/wireguard-amd64-1.1.1.msi
+msi_sha256: 7bfed60ad61b785c914b38b61555a975488e1d3ec472dbfb2fcdf498fca75242
+wireguard.exe_sha256: 04c71fb1a555a6ace40d3ae9113c90c4829d7ca1d6c903fd20a8d41a0e2bef94

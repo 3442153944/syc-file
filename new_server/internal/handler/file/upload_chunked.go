@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syc-file/pkg/response"
 	"time"
 
 	"strconv"
@@ -23,6 +24,7 @@ import (
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/internal/storage"
 	"syc-file/internal/sync"
 	"syc-file/internal/thumb"
 	"syc-file/pkg/logger"
@@ -76,14 +78,14 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 	return func(c *gin.Context) {
 		claims, ok := c.Get("UserInfo")
 		if !ok || claims == nil {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		userID := uint(claims.(*token.Claims).UserID)
 
 		var req uploadInitReq
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "参数解析失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "参数解析失败", nil)
 			return
 		}
 
@@ -92,13 +94,13 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			// 快传：目标由服务端自算（可信），独立于普通路径的 resolveUploadPath/IsPathAllowed。
 			target, terr := quickShareTargetPath(userID, req.Name)
 			if terr != nil {
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": terr.Error(), "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, terr.Error(), nil)
 				return
 			}
 			fullPath = target
 		} else {
 			if req.Path == "" {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少目标路径", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "缺少目标路径", nil)
 				return
 			}
 			fullPath = resolveUploadPath(req.Path, req.Name)
@@ -107,21 +109,23 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		// 基础校验：路径、扩展名、文件名长度、大小（快传跳过前两项——它不进普通存储树，
 		// 落地目录与配额由 quick_share 配置独立约束）
 		if !req.QuickShare {
-			if !isPathAllowedDownload(fullPath) {
-				c.JSON(http.StatusOK, gin.H{"code": 403, "message": "无权访问该路径", "data": nil})
+			var allowed bool
+			fullPath, allowed = resolveFilePath(c, db, fullPath)
+			if !allowed {
 				return
 			}
+			req.Path = filepath.Dir(fullPath)
 			if !config.Conf.IsExtensionAllowed(filepath.Ext(req.Name)) {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "不允许上传该类型的文件", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "不允许上传该类型的文件", nil)
 				return
 			}
 			if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件名过长", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "文件名过长", nil)
 				return
 			}
 		}
 		if req.TotalSize <= 0 || (!req.QuickShare && req.TotalSize > config.Conf.File.Upload.MaxFileSize) {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件大小超出限制", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "文件大小超出限制", nil)
 			return
 		}
 		if req.QuickShare {
@@ -129,44 +133,44 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			remaining, qerr := quickShareRemainingBytes(db, userID)
 			if qerr != nil {
 				logger.Logger.Error("查询快传配额失败", zap.Error(qerr))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询配额失败", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, "查询配额失败", nil)
 				return
 			}
 			if remaining <= 0 {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "快速共享空间已满，请等待旧分享过期或前往分享管理提前清理", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "快速共享空间已满，请等待旧分享过期或前往分享管理提前清理", nil)
 				return
 			}
 			if req.TotalSize > remaining {
-				c.JSON(http.StatusOK, gin.H{"code": 400, "message": "超出剩余配额", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 400, "超出剩余配额", nil)
 				return
 			}
 		}
 
 		// 分片参数一致性：chunk_count 须等于 ceil(total/chunk)，叶子数须匹配
 		if req.ChunkSize <= 0 || req.ChunkCount <= 0 {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "分片参数无效", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "分片参数无效", nil)
 			return
 		}
 		wantCount := int((req.TotalSize + req.ChunkSize - 1) / req.ChunkSize)
 		if req.ChunkCount != wantCount || len(req.LeafHashes) != req.ChunkCount {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "分片数量与描述不一致", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "分片数量与描述不一致", nil)
 			return
 		}
 
 		// 校验描述信息自洽：用叶子哈希重算 Merkle 树根，须与提交的树根一致
 		leavesBytes, err := decodeLeaves(req.LeafHashes)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "叶子哈希格式错误", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "叶子哈希格式错误", nil)
 			return
 		}
 		wantRoot, err := hex.DecodeString(req.MerkleRoot)
 		if err != nil || len(wantRoot) != synccore.HashSize {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "树根格式错误", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "树根格式错误", nil)
 			return
 		}
 		gotRoot, err := synccore.MerkleRoot(leavesBytes)
 		if err != nil || !bytes.Equal(gotRoot, wantRoot) {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "描述信息树根不一致，请重新计算", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "描述信息树根不一致，请重新计算", nil)
 			return
 		}
 
@@ -194,15 +198,14 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 					}
 					logger.Logger.Warn("同步上传与服务端版本冲突，转入冲突待办", zap.String("path", fullPath),
 						zap.String("device_id", req.DeviceID), zap.String("base_hash", req.BaseHash), zap.String("server_hash", cur))
-					c.JSON(http.StatusOK, gin.H{"code": 409, "message": "同步冲突：服务端版本已被其它设备修改，本地副本将转入冲突待办",
-						"data": gin.H{"conflict": true, "server_hash": cur}})
+					response.WriteHTTP(c, http.StatusOK, 409, "同步冲突：服务端版本已被其它设备修改，本地副本将转入冲突待办", gin.H{"conflict": true, "server_hash": cur})
 					return
 				case req.OnConflict == onConflictTimestamp:
 					// 「同名是常态」的场景（发布 APK：每次 build 出来都叫 app-release.apk）。
 					// 报错逼用户改名没有意义，加时间戳区分即可，两个版本都留在盘上。
 					newName, newPath, err := uniqueNameWithTimestamp(req.Path, req.Name)
 					if err != nil {
-						c.JSON(http.StatusOK, gin.H{"code": 500, "message": "生成不重名文件名失败: " + err.Error(), "data": nil})
+						response.WriteHTTP(c, http.StatusOK, 500, "生成不重名文件名失败: "+err.Error(), nil)
 						return
 					}
 					logger.Logger.Info("目标同名，自动加时间戳区分",
@@ -210,7 +213,7 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 					req.Name = newName
 					fullPath = newPath
 				default:
-					c.JSON(http.StatusOK, gin.H{"code": 400, "message": "文件已存在，请先删除或重命名", "data": nil})
+					response.WriteHTTP(c, http.StatusOK, 400, "文件已存在，请先删除或重命名", nil)
 					return
 				}
 			}
@@ -223,10 +226,10 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		// 快传：分享记录必须由 complete 建，【不走 instant】——内容复制进会话临时文件、照常建会话
 		// 并预置全部位图，客户端见 missing=空 不调 chunk，complete 校验落盘后直接走分享创建。
 		var quickShareSrc string
-		if src, ok := findDedupSource(db, userID, req.FileHash, req.TotalSize); ok && src != fullPath {
+		if src, ok := findDedupSource(db, userID, req.FileHash, req.TotalSize); ok && src != fullPath && (req.QuickShare || storage.Authorize(db, userID, src) == nil) {
 			if req.QuickShare {
 				quickShareSrc = src
-			} else if err := copyFile(src, fullPath); err != nil {
+			} else if err := storage.Allocate(db, userID, fullPath, req.TotalSize, func() error { return copyFile(src, fullPath) }); err != nil {
 				logger.Logger.Warn("秒传复制失败，回退普通上传", zap.String("src", src), zap.Error(err))
 			} else {
 				respondInstant(c, db, engine, userID, &req, fullPath, id, "秒传成功")
@@ -237,16 +240,21 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		// 续传：已有会话且描述一致、临时文件仍在 → 返回缺失分片
 		if sess, err := upload_store.Global.Get(ctx, id); err == nil {
 			_, tempErr := os.Stat(sess.TempPath)
+			if !req.QuickShare {
+				if expected, managed := storage.Temp(db, userID, fullPath, id); managed && filepath.Clean(expected) != filepath.Clean(sess.TempPath) {
+					tempErr = os.ErrNotExist
+				}
+			}
 			if tempErr == nil && sess.MerkleRoot == req.MerkleRoot && sess.FileHash == req.FileHash &&
 				sess.TotalSize == req.TotalSize && sess.ChunkSize == req.ChunkSize {
 				_ = upload_store.Global.Touch(ctx, id, uploadSessionTTL)
 				bitmap, _ := upload_store.Global.Bitmap(ctx, id)
 				missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
 				logger.Logger.Info("上传续传", zap.String("upload_id", id), zap.Int("missing", len(missing)))
-				c.JSON(http.StatusOK, gin.H{"code": 200, "message": "续传", "data": gin.H{
+				response.WriteHTTP(c, http.StatusOK, 200, "续传", gin.H{
 					"upload_id": id, "instant": false, "chunk_size": sess.ChunkSize,
 					"chunk_count": sess.ChunkCount, "missing": missing,
-				}})
+				})
 				return
 			}
 			// 描述对不上或临时文件已丢 → 丢弃旧会话，重新开始（客户端整份重传）
@@ -258,6 +266,11 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		// 新建会话：内容进临时文件（与目标同盘，便于原子 rename）。普通路径预分配占位；
 		// 快传命中秒传源时直接复制进临时文件（复制失败回退预分配，照常分片上传）。
 		tempPath := tempPathFor(fullPath, id)
+		if !req.QuickShare {
+			if managed, ok := storage.Temp(db, userID, fullPath, id); ok {
+				tempPath = managed
+			}
+		}
 		quickShareCopied := false
 		if quickShareSrc != "" {
 			if err := copyFile(quickShareSrc, tempPath); err != nil {
@@ -267,9 +280,10 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			}
 		}
 		if !quickShareCopied {
-			if err := synccore.Preallocate(tempPath, uint64(req.TotalSize)); err != nil {
+			allocate := func() error { return synccore.Preallocate(tempPath, uint64(req.TotalSize)) }
+			if err := allocateUpload(db, userID, tempPath, req.TotalSize, req.QuickShare, allocate); err != nil {
 				logger.Logger.Error("预分配临时文件失败", zap.String("temp", tempPath), zap.Error(err))
-				c.JSON(http.StatusOK, gin.H{"code": 500, "message": "预分配失败", "data": nil})
+				response.WriteHTTP(c, http.StatusOK, 500, err.Error(), nil)
 				return
 			}
 		}
@@ -289,7 +303,7 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		}
 		if err := upload_store.Global.Create(ctx, sess, uploadSessionTTL); err != nil {
 			logger.Logger.Error("创建上传会话失败", zap.Error(err))
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "创建会话失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "创建会话失败", nil)
 			return
 		}
 
@@ -305,43 +319,56 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			missing = []int{}
 		}
 		logger.Logger.Info("上传会话已创建", zap.String("upload_id", id), zap.String("path", fullPath), zap.Int("chunks", req.ChunkCount), zap.Bool("quick_share", req.QuickShare))
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 			"upload_id": id, "instant": false, "chunk_size": req.ChunkSize,
 			"chunk_count": req.ChunkCount, "missing": missing,
-		}})
+		})
 	}
 }
 
 // HandlerFuncUploadStatus 查询会话进度与缺失分片，供断点续传。
-func HandlerFuncUploadStatus(_ *gorm.DB, _ *redis.Client) gin.HandlerFunc {
+func HandlerFuncUploadStatus(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, ok := c.Get("UserInfo"); !ok {
-			c.JSON(http.StatusOK, gin.H{"code": 401, "message": "请先登录", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 401, "请先登录", nil)
 			return
 		}
 		id := c.Query("upload_id")
 		if id == "" {
-			c.JSON(http.StatusOK, gin.H{"code": 400, "message": "缺少 upload_id", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 400, "缺少 upload_id", nil)
 			return
 		}
 		ctx := context.Background()
 		sess, err := upload_store.Global.Get(ctx, id)
 		if errors.Is(err, upload_store.ErrNotFound) {
-			c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{"found": false}})
+			response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{"found": false})
 			return
 		}
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{"code": 500, "message": "查询会话失败", "data": nil})
+			response.WriteHTTP(c, http.StatusOK, 500, "查询会话失败", nil)
 			return
 		}
+		claims, _ := c.Get("UserInfo")
+		if claims == nil || sess.UserID != uint(claims.(*token.Claims).UserID) {
+			response.WriteHTTP(c, http.StatusOK, 403, "无权访问该上传会话", nil)
+			return
+		}
+		if !sess.QuickShare && !checkFilePath(c, db, sess.TargetPath) {
+			return
+		}
+		if !checkUploadStage(c, db, sess) {
+			return
+		}
+		now := time.Now()
+		_ = os.Chtimes(sess.TempPath, now, now)
 		_ = upload_store.Global.Touch(ctx, id, uploadSessionTTL)
 		bitmap, _ := upload_store.Global.Bitmap(ctx, id)
 		missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
-		c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": gin.H{
+		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 			"found": true, "status": sess.Status, "chunk_size": sess.ChunkSize,
 			"chunk_count": sess.ChunkCount, "received": sess.ChunkCount - len(missing),
 			"missing": missing, "total_size": sess.TotalSize,
-		}})
+		})
 	}
 }
 
@@ -373,11 +400,11 @@ func respondInstant(c *gin.Context, db *gorm.DB, engine *sync.Engine, userID uin
 	thumb.Enqueue(fullPath)
 	logger.Logger.Info(message, zap.Uint("user_id", userID), zap.String("path", fullPath),
 		zap.Uint64("file_id", fileID), zap.Bool("synced", handled))
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": message, "data": gin.H{
+	response.WriteHTTP(c, http.StatusOK, 200, message, gin.H{
 		"upload_id": id, "instant": true, "chunk_size": req.ChunkSize,
 		"chunk_count": req.ChunkCount, "missing": []int{}, "synced": handled,
 		"file_name": req.Name, "storage_path": fullPath,
-	}})
+	})
 }
 
 // pathHashEquals 该路径在 file 表里记录的哈希是否等于 want。
@@ -463,7 +490,11 @@ func resolveUploadPath(reqPath, name string) string {
 // tempPathFor 临时文件放目标同盘的 <盘>/BasePath/TempPath 下，命名为 <id>.part。
 func tempPathFor(fullPath, id string) string {
 	vol := volroot.RootOf(fullPath)
-	dir := filepath.Join(vol, config.Conf.File.Storage.BasePath, config.Conf.File.Storage.TempPath)
+	base := config.Conf.File.Storage.BasePath
+	if !filepath.IsAbs(base) {
+		base = filepath.Join(vol, base)
+	}
+	dir := filepath.Join(base, config.Conf.File.Storage.TempPath)
 	return filepath.Join(dir, id+".part")
 }
 

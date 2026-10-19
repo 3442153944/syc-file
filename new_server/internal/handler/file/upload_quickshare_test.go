@@ -52,6 +52,11 @@ func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
 	if err != nil {
 		t.Fatalf("打开 SQLite 失败: %v", err)
 	}
+	conn, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
 	if err := db.AutoMigrate(&model.ShareLink{}, &model.File{}, &model.UploadHistory{}, &model.User{}); err != nil {
 		t.Fatalf("AutoMigrate 失败: %v", err)
 	}
@@ -72,6 +77,9 @@ func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
 	t.Cleanup(func() { config.Conf.File.Storage = restoreStorage })
 
 	env := &qsTestEnv{db: db, basePath: basePath, userID: 7}
+	if err := db.Create(&model.User{ID: 7, Username: "user7", Password: "test", Status: 1, Level: model.LevelUser}).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {

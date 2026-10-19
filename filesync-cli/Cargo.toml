@@ -1,0 +1,23 @@
+[package]
+name = "filesync-cli"
+version = "0.1.0"
+edition = "2021"
+description = "云梯组网命令行客户端：登录、入组、拉对端、生成并应用 WireGuard 配置"
+
+[[bin]]
+name = "syc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

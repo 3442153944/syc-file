@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syc-file/config"
+	"syc-file/internal/account"
 	"syc-file/internal/database"
 	"syc-file/internal/handler"
 	filehandler "syc-file/internal/handler/file"
@@ -25,6 +26,7 @@ import (
 	"syc-file/internal/sync"
 	"syc-file/internal/system"
 	"syc-file/internal/thumb"
+	"syc-file/internal/vpn"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
@@ -78,7 +80,7 @@ func main() {
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Content-Type", "Token", "Device-Id"},
-		ExposeHeaders:    []string{"New-Token", "Token-Refreshed"},
+		ExposeHeaders:    []string{"New-Token", "Token-Refreshed", "Content-Disposition"},
 		AllowCredentials: false,
 		MaxAge:           86400 * time.Second,
 	}))
@@ -117,6 +119,8 @@ func main() {
 		&model.DictData{},
 		&model.OperationLog{},
 		&model.StorageConfig{},
+		&model.StoragePool{},
+		&model.UploadSpace{},
 		&model.ShareRecord{},
 		&model.SyncFolder{},
 		&model.AppRelease{},
@@ -128,6 +132,14 @@ func main() {
 		&model.AppSetting{},
 		&model.Route{},
 		&model.UserRoute{},
+		&model.DSHToken{},
+		&model.VPNOrg{},
+		&model.VPNGroup{},
+		&model.VPNMember{},
+		&model.VPNDevice{},
+		&model.VPNEnrollToken{},
+		&model.VPNInterop{},
+		&model.VPNDeviceHistory{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
@@ -199,7 +211,10 @@ func main() {
 	upload_store.Init(redisClient)
 
 	//启动临时文件清理器（清理过期上传遗留的 .part）
-	filehandler.StartTempJanitor()
+	filehandler.StartTempJanitor(db)
+	account.StartCleanupWorker(db, func(uid uint) error {
+		return filehandler.CleanupAccountShares(db, redisClient, uid)
+	})
 
 	//启动分享链接清理器（30 分钟兜底扫描；每条链接另有独立协程到期自毁）
 	filehandler.StartShareLinkJanitor(db, redisClient)
@@ -236,14 +251,14 @@ func main() {
 		logger.Logger.Info("静态资源已挂载", zap.String("url", "/"+rel), zap.String("dir", filepath.Join(wd, filepath.FromSlash(rel))))
 	}
 
-	// 分享链接临时目录：与 nginx /temp/ 的 alias 保持一致。
-	// 挂载后任何直达本服务的入口（Tauri 本地、无 nginx 的开发环境）都能取到分享文件。
-	if tempPath := config.Conf.Share.TempPath; tempPath != "" {
-		if err := os.MkdirAll(tempPath, 0o755); err == nil {
-			r.Static("/temp", tempPath)
-			logger.Logger.Info("分享临时目录已挂载", zap.String("url", "/temp"), zap.String("dir", tempPath))
-		}
+	// 分享文件统一经过下载接口校验，不公开挂载临时目录。
+
+	// 组网 STUN-lite：客户端用它发现自己的公网端点，再用 heartbeat 上报。
+	if _, err := vpn.StartSTUN(config.Conf.Vpn.StunPort); err != nil {
+		logger.Logger.Warn("STUN-lite 启动失败（组网仍可走中继）", zap.Error(err))
 	}
+	// 服务器侧的 wg peer 由后端按会话有效性自己维护（见 internal/vpn/reconciler.go）
+	vpn.StartServerReconciler(db)
 
 	handler.RegisterRouters(r, db, redisClient, syncEngine)
 
@@ -253,6 +268,12 @@ func main() {
 	// 而现象只是"服务好好的但访问不了"。以前靠 start.bat 手动拉起、死了没人管，
 	// 现在跟着后端一起起、一起停，并且死了会自动重启（见 internal/supervisor）。
 	svCfg := config.Conf.Supervisor
+	// 开发启动器显式跳过外部进程：本机的 frpc/ddns-go 会抢生产隧道和 DDNS 记录，
+	// 把 ddns/jp 域名指到开发机，导致客户端上传被开发环境的后端按另一套空间拒绝。
+	if os.Getenv("SYC_SKIP_SUPERVISOR") == "1" {
+		logger.Logger.Info("开发启动器：跳过外部进程托管（frpc/ddns-go），避免抢占生产隧道与 DDNS 记录")
+		svCfg.Enabled = false
+	}
 	if config.IsProd() && svCfg.Enabled {
 		// 容器里没有宿主机的 frpc / ddns-go 二进制，托管只会反复拉起失败；内网穿透放宿主机或另起容器
 		logger.Logger.Warn("生产模式不托管外部进程，已忽略 supervisor 配置")

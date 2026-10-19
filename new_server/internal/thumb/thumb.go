@@ -134,29 +134,10 @@ func Init(cfg config.ThumbnailConfig, rdb *redis.Client) (*Service, error) {
 		logger.Logger.Info("缩略图功能已在配置中关闭")
 		return nil, nil
 	}
-	bin := cfg.FFmpeg
-	if bin == "" {
-		bin = "ffmpeg"
-	}
-	path, err := exec.LookPath(bin)
+	path, probe, err := resolveFFmpeg(cfg)
 	if err != nil {
-		logger.Logger.Warn("未找到 ffmpeg，缩略图功能不可用（Docker 镜像已内置；裸机请安装 ffmpeg 或配置 thumbnail.ffmpeg）",
-			zap.String("ffmpeg", bin))
+		logger.Logger.Warn("未找到可用的 ffmpeg，缩略图功能不可用", zap.Error(err))
 		return nil, nil
-	}
-	probe := cfg.FFprobe
-	if probe == "" {
-		// ffprobe 与 ffmpeg 同包发行，先找同目录下的，再找 PATH
-		probe = filepath.Join(filepath.Dir(path), "ffprobe")
-		if _, err := os.Stat(probe); err != nil {
-			probe = "ffprobe"
-		}
-	}
-	if p, err := exec.LookPath(probe); err == nil {
-		probe = p
-	} else {
-		probe = ""
-		logger.Logger.Warn("未找到 ffprobe，视频/音频封面缩略图不可用（图片缩略图不受影响）")
 	}
 	dir, tmpDir := cfg.Dir, cfg.TempDir
 	if dir == "" || tmpDir == "" {
@@ -214,10 +195,58 @@ func Init(cfg config.ThumbnailConfig, rdb *redis.Client) (*Service, error) {
 	go s.janitorLoop()
 	Global = s
 	logger.Logger.Info("缩略图服务已启动", zap.String("dir", dir), zap.String("temp_dir", tmpDir),
+		zap.String("ffmpeg", path), zap.String("ffprobe", probe),
 		zap.Duration("temp_ttl", ttl), zap.Int("workers", workers),
 		zap.Int("default_width", s.defaultWidth), zap.Int("cpus", runtime.NumCPU()),
 		zap.Bool("redis_index", s.idx != nil))
 	return s, nil
+}
+
+func resolveFFmpeg(cfg config.ThumbnailConfig) (string, string, error) {
+	if cfg.FFmpeg != "" {
+		if path, err := exec.LookPath(cfg.FFmpeg); err == nil {
+			return path, resolveFFprobe(cfg.FFprobe, path), nil
+		}
+		logger.Logger.Warn("配置的 ffmpeg 不可用，尝试内嵌版本", zap.String("ffmpeg", cfg.FFmpeg))
+	}
+
+	path, probe, err := extractEmbeddedFFmpeg()
+	if err == nil {
+		return path, probe, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		logger.Logger.Warn("解压内嵌 ffmpeg 失败，尝试系统 ffmpeg", zap.Error(err))
+	}
+
+	path, err = exec.LookPath("ffmpeg")
+	if err != nil {
+		return "", "", errors.New("未找到 ffmpeg：请先运行 tools/fetch-ffmpeg.ps1（Windows）或 tools/fetch-ffmpeg.sh（Linux），或在 thumbnail.ffmpeg 中配置路径")
+	}
+	return path, resolveFFprobe(cfg.FFprobe, path), nil
+}
+
+func resolveFFprobe(configured, ffmpegPath string) string {
+	if configured != "" {
+		if path, err := exec.LookPath(configured); err == nil {
+			return path
+		}
+		logger.Logger.Warn("未找到配置的 ffprobe，视频/音频封面缩略图不可用", zap.String("ffprobe", configured))
+		return ""
+	}
+
+	name := "ffprobe"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	path := filepath.Join(filepath.Dir(ffmpegPath), name)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	if path, err := exec.LookPath("ffprobe"); err == nil {
+		return path
+	}
+	logger.Logger.Warn("未找到 ffprobe，视频/音频封面缩略图不可用（图片缩略图不受影响）")
+	return ""
 }
 
 // Supported 按扩展名判断是否可能有缩略图（图片、视频、带封面的音频）。

@@ -1,9 +1,9 @@
 package sync
 
 import (
-	"net/http"
 	"strconv"
 	"strings"
+	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
 
@@ -345,7 +345,7 @@ func (h *APIHandler) engineOwnsTask(userID uint, taskID uint64) bool {
 func requireUser(c *gin.Context) (uint, bool) {
 	claimsAny, exists := c.Get("UserInfo")
 	if !exists || claimsAny == nil {
-		c.JSON(http.StatusOK, gin.H{"code": 401, "message": "未授权", "data": nil})
+		response.Fail(c, 401, "未授权")
 		return 0, false
 	}
 	userClaims := claimsAny.(*token.Claims)
@@ -353,9 +353,9 @@ func requireUser(c *gin.Context) (uint, bool) {
 }
 
 func jsonOK(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": data})
+	response.OK(c, data)
 }
 
 func jsonErr(c *gin.Context, code int, msg string) {
-	c.JSON(http.StatusOK, gin.H{"code": code, "message": msg, "data": nil})
+	response.Fail(c, code, msg)
 }

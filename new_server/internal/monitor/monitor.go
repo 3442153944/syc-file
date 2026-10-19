@@ -7,6 +7,7 @@ package monitor
 import (
 	"net/http"
 	"runtime"
+	"syc-file/pkg/response"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -132,7 +133,7 @@ func SystemSnapshot() gin.H {
 // System GET /v1/monitor/system —— CPU / 内存 / 主机 / 磁盘 概览（一次性）。
 // 实时刷新走 WS（见 broadcaster.go），本接口保留给 Web 端 / 首屏快照。
 func System(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "ok", "data": SystemSnapshot()})
+	response.OK(c, SystemSnapshot())
 }
 
 func collectCPU() cpuInfo {

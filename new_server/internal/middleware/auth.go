@@ -113,10 +113,20 @@ func Auth() gin.HandlerFunc {
 			} else {
 				// 检查剩余有效期，不足 refresh_expire 天则自动刷新
 				level := claims.EffectiveLevel()
+				// 每次请求都复核账号，删除或禁用后不能继续使用尚未过期的旧令牌。
+				accountAlive := true
+				if userLookup != nil {
+					role, liveLevel, status, exists := userLookup(claims.UserID)
+					accountAlive = exists && status == 1
+					if accountAlive {
+						level = liveLevel
+						claims.Roles = []string{role}
+					}
+				}
 				remaining := time.Until(claims.ExpiresAt.Time)
 				refreshThreshold := time.Duration(config.Conf.Auth.RefreshExpire) * 24 * time.Hour
 				// 访客账号自带有效期，token 不续期（续了就活过账号了）
-				if remaining < refreshThreshold && level > 0 {
+				if accountAlive && remaining < refreshThreshold && level > 0 {
 					roles := claims.Roles
 					canRefresh := true
 					if userLookup != nil {
@@ -157,7 +167,9 @@ func Auth() gin.HandlerFunc {
 
 				// 访客账号被禁用 / 过期 / 删除后，手里的 token 虽然签名有效，也必须立刻失效：
 				// 在这里（白名单判定之前）按未登录处理，白名单接口同样拿不到身份
-				if level == 0 && (guestAlive == nil || !guestAlive(claims.UserID)) {
+				if !accountAlive {
+					logger.Logger.Warn("账号已失效，拒绝旧令牌", zap.Int64("user_id", claims.UserID))
+				} else if level == 0 && (guestAlive == nil || !guestAlive(claims.UserID)) {
 					logger.Logger.Warn("访客账号已失效，按未登录处理", zap.Int64("user_id", claims.UserID))
 				} else {
 					c.Set("Auth", true)

@@ -22,6 +22,8 @@ var guestAlways = []string{
 	"/v1/user/verify",
 	"/v1/routes",
 	"/v1/system/status",
+	"/v1/storage/space",
+	"/v1/storage/mine",
 	"/v1/file/share-link/download/",
 }
 
@@ -29,7 +31,7 @@ var guestAlways = []string{
 var guestAPIs = map[string][]string{
 	"dashboard":        {"/v1/file/available-disks", "/v1/file/download-history", "/v1/file/thumbnail", "/v1/monitor/system", "/v1/ws/connect", "/v1/ws/my-devices"},
 	"file.browse":      {"/v1/file/available-disks", "/v1/file/traverse-directory", "/v1/file/download", "/v1/file/thumbnail", "/v1/file/text/read"},
-	"file.upload":      {"/v1/file/upload", "/v1/file/text/save"},
+	"file.upload":      {"/v1/file/upload", "/v1/file/text/save", "/v1/file/create-directory"},
 	"share":            {"/v1/file/share-link/"},
 	"share.quick":      {"/v1/file/quick-share/", "/v1/user/quick-share-settings"},
 	"sync":             {"/v1/sync/", "/v1/ws/connect"},
