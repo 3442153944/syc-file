@@ -59,8 +59,13 @@ type VpnConfig struct {
 	ServerAddress string `mapstructure:"server_address"`
 	// ServerPubKey / ServerEndpoint 服务器自身 WireGuard 接口的公钥与公网端点。
 	// 两者都配置后，所有客户端的 peers 里都会带上服务器节点。
-	ServerPubKey   string `mapstructure:"server_pubkey"`
+	ServerPubKey string `mapstructure:"server_pubkey"`
+	// ServerEndpoint 可选：显式覆盖服务器 peer 的端点。留空时按每次请求实际使用的
+	// Host（含 X-Forwarded-Host）拼 <host>:ServerWGPort，这样从 LAN/DDNS/任何入口
+	// 进来的客户端都会拿到与入口一致的端点，不把组网绑死在某一个供应商。
 	ServerEndpoint string `mapstructure:"server_endpoint"`
+	// ServerWGPort 服务器 WireGuard 监听端口（默认 51820）。
+	ServerWGPort int `mapstructure:"server_wg_port"`
 	// ServerInterface 服务器本机的 WireGuard 接口名（如 syc0）。配置后后端会自己
 	// 按「会话有效」维护 peer，不再需要外部脚本拿 token 轮询。
 	ServerInterface string `mapstructure:"server_interface"`
@@ -294,6 +299,9 @@ func Init() error {
 	}
 	if Conf.Vpn.StunPort == 0 {
 		Conf.Vpn.StunPort = 3478
+	}
+	if Conf.Vpn.ServerWGPort == 0 {
+		Conf.Vpn.ServerWGPort = 51820
 	}
 	Conf.Server.Mode = strings.ToLower(strings.TrimSpace(Conf.Server.Mode))
 	switch Conf.Server.Mode {

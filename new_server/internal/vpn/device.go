@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -342,7 +344,7 @@ func (a *API) Peers(c *gin.Context) {
 		})
 	}
 	// 服务器节点：固定地址（默认 172.1.0.254），让普通 HTTP/DB 业务也能走 P2P。
-	if sp := ServerPeer(); sp != nil {
+	if sp := ServerPeer(c); sp != nil {
 		rows = append(rows, sp)
 	}
 	response.OK(c, gin.H{
@@ -411,7 +413,7 @@ func (a *API) MyDevices(c *gin.Context) {
 
 // ServerPeer 服务器在覆盖网里的固定节点（默认 172.1.0.254）。
 // 未配置 ServerPubKey 时返回 nil，客户端就只拿普通对端。
-func ServerPeer() gin.H {
+func ServerPeer(c *gin.Context) gin.H {
 	cfg := config.Conf.Vpn
 	if strings.TrimSpace(cfg.ServerPubKey) == "" {
 		return nil
@@ -420,7 +422,7 @@ func ServerPeer() gin.H {
 	return gin.H{
 		"device_id":   "syc-server",
 		"pubkey":      cfg.ServerPubKey,
-		"endpoint":    cfg.ServerEndpoint,
+		"endpoint":    serverEndpointFor(c, cfg),
 		"address":     addr,
 		"allowed_ips": []string{addr + "/32"},
 		"role":        "server",
@@ -496,4 +498,30 @@ func (a *API) Link(c *gin.Context) {
 		"server_address": config.Conf.Vpn.ServerAddress,
 		"peers":          rows,
 	})
+}
+
+// serverEndpointFor 决定服务器 peer 的端点：
+//   - 配置了 vpn.server_endpoint 就用它（显式覆盖）；
+//   - 否则用「客户端本次请求实际使用的 Host」+ wg 端口，入口换成 LAN / ddns / 别的域名都自动跟随。
+func serverEndpointFor(c *gin.Context, cfg config.VpnConfig) string {
+	if ep := strings.TrimSpace(cfg.ServerEndpoint); ep != "" {
+		return ep
+	}
+	host := strings.TrimSpace(c.GetHeader("X-Forwarded-Host"))
+	if host == "" {
+		host = c.Request.Host
+	}
+	host = strings.TrimSpace(strings.Split(host, ",")[0])
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return ""
+	}
+	port := cfg.ServerWGPort
+	if port == 0 {
+		port = 51820
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }

@@ -2,8 +2,9 @@
 // 网络监控：实时上/下行速率 + 累计流量 + 网卡明细 + WS 连接概况。数据经 WS 推送。
 import {computed, ref, watch} from 'vue'
 import {
-  NCard, NGrid, NGi, NStatistic, NSpace, NText, NTag, NDataTable, NEmpty, NButton, useMessage,
+  NCard, NGrid, NGi, NStatistic, NSpace, NText, NTag, NDataTable, NEmpty, NButton, NAlert, useMessage,
 } from 'naive-ui'
+import {isTauri} from '@tauri-apps/api/core'
 import {useMonitor, fmtBytes, fmtRate} from '@/api/monitor/useMonitor'
 import {netState, probeAll, switchNode, healthOf} from '@/api/net'
 
@@ -37,6 +38,38 @@ function sparkline(data: number[]): string {
 }
 
 const interfaces = computed(() => network.value?.interfaces ?? [])
+
+// ── 主动组网测试：探测端点 → 上报 → 读回直连/中继 ─────────────────
+const vpnTesting = ref(false)
+const vpnResult = ref('')
+
+async function testVpn() {
+  const device = localStorage.getItem('syc_vpn_device') || ''
+  if (!device) {
+    vpnResult.value = '本机还没有组网设备：先完成入组并写入 localStorage.syc_vpn_device'
+    return
+  }
+  vpnTesting.value = true
+  vpnResult.value = ''
+  try {
+    if (isTauri()) {
+      const {invoke} = await import('@tauri-apps/api/core')
+      const nat = await invoke<string>('vpn_nat', {device})
+      const link = await invoke<string>('vpn_link', {device})
+      vpnResult.value = `${nat}\n${link}`
+    } else {
+      const url = `${netState.serverUrl}/v1/vpn/link?device_id=${encodeURIComponent(device)}`
+      const res = await fetch(url, {headers: {Token: localStorage.getItem('token') || ''}})
+      const body = await res.json()
+      const mode = body?.data?.mode ?? 'unknown'
+      vpnResult.value = `模式：${mode === 'direct' ? '直连' : mode === 'relay' ? '中继' : mode}`
+    }
+  } catch (e) {
+    vpnResult.value = String(e)
+  } finally {
+    vpnTesting.value = false
+  }
+}
 
 // ── 节点灾备概览 ────────────────────────────────────────────────────────────
 // 客户端自己的出网链路状态（和上面那些服务端指标是两回事）：当前走哪个节点、
@@ -96,6 +129,19 @@ const nicColumns = [
         {{ connected ? '实时' : '连接中…' }}
       </NTag>
     </NSpace>
+
+    <NCard size="small" style="margin-bottom: 12px">
+      <NSpace justify="space-between" align="center">
+        <div>
+          <NText strong>主动组网测试</NText>
+          <div style="opacity:.65;font-size:12px">探测公网端点 → 上报 → 读回直连/中继</div>
+        </div>
+        <NButton size="small" type="primary" :loading="vpnTesting" @click="testVpn">开始测试</NButton>
+      </NSpace>
+      <NAlert v-if="vpnResult" type="info" :bordered="false" style="margin-top: 10px; white-space: pre-wrap">
+        {{ vpnResult }}
+      </NAlert>
+    </NCard>
 
     <NGrid :cols="4" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
       <NGi span="2 m:1">
