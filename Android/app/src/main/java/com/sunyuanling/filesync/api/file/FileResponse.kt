@@ -117,7 +117,12 @@ data class UploadCompleteData(
     @SerialName("file_size") val fileSize: Long = 0,
     @SerialName("file_hash") val fileHash: String = "",
     /** 是否已触发同步派发（目标在同步目录内） */
-    val synced: Boolean = false
+    val synced: Boolean = false,
+    @SerialName("share_code") val shareCode: String = "",
+    @SerialName("expire_time") val expireTime: String = "",
+    @SerialName("url_path") val urlPath: String = "",
+    @SerialName("entry_url") val entryUrl: String = "",
+    @SerialName("entry_candidates") val entryCandidates: List<String> = emptyList()
 )
 
 // ==================== 下载历史 ====================

@@ -212,6 +212,7 @@ object WebSocketManager {
 
         reconnectJob = reconnectScope.launch {
             delay(delayMs)
+            com.sunyuanling.filesync.network.NodeFailover.checkNow()
 
             if (shouldReconnect.get()) {
                 // 重连时也使用 Request.getToken()

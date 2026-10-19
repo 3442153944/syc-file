@@ -79,7 +79,8 @@ data class UploadInitParams(
     /** 每片叶子哈希 hex，长度须等于 chunk_count */
     @SerialName("leaf_hashes") val leafHashes: List<String>,
     /** 本机设备 id：秒传在 init 阶段直接完成，服务端同步派发需要排除源设备 */
-    @SerialName("device_id") val deviceId: String = ""
+    @SerialName("device_id") val deviceId: String = "",
+    @SerialName("quick_share") val quickShare: Boolean = false
 )
 
 /**

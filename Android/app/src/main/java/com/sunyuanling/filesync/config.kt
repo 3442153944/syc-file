@@ -114,12 +114,14 @@ object AppConfig {
 
     /** 完整服务器 URL，如 https://ddns.sunyuanling.cn:8891 */
     fun getBaseUrl(): String {
-        val protocol = if (isHttps) "https" else "http"
-        return "$protocol://$server:$port${routePath.trimEnd('/')}"
+        return com.sunyuanling.filesync.network.NodeFailover.effective(getConfiguredBaseUrl())
     }
 
-    fun getWsUrl(path: String = "/file/v1/ws/connect"): String {
-        val protocol = if (isHttps) "wss" else "ws"
-        return "$protocol://$server:$port$path"
+    fun getConfiguredBaseUrl(): String {
+        return com.sunyuanling.filesync.network.ServerAddress.base(server, port, isHttps, routePath)
+    }
+
+    fun getWsUrl(path: String = "/v1/ws/connect"): String {
+        return getBaseUrl().replaceFirst("https://", "wss://").replaceFirst("http://", "ws://") + path
     }
 }

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name="com.sunyuanling.filesync.DragSourceActivity" android:exported="true" />
+        <provider android:name="com.sunyuanling.filesync.DragFileProvider" android:authorities="com.sunyuanling.filesync.test.dragfiles"
+            android:exported="false" android:grantUriPermissions="true" />
+    </application>
+</manifest>

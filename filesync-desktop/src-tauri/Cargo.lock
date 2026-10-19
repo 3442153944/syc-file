@@ -1260,6 +1260,7 @@ dependencies = [
  "blake3",
  "chrono",
  "encoding_rs",
+ "filesync-mesh-proxy",
  "futures-util",
  "hex",
  "keyring",
@@ -1285,6 +1286,16 @@ dependencies = [
  "tokio-util",
  "uuid",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "filesync-mesh-proxy"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "tokio",
+ "url",
 ]
 
 [[package]]

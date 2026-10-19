@@ -24,6 +24,9 @@ import com.sunyuanling.filesync.ui.screen.preview.PreviewScreen
 
 @RequiresApi(Build.VERSION_CODES.O)
 fun NavGraphBuilder.fileGraph(navController: NavHostController) {
+    composable<com.sunyuanling.filesync.router.QuickShareDestination> {
+        com.sunyuanling.filesync.ui.screen.files.QuickShareScreen { navController.navigateUp() }
+    }
     composable<TransferDestination> {
         FileTransferListScreen(
             onBackClick = { navController.navigateUp() },

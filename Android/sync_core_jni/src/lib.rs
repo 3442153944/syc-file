@@ -20,6 +20,20 @@ use jni::JNIEnv;
 
 const HASH_SIZE: usize = 32;
 
+/// 节点选择与桌面共用同一决策函数，JNI 只转换 JSON，不包含平台网络操作。
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_NodeSelector_nativeSelect(
+    mut env: JNIEnv, _this: JObject, input: JString,
+) -> jni::sys::jstring {
+    catch_unwind(AssertUnwindSafe(|| {
+        let text: String = env.get_string(&input).ok()?.into();
+        let input = serde_json::from_str::<sync_core::node_selection::SelectionInput>(&text).ok()?;
+        let selected = sync_core::node_selection::select(&input);
+        let json = serde_json::to_string(&selected).ok()?;
+        Some(jstring_of(&mut env, &json))
+    })).ok().flatten().unwrap_or(std::ptr::null_mut())
+}
+
 fn jnull() -> jbyteArray {
     std::ptr::null_mut()
 }

@@ -2,9 +2,6 @@
 package com.sunyuanling.filesync.ui.screen.files
 
 import android.net.Uri
-import android.os.Environment
-import android.provider.OpenableColumns
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -17,7 +14,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -30,7 +26,6 @@ import com.sunyuanling.filesync.ui.viewModel.files.UploadFileInfo
 import com.sunyuanling.filesync.ui.viewModel.files.UploadState
 import com.sunyuanling.filesync.util.formatFileSize
 import kotlinx.coroutines.delay
-import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,52 +35,22 @@ fun FileUploadScreen(
     navController: NavController,
     viewModel: FileUploadViewModel = viewModel(),
 ) {
-    val context = LocalContext.current
     val uploadState by viewModel.uploadState.collectAsState()
     val selectedFiles by viewModel.selectedFiles.collectAsState()
     val targetPath by viewModel.targetPath.collectAsState()
     val currentProgress by viewModel.currentUploadProgress.collectAsState()
-    val hasRootAccess by viewModel.hasRootAccess.collectAsState()
-    val isCheckingRoot by viewModel.isCheckingRoot.collectAsState()
+    val hasRootAccess = false // 远端目录权限由服务端决定，与手机 root 无关。
+    val importing by viewModel.importing.collectAsState()
+    val space by viewModel.space.collectAsState()
+    val spaceError by viewModel.spaceError.collectAsState()
 
     var showPathDialog by remember { mutableStateOf(false) }
-    var showRootRequestDialog by remember { mutableStateOf(false) }
+
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris: List<Uri> ->
-        val fileInfoList = uris.mapNotNull { uri ->
-            try {
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-
-                    if (cursor.moveToFirst()) {
-                        val contentResolver = context.contentResolver
-                        val inputStream = contentResolver.openInputStream(uri)
-                        val fileName = cursor.getString(nameIndex)
-                        val tempFile = File(context.cacheDir, fileName)
-                        inputStream?.use { input ->
-                            tempFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-
-                        UploadFileInfo(
-                            uri = uri,
-                            name = fileName,
-                            path = tempFile.absolutePath,
-                            size = cursor.getLong(sizeIndex),
-                            mimeType = contentResolver.getType(uri)
-                        )
-                    } else null
-                }
-            } catch (e: Exception) {
-                Log.e("FileUpload", "处理文件失败", e)
-                null
-            }
-        }
-        viewModel.addFiles(fileInfoList)
+        viewModel.importFiles(uris)
     }
 
     LaunchedEffect(uploadState) {
@@ -109,22 +74,6 @@ fun FileUploadScreen(
                 title = {
                     Column {
                         Text("文件上传")
-                        if (isCheckingRoot) {
-                            Text(
-                                "正在检查 Root...",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        } else {
-                            Text(
-                                if (hasRootAccess) "Root 模式" else "用户模式",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (hasRootAccess)
-                                    MaterialTheme.colorScheme.primary
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
                     }
                 },
                 navigationIcon = {
@@ -133,11 +82,6 @@ fun FileUploadScreen(
                     }
                 },
                 actions = {
-                    if (!hasRootAccess && !isCheckingRoot) {
-                        IconButton(onClick = { showRootRequestDialog = true }) {
-                            Icon(Icons.Default.AdminPanelSettings, "请求 Root")
-                        }
-                    }
                     if (selectedFiles.isNotEmpty()) {
                         IconButton(onClick = { viewModel.clearFiles() }) {
                             Icon(Icons.Default.Clear, "清空")
@@ -154,34 +98,18 @@ fun FileUploadScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Root 模式提示
-            if (hasRootAccess) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.Security,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "已启用 Root 权限，可访问系统所有目录",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
+            if (importing) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text("正在准备上传文件…")
             }
-
+            space?.let { current ->
+                Text("上传空间：已用 ${formatFileSize(current.usedBytes)} / ${formatFileSize(current.quotaBytes)}")
+                current.expiresAt?.let { Text("有效期至：$it", style = MaterialTheme.typography.bodySmall) }
+            }
+            spaceError?.let { error ->
+                Text(error, color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { viewModel.refreshUploadSpace() }) { Text("重新读取空间") }
+            }
             // 目标路径选择
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
@@ -394,40 +322,13 @@ fun FileUploadScreen(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = selectedFiles.isNotEmpty() &&
                         targetPath.isNotEmpty() &&
-                        uploadState !is UploadState.Uploading
+                        uploadState !is UploadState.Uploading && !importing && spaceError == null
             ) {
                 Icon(Icons.Default.Upload, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("开始上传")
             }
         }
-    }
-
-    // Root 权限请求对话框
-    if (showRootRequestDialog) {
-        AlertDialog(
-            onDismissRequest = { showRootRequestDialog = false },
-            icon = { Icon(Icons.Default.AdminPanelSettings, null) },
-            title = { Text("请求 Root 权限") },
-            text = {
-                Text("启用 Root 模式后，可以访问系统所有目录（包括 /data、/system 等）。\n\n需要您的设备已获取 Root 权限。")
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.requestRootAccess()
-                        showRootRequestDialog = false
-                    }
-                ) {
-                    Text("授权")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRootRequestDialog = false }) {
-                    Text("取消")
-                }
-            }
-        )
     }
 
     // 路径选择对话框（集成文件浏览器）
@@ -470,7 +371,7 @@ fun PathSelectionDialog(
         )
     } else {
         DirectoryBrowserDialog(
-            initialPath = selectedDisk?.path ?: (if (hasRootAccess) "/" else Environment.getExternalStorageDirectory().absolutePath),
+            initialPath = selectedDisk?.path ?: currentPath.ifEmpty { "/" },
             hasRootAccess = hasRootAccess,
             onDismiss = onDismiss,
             onBack = {

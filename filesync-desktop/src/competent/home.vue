@@ -84,6 +84,10 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 onBeforeUnmount(() => {
   if (refreshTimer) clearInterval(refreshTimer)
   transferStore.dispose()
+  if (isTauri()) {
+    import('@tauri-apps/api/core').then(({invoke}) => invoke('mesh_proxy_stop'))
+      .catch(e => console.warn('停止组网代理失败', e))
+  }
 })
 
 const ind = computed(() => transferStore.indicator)

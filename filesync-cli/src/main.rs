@@ -6,122 +6,22 @@
 //! 会话与私钥都保存在 `~/.config/syc-cli/`（目录 700、文件 600），不写系统级配置；
 //! 服务端只存密文私钥，明文私钥只在 `register` 响应里出现一次，由本工具落盘。
 
+use platform::set_mode;
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand};
+mod cli;
+mod platform;
+mod proxy;
+use clap::Parser;
+use cli::{Cli, Cmd};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 // ── 命令行定义 ─────────────────────────────────────────────────
-
-#[derive(Parser)]
-#[command(name = "syc", about = "云梯组网命令行客户端", version)]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Cmd,
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// 登录并保存会话
-    Login {
-        /// 服务端地址，例如 http://127.0.0.1:8992
-        #[arg(long)]
-        server: String,
-        #[arg(long)]
-        user: String,
-        /// 不传则读环境变量 SYC_PASSWORD
-        #[arg(long)]
-        password: Option<String>,
-        /// 登录设备号，默认取主机名
-        #[arg(long)]
-        device: Option<String>,
-    },
-    /// 探测服务端 /v1/ping
-    Status,
-    /// 当前账号已登记的设备
-    Devices,
-    /// 当前账号可见的组
-    Groups,
-    /// 签发一次性入组令牌
-    Enroll {
-        #[arg(long)]
-        group: u64,
-    },
-    /// 用一次性令牌登记设备；key_source=server 时私钥由服务端生成并托管
-    Register {
-        #[arg(long)]
-        group: u64,
-        #[arg(long)]
-        device: String,
-        #[arg(long, default_value = "server")]
-        key_source: String,
-        #[arg(long)]
-        endpoint: Option<String>,
-    },
-    /// 拉取按 ACL 裁剪后的对端
-    Peers {
-        #[arg(long)]
-        device: String,
-    },
-    /// 探测公网端点（STUN-lite），可选择顺手通过 heartbeat 上报
-    Nat {
-        #[arg(long)]
-        device: Option<String>,
-        #[arg(long, default_value_t = 3478)]
-        stun_port: u16,
-        /// 探测后立即上报端点，方便对端直连
-        #[arg(long)]
-        report: bool,
-    },
-    /// 一键体检：STUN 探测 + 链路状态 + 对端列表
-    Netcheck {
-        #[arg(long)]
-        device: String,
-        #[arg(long, default_value_t = 3478)]
-        stun_port: u16,
-    },
-    /// 对覆盖网地址做 ping（可指定网卡，强制走隧道）
-    Ping {
-        /// 目标覆盖地址，如 172.1.0.254
-        to: String,
-        #[arg(long, default_value_t = 3)]
-        count: u8,
-        /// 指定网卡（例：syc1），强制从隧道出去
-        #[arg(long)]
-        iface: Option<String>,
-    },
-    /// 查看各对端是直连还是经中继
-    Link {
-        #[arg(long)]
-        device: String,
-    },
-    /// 打印 WireGuard 配置（wg-quick 格式）
-    WgConfig {
-        #[arg(long)]
-        device: String,
-    },
-    /// 创建并起隧道（需要 root，Linux）
-    Up {
-        #[arg(long)]
-        device: String,
-        #[arg(long, default_value = "syc0")]
-        iface: String,
-        /// 本地监听端口；0 = 内核自动分配（同机多客户端时避免撞端口）
-        #[arg(long, default_value_t = 0)]
-        listen_port: u16,
-    },
-    /// 关闭隧道
-    Down {
-        #[arg(long, default_value = "syc0")]
-        iface: String,
-    },
-}
 
 // ── 会话与密钥存储 ─────────────────────────────────────────────
 
@@ -140,12 +40,14 @@ fn config_dir() -> Result<PathBuf> {
     let dir = match env::var("SYC_CLI_CONFIG_DIR") {
         Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
         _ => {
-            let home = env::var("HOME").context("读不到 HOME")?;
+            let home = env::var("HOME")
+                .or_else(|_| env::var("USERPROFILE"))
+                .context("读不到用户目录")?;
             PathBuf::from(home).join(".config").join("syc-cli")
         }
     };
     fs::create_dir_all(dir.join("keys"))?;
-    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    let _ = set_mode(&dir, 0o700);
     Ok(dir)
 }
 
@@ -163,7 +65,7 @@ fn load_session() -> Result<Session> {
 fn save_session(s: &Session) -> Result<()> {
     let path = session_path()?;
     fs::write(&path, serde_json::to_string_pretty(s)?)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    set_mode(&path, 0o600)?;
     Ok(())
 }
 
@@ -174,7 +76,7 @@ fn key_path(device: &str) -> Result<PathBuf> {
 fn save_key(device: &str, private_b64: &str) -> Result<()> {
     let path = key_path(device)?;
     fs::write(&path, private_b64.trim())?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    set_mode(&path, 0o600)?;
     Ok(())
 }
 
@@ -225,7 +127,9 @@ fn ensure_ok(v: &Value) -> Result<&Value> {
         Err(anyhow!(
             "接口返回 {}: {}",
             v.get("code").unwrap_or(&Value::Null),
-            v.get("message").and_then(Value::as_str).unwrap_or("未知错误")
+            v.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("未知错误")
         ))
     }
 }
@@ -245,6 +149,7 @@ fn generate_keypair() -> Result<(String, String)> {
 
 // ── 隧道 ───────────────────────────────────────────────────────
 
+#[cfg(not(windows))]
 fn is_root() -> bool {
     Command::new("id")
         .arg("-u")
@@ -256,6 +161,7 @@ fn is_root() -> bool {
 
 /// 优先用 /usr/bin/wg 的副本：这台机器上 AppArmor 会拦 /usr/bin/wg 打开普通文件
 /// （fopen: Permission denied），复制出来的二进制不受路径规则限制。
+#[cfg(not(windows))]
 fn wg_bin() -> String {
     let src = Command::new("sh")
         .args(["-c", "command -v wg"])
@@ -269,13 +175,14 @@ fn wg_bin() -> String {
     let dst = env::temp_dir().join("syc-wg");
     match fs::copy(&src, &dst) {
         Ok(_) => {
-            let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(0o755));
+            let _ = set_mode(&dst, 0o755);
             dst.to_string_lossy().into_owned()
         }
         Err(_) => src,
     }
 }
 
+#[cfg(not(windows))]
 fn sh(program: &str, args: &[&str]) -> Result<()> {
     let out = Command::new(program)
         .args(args)
@@ -292,17 +199,32 @@ fn sh(program: &str, args: &[&str]) -> Result<()> {
 }
 
 /// 从 peers 响应拼出 wg-quick 配置。self 里有地址与网段，peers 里是对端。
-fn build_wg_config(peers: &Value, private_key: &str, quick: bool, listen_port: u16) -> Result<String> {
-    let data = peers.get("data").ok_or_else(|| anyhow!("peers 响应缺少 data"))?;
-    let self_info = data.get("self").ok_or_else(|| anyhow!("peers 响应缺少 self"))?;
+fn build_wg_config(
+    peers: &Value,
+    private_key: &str,
+    quick: bool,
+    listen_port: u16,
+) -> Result<String> {
+    let data = peers
+        .get("data")
+        .ok_or_else(|| anyhow!("peers 响应缺少 data"))?;
+    let self_info = data
+        .get("self")
+        .ok_or_else(|| anyhow!("peers 响应缺少 self"))?;
     let address = self_info
         .get("address")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("self 缺少 address"))?;
-    let subnet = self_info.get("subnet").and_then(Value::as_str).unwrap_or("");
+    let subnet = self_info
+        .get("subnet")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let bits = subnet.rsplit('/').next().unwrap_or("24");
     let mtu = self_info.get("mtu").and_then(Value::as_u64).unwrap_or(1280);
-    let keepalive = self_info.get("keepalive").and_then(Value::as_u64).unwrap_or(25);
+    let keepalive = self_info
+        .get("keepalive")
+        .and_then(Value::as_u64)
+        .unwrap_or(25);
 
     let mut out = String::new();
     out.push_str("[Interface]\n");
@@ -314,7 +236,12 @@ fn build_wg_config(peers: &Value, private_key: &str, quick: bool, listen_port: u
     }
     out.push_str(&format!("ListenPort = {listen_port}\n"));
 
-    for peer in data.get("peers").and_then(Value::as_array).cloned().unwrap_or_default() {
+    for peer in data
+        .get("peers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         let pubkey = peer.get("pubkey").and_then(Value::as_str).unwrap_or("");
         if pubkey.is_empty() {
             continue;
@@ -498,7 +425,10 @@ fn main() -> Result<()> {
             )?;
             ensure_ok(&v)?;
             let peers = v["data"]["peers"].as_array().cloned().unwrap_or_default();
-            println!("自身：{}", v["data"]["self"]["address"].as_str().unwrap_or("?"));
+            println!(
+                "自身：{}",
+                v["data"]["self"]["address"].as_str().unwrap_or("?")
+            );
             println!("对端 {} 个：", peers.len());
             for p in peers {
                 println!(
@@ -559,14 +489,20 @@ fn main() -> Result<()> {
                 "idle" => "暂无对端",
                 _ => "未知",
             };
-            println!("  {label}（mode={mode}）  本机 {}", v["data"]["self"]["address"].as_str().unwrap_or("?"));
+            println!(
+                "  {label}（mode={mode}）  本机 {}",
+                v["data"]["self"]["address"].as_str().unwrap_or("?")
+            );
             println!("== 3. 对端 ==");
             let peers = v["data"]["peers"].as_array().cloned().unwrap_or_default();
             for p in &peers {
                 println!(
                     "  {:<24} {:<8} {}",
                     p["device_id"].as_str().unwrap_or(""),
-                    match p["mode"].as_str().unwrap_or("") { "relay" => "中继", _ => "直连" },
+                    match p["mode"].as_str().unwrap_or("") {
+                        "relay" => "中继",
+                        _ => "直连",
+                    },
                     p["endpoint"].as_str().unwrap_or("(端点未知)")
                 );
             }
@@ -575,17 +511,37 @@ fn main() -> Result<()> {
             }
         }
 
+        Cmd::Proxy {
+            port,
+            allow_lan,
+            username,
+            iface,
+        } => proxy::run(port, allow_lan, username, iface)?,
+
         Cmd::Ping { to, count, iface } => {
             let mut cmd = Command::new("ping");
-            cmd.args(["-c", &count.to_string(), "-W", "2"]);
-            if let Some(i) = iface {
-                cmd.args(["-I", &i]);
+            #[cfg(windows)]
+            {
+                let _ = iface;
+                cmd.args(["-n", &count.to_string(), "-w", "2000"]);
+            }
+            #[cfg(not(windows))]
+            {
+                cmd.args(["-c", &count.to_string(), "-W", "2"]);
+                if let Some(i) = iface {
+                    cmd.args(["-I", &i]);
+                }
             }
             cmd.arg(&to);
-            let out = cmd.output().context("执行 ping 失败（系统是否安装 iputils-ping？）")?;
-            print!("{}", String::from_utf8_lossy(&out.stdout));
+            let out = cmd
+                .output()
+                .context("执行 ping 失败（系统是否安装 iputils-ping？）")?;
+            print!("{}", platform::decode(&out.stdout));
             if !out.status.success() {
-                return Err(anyhow!("ping 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+                return Err(anyhow!(
+                    "ping 失败: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
             }
         }
 
@@ -621,7 +577,13 @@ fn main() -> Result<()> {
                     any_relay = true;
                 }
             }
-            let mode = if peers.is_empty() { "idle" } else if any_relay { "relay" } else { "direct" };
+            let mode = if peers.is_empty() {
+                "idle"
+            } else if any_relay {
+                "relay"
+            } else {
+                "direct"
+            };
             let label = match mode {
                 "direct" => "直连",
                 "relay" => "中继",
@@ -657,7 +619,12 @@ fn main() -> Result<()> {
             print!("{}", build_wg_config(&v, &key, true, 0)?);
         }
 
-        Cmd::Up { device, iface, listen_port } => {
+        Cmd::Up {
+            device,
+            iface,
+            listen_port,
+        } => {
+            #[cfg(not(windows))]
             if !is_root() {
                 bail!("up 需要 root（创建虚拟网卡）；无 root 环境可用 syc wg-config 生成配置后自行导入");
             }
@@ -672,44 +639,56 @@ fn main() -> Result<()> {
             )?;
             ensure_ok(&v)?;
             let v = pin_server_endpoint(v, &s.server, 51820);
-            let conf = build_wg_config(&v, &key, false, listen_port)?;
+            #[cfg(windows)]
+            platform::up(&iface, &build_wg_config(&v, &key, true, listen_port)?)?;
+            #[cfg(not(windows))]
+            {
+                let conf = build_wg_config(&v, &key, false, listen_port)?;
 
-            let path = env::temp_dir().join(format!("syc-{iface}.conf"));
-            fs::write(&path, &conf)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+                let path = env::temp_dir().join(format!("syc-{iface}.conf"));
+                fs::write(&path, &conf)?;
+                set_mode(&path, 0o600)?;
 
-            // 已存在就先删，保证幂等
-            let _ = Command::new("ip").args(["link", "del", "dev", &iface]).output();
-            sh("ip", &["link", "add", "dev", &iface, "type", "wireguard"])?;
-            // 配置从 stdin 喂给 wg，避免它按路径打开文件（AppArmor 会拦）
-            let status = Command::new(wg_bin())
-                .args(["setconf", &iface, "/dev/stdin"])
-                .stdin(std::process::Stdio::from(fs::File::open(&path)?))
-                .status()
-                .context("执行 wg setconf 失败")?;
-            if !status.success() {
-                bail!("wg setconf {iface} 失败: {}", status);
+                // 已存在就先删，保证幂等
+                let _ = Command::new("ip")
+                    .args(["link", "del", "dev", &iface])
+                    .output();
+                sh("ip", &["link", "add", "dev", &iface, "type", "wireguard"])?;
+                // 配置从 stdin 喂给 wg，避免它按路径打开文件（AppArmor 会拦）
+                let status = Command::new(wg_bin())
+                    .args(["setconf", &iface, "/dev/stdin"])
+                    .stdin(std::process::Stdio::from(fs::File::open(&path)?))
+                    .status()
+                    .context("执行 wg setconf 失败")?;
+                if !status.success() {
+                    bail!("wg setconf {iface} 失败: {}", status);
+                }
+                let bits = v["data"]["self"]["subnet"]
+                    .as_str()
+                    .and_then(|s| s.rsplit('/').next())
+                    .unwrap_or("24");
+                let addr = v["data"]["self"]["address"].as_str().unwrap_or("");
+                sh(
+                    "ip",
+                    &["addr", "add", &format!("{addr}/{bits}"), "dev", &iface],
+                )?;
+                sh("ip", &["link", "set", &iface, "up"])?;
+                let _ = fs::remove_file(&path);
+                println!("隧道 {iface} 已启动，地址 {addr}/{bits}");
             }
-            let bits = v["data"]["self"]["subnet"]
-                .as_str()
-                .and_then(|s| s.rsplit('/').next())
-                .unwrap_or("24");
-            let addr = v["data"]["self"]["address"].as_str().unwrap_or("");
-            sh(
-                "ip",
-                &["addr", "add", &format!("{addr}/{bits}"), "dev", &iface],
-            )?;
-            sh("ip", &["link", "set", &iface, "up"])?;
-            let _ = fs::remove_file(&path);
-            println!("隧道 {iface} 已启动，地址 {addr}/{bits}");
         }
 
         Cmd::Down { iface } => {
-            if !is_root() {
-                bail!("down 需要 root");
+            #[cfg(windows)]
+            platform::down(&iface)?;
+            #[cfg(not(windows))]
+            {
+                if !is_root() {
+                    bail!("down 需要 root");
+                }
+                sh("ip", &["link", "del", "dev", &iface])?;
+                println!("隧道 {iface} 已关闭");
             }
-            sh("ip", &["link", "del", "dev", &iface])?;
-            println!("隧道 {iface} 已关闭");
         }
     }
     Ok(())
@@ -723,7 +702,11 @@ fn pin_server_endpoint(mut peers: Value, server: &str, wg_port: u16) -> Value {
         Err(_) => return peers,
     };
     let ep = format!("{host}:{wg_port}");
-    if let Some(list) = peers.get_mut("data").and_then(|d| d.get_mut("peers")).and_then(|p| p.as_array_mut()) {
+    if let Some(list) = peers
+        .get_mut("data")
+        .and_then(|d| d.get_mut("peers"))
+        .and_then(|p| p.as_array_mut())
+    {
         for p in list.iter_mut() {
             let is_server = p.get("role").and_then(Value::as_str) == Some("server")
                 || p.get("device_id").and_then(Value::as_str) == Some("syc-server");
@@ -772,7 +755,10 @@ fn print_table(v: Value) -> Result<()> {
             for r in rows {
                 println!(
                     "  {:<24} {:<16} {:<20} {}",
-                    r["device_id"].as_str().or(r["name"].as_str()).unwrap_or("-"),
+                    r["device_id"]
+                        .as_str()
+                        .or(r["name"].as_str())
+                        .unwrap_or("-"),
                     r["address"].as_str().unwrap_or("-"),
                     r["status"].as_str().or(r["subnet"].as_str()).unwrap_or("-"),
                     r["id"]

@@ -412,11 +412,16 @@ async fn do_check(r: &'static NetRuntime, trigger: &str) -> bool {
         emit_status();
         return false;
     }
-    let best = futures_util::future::join_all(others.iter().map(probe_node))
-        .await
-        .into_iter()
-        .filter(|h| h.reachable)
-        .min_by_key(|h| h.latency_ms);
+    let health = futures_util::future::join_all(others.iter().map(probe_node)).await;
+    // 桌面与 Android 的选择决策共用 sync_core，探测和切换仍由各平台执行。
+    let input = sync_core::node_selection::SelectionInput {
+        active: active.id.clone(), auto_failover: auto, required_backend: None,
+        nodes: health.iter().map(|h| sync_core::node_selection::NodeHealth {
+            id: h.id.clone(), reachable: h.reachable, latency_ms: h.latency_ms, backend: h.server_node.clone(),
+        }).collect(),
+    };
+    let best = sync_core::node_selection::select(&input)
+        .and_then(|id| health.into_iter().find(|h| h.id == id));
 
     match best {
         Some(b) => {

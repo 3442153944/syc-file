@@ -3,13 +3,19 @@ package com.sunyuanling.filesync.ui.viewModel.files
 
 import android.app.Application
 import android.net.Uri
-import android.os.Environment
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sunyuanling.filesync.api.file.ChunkedUploader
+import com.sunyuanling.filesync.api.file.FileApi
+import com.sunyuanling.filesync.api.file.UploadSpace
+import com.sunyuanling.filesync.util.UploadStaging
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlin.coroutines.coroutineContext
 import com.sunyuanling.filesync.util.DeviceInfoUtil
-import com.sunyuanling.filesync.util.RootHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -32,50 +38,77 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
     private val _currentUploadProgress = MutableStateFlow<UploadProgress?>(null)
     val currentUploadProgress: StateFlow<UploadProgress?> = _currentUploadProgress
 
-    private val _hasRootAccess = MutableStateFlow(false)
-    val hasRootAccess: StateFlow<Boolean> = _hasRootAccess
-
-    private val _isCheckingRoot = MutableStateFlow(false)
-    val isCheckingRoot: StateFlow<Boolean> = _isCheckingRoot
-
     //可用磁盘列表
     private val _availableDisks = MutableStateFlow<List<String>>(emptyList())
     val availableDisks: StateFlow<List<String>> = _availableDisks
 
     /** 当前上传协程引用，便于取消。 */
     private var uploadJob: Job? = null
+    private val stagingRoot get() = File(getApplication<Application>().cacheDir, "upload-selection")
+    private var importJob: Job? = null
+    private val _importing = MutableStateFlow(false)
+    val importing: StateFlow<Boolean> = _importing
+    private val _space = MutableStateFlow<UploadSpace?>(null)
+    val space: StateFlow<UploadSpace?> = _space
+    private val _spaceError = MutableStateFlow<String?>(null)
+    val spaceError: StateFlow<String?> = _spaceError
 
     init {
-        checkRootAccess()
+        refreshUploadSpace()
     }
 
-    fun checkRootAccess() {
+    fun refreshUploadSpace() {
         viewModelScope.launch {
-            _isCheckingRoot.value = true
-            val hasRoot = RootHelper.checkRootAccess()
-            _hasRootAccess.value = hasRoot
-            _isCheckingRoot.value = false
-
-            // 设置默认路径
-            if (_targetPath.value.isEmpty()) {
-                _targetPath.value = if (hasRoot) {
-                    "/"
+            _spaceError.value = null
+            FileApi.uploadSpace().onSuccess { response ->
+                _space.value = response.data
+                val current = response.data
+                if (current != null) {
+                    if (_targetPath.value.isEmpty()) _targetPath.value = current.defaultPath.ifEmpty { current.path }
+                    if (!current.enabled || current.frozen) _spaceError.value = "上传空间已停用或到期"
                 } else {
-                    Environment.getExternalStorageDirectory().absolutePath
+                    // 超级管理员没有独立账号空间时，仍可使用服务端允许的目录。
+                    FileApi.getAvailableDisks().onSuccess { disks ->
+                        if (_targetPath.value.isEmpty()) _targetPath.value = disks.data?.allowedDisks
+                            ?.firstOrNull { it.isAccessible }?.path.orEmpty()
+                        if (_targetPath.value.isEmpty()) _spaceError.value = "尚未分配可用上传空间"
+                    }.onFailure { _spaceError.value = it.message ?: "读取上传目录失败" }
                 }
-            }
+            }.onFailure { _spaceError.value = it.message ?: "读取上传空间失败" }
         }
     }
 
-    fun requestRootAccess() {
-        viewModelScope.launch {
-            _isCheckingRoot.value = true
-            val granted = RootHelper.requestRootAccess()
-            _hasRootAccess.value = granted
-            _isCheckingRoot.value = false
-
-            if (granted && _targetPath.value.isEmpty()) {
-                _targetPath.value = "/"
+    fun importFiles(uris: List<Uri>) {
+        if (uris.isEmpty() || importJob?.isActive == true || uploadJob?.isActive == true) return
+        importJob = viewModelScope.launch {
+            _importing.value = true
+            var pending: File? = null
+            try {
+                for (uri in uris) {
+                    val imported = withContext(Dispatchers.IO) {
+                        val resolver = getApplication<Application>().contentResolver
+                        val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) cursor.getString(0) else null
+                        } ?: "file"
+                        val jobContext = coroutineContext
+                        val copy = resolver.openInputStream(uri)?.use { input ->
+                            UploadStaging.copy(stagingRoot, name, input) { jobContext.ensureActive() }
+                        } ?: error("无法读取所选文件")
+                        pending = copy
+                        UploadFileInfo(uri, name, copy.absolutePath, copy.length(), resolver.getType(uri))
+                    }
+                    _selectedFiles.value += imported
+                    pending = null
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _uploadState.value = UploadState.Error(error.message ?: "导入文件失败")
+            } finally {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    pending?.let { UploadStaging.remove(stagingRoot, it.absolutePath) }
+                }
+                _importing.value = false
             }
         }
     }
@@ -89,14 +122,21 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun removeFile(file: UploadFileInfo) {
-        _selectedFiles.value = _selectedFiles.value.filter { it.uri != file.uri }
+        if (uploadJob?.isActive == true || _importing.value) return
+        _selectedFiles.value = _selectedFiles.value.filter { it.path != file.path }
+        viewModelScope.launch(Dispatchers.IO) { UploadStaging.remove(stagingRoot, file.path) }
     }
 
     fun clearFiles() {
+        if (uploadJob?.isActive == true || _importing.value) return
+        val old = _selectedFiles.value
         _selectedFiles.value = emptyList()
+        viewModelScope.launch(Dispatchers.IO) { old.forEach { UploadStaging.remove(stagingRoot, it.path) } }
     }
 
     fun uploadFiles() {
+        if (_importing.value) return
+        _spaceError.value?.let { _uploadState.value = UploadState.Error(it); return }
         if (_selectedFiles.value.isEmpty()) {
             _uploadState.value = UploadState.Error("请选择要上传的文件")
             return
@@ -107,6 +147,8 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
         }
         // 已有上传在跑，忽略再次触发
         if (uploadJob?.isActive == true) return
+        val files = _selectedFiles.value.toList()
+        val destination = normalizePath(_targetPath.value)
 
         uploadJob = viewModelScope.launch {
             _uploadState.value = UploadState.Uploading
@@ -120,12 +162,12 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
                 ""
             }
 
-            _selectedFiles.value.forEachIndexed { index, fileInfo ->
+            files.forEachIndexed { index, fileInfo ->
                 ensureActive()
                 _currentUploadProgress.value = UploadProgress(
                     fileName = fileInfo.name,
                     currentIndex = index + 1,
-                    totalCount = _selectedFiles.value.size,
+                    totalCount = files.size,
                     progress = 0f,
                     sentBytes = 0,
                     totalBytes = fileInfo.size
@@ -141,7 +183,7 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
 
                     val result = ChunkedUploader.upload(
                         file = file,
-                        remoteDir = normalizePath(_targetPath.value),
+                        remoteDir = destination,
                         options = ChunkedUploader.UploadOptions(deviceId = deviceId)
                     ) { sent, total ->
                         val p = if (total > 0) (sent.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
@@ -174,6 +216,7 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 UploadState.PartialSuccess(successCount, failCount)
             }
+            refreshUploadSpace()
         }
     }
 
@@ -187,6 +230,18 @@ class FileUploadViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetState() {
         _uploadState.value = UploadState.Idle
+    }
+
+    override fun onCleared() {
+        importJob?.cancel()
+        uploadJob?.cancel()
+        val paths = _selectedFiles.value.map { it.path }
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            importJob?.join()
+            uploadJob?.join()
+            paths.forEach { UploadStaging.remove(stagingRoot, it) }
+        }
+        super.onCleared()
     }
 
     /**

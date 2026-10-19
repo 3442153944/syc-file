@@ -9,10 +9,10 @@
 ```bash
 cd filesync-cli
 cargo build --release
-# 产物：target/release/syc
+# 产物：Linux target/release/syc；Windows target/release/syc.exe
 ```
 
-依赖只有 clap / ureq / serde / x25519-dalek，不引 Tauri 或 WebKit，Linux 无图形环境也能编译运行。
+不引 Tauri 或 WebKit，Linux 无图形环境与 Windows 都可构建。端口代理通过 `mesh-proxy/` 与桌面端共用实现，使用 tokio 异步转发。
 
 ## 命令
 
@@ -26,8 +26,11 @@ cargo build --release
 | `syc register --group ID --device NAME [--key-source server\|client]` | 登记设备；`server` 时私钥由服务端生成并托管，本地落盘 600 |
 | `syc peers --device NAME` | 按 ACL 裁剪的对端 |
 | `syc wg-config --device NAME` | 输出 wg-quick 配置（可直接导入系统 WireGuard） |
-| `syc up --device NAME [--iface syc0]` | 创建并拉起隧道（**需要 root**） |
-| `syc down [--iface syc0]` | 关闭隧道（需要 root） |
+| `syc up --device NAME [--iface syc0]` | 创建并拉起隧道（Linux root / Windows 管理员） |
+| `syc down [--iface syc0]` | 关闭隧道（Linux root / Windows 管理员） |
+| `syc proxy [--port 7897] [--allow-lan] [--username NAME] [--iface syc0]` | HTTP/SOCKS5 混合端口，Ctrl+C 停止；密码从 `SYC_PROXY_PASSWORD` 读取 |
+
+代理配置、Windows 自带 WireGuard 位置和验证说明见 [MESH_PROXY.md](MESH_PROXY.md)。
 
 ## 典型流程
 
@@ -47,10 +50,10 @@ sudo syc up --device my-laptop   # 非 root 环境改用 wg-config 自行导入
 ~/.config/syc-cli/keys/<device>.key 设备私钥                            600
 ```
 
-目录 700。服务端只保存密文私钥（AES-256-GCM，AAD 绑定设备号），明文私钥只在 `register` 响应里出现一次。
+Unix 目录 700、文件 600。Windows 使用用户目录下 `.config/syc-cli/`，沿用用户目录 ACL，不能套用 Unix 权限保证。服务端只保存密文私钥（AES-256-GCM，AAD 绑定设备号），CLI 沿用注册后保存本地密钥的旧模式。
 
 ## 注意
 
 - `Device-Id` 请求头必须与登录时的设备号一致，否则认证中间件按未登录处理；
-- `up` 依赖 `ip` 与 `wg`（wireguard-tools），且需要 root；无 root 时先 `wg-config` 再交给系统侧导入；
+- Linux `up` 依赖 `ip` 与 `wg`（wireguard-tools），需要 root；Windows `up/down` 使用自带 `wireguard.exe`，需要管理员权限；
 - 密钥轮换：对同一 `--device` 重新 `register` 会自动换公钥，旧公钥进 `vpn_device_history`。

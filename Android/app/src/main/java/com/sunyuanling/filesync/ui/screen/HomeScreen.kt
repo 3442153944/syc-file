@@ -107,6 +107,11 @@ fun HomeScreen(
             }
         }
 
+        item {
+            OutlinedButton(onClick = { navController.navigate(com.sunyuanling.filesync.router.QuickShareDestination) }, modifier = Modifier.fillMaxWidth()) {
+                Text("快传与分享管理")
+            }
+        }
         // 存储空间
         item {
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
