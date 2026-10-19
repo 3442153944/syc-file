@@ -257,6 +257,8 @@ func main() {
 	if _, err := vpn.StartSTUN(config.Conf.Vpn.StunPort); err != nil {
 		logger.Logger.Warn("STUN-lite 启动失败（组网仍可走中继）", zap.Error(err))
 	}
+	// 服务器侧的 wg peer 由后端按会话有效性自己维护（见 internal/vpn/reconciler.go）
+	vpn.StartServerReconciler(db)
 
 	handler.RegisterRouters(r, db, redisClient, syncEngine)
 

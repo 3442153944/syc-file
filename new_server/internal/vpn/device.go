@@ -190,7 +190,9 @@ func (a *API) Register(c *gin.Context) {
 				dev.PrivKeyEnc = enc
 			}
 			now := time.Now()
+			exp := now.Add(sessionTTL())
 			dev.LastSeen = &now
+			dev.SessionExpiresAt = &exp
 			if err := tx.Create(&dev).Error; err != nil {
 				return err
 			}
@@ -223,7 +225,9 @@ func (a *API) Register(c *gin.Context) {
 				dev.Endpoint = ep
 			}
 			now := time.Now()
+			exp := now.Add(sessionTTL())
 			dev.LastSeen = &now
+			dev.SessionExpiresAt = &exp
 			if err := tx.Save(&dev).Error; err != nil {
 				return err
 			}
@@ -281,7 +285,7 @@ func (a *API) Peers(c *gin.Context) {
 		return
 	}
 	var devices []model.VPNDevice
-	if err := a.db.Where("group_id IN ? AND status = ?", groupIDs, model.VPNDeviceActive).Find(&devices).Error; err != nil {
+	if err := a.db.Where("group_id IN ? AND status = ? AND session_expires_at > ?", groupIDs, model.VPNDeviceActive, time.Now()).Find(&devices).Error; err != nil {
 		response.Fail(c, 500, "读取设备失败")
 		return
 	}
@@ -375,7 +379,11 @@ func (a *API) Heartbeat(c *gin.Context) {
 	now := time.Now()
 	res := a.db.Model(&model.VPNDevice{}).
 		Where("user_id = ? AND device_id = ? AND status = ?", u.ID, req.DeviceID, model.VPNDeviceActive).
-		Updates(map[string]any{"endpoint": strings.TrimSpace(req.Endpoint), "last_seen": now})
+		Updates(map[string]any{
+			"endpoint":           strings.TrimSpace(req.Endpoint),
+			"last_seen":          now,
+			"session_expires_at": now.Add(sessionTTL()),
+		})
 	if res.Error != nil {
 		response.Fail(c, 500, "更新失败")
 		return
@@ -441,7 +449,7 @@ func (a *API) Link(c *gin.Context) {
 	var groupIDs []uint
 	a.db.Model(&model.VPNGroup{}).Where("org_id = ?", group.OrgID).Pluck("id", &groupIDs)
 	var devices []model.VPNDevice
-	a.db.Where("group_id IN ? AND status = ?", groupIDs, model.VPNDeviceActive).Find(&devices)
+	a.db.Where("group_id IN ? AND status = ? AND session_expires_at > ?", groupIDs, model.VPNDeviceActive, time.Now()).Find(&devices)
 	var members []model.VPNMember
 	a.db.Where("group_id IN ?", groupIDs).Find(&members)
 	roleOf := make(map[[2]uint]string, len(members))

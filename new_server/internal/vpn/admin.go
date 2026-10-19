@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -434,7 +435,7 @@ func (a *API) ServerPeers(c *gin.Context) {
 		return
 	}
 	var devices []model.VPNDevice
-	if err := a.db.Where("status = ?", model.VPNDeviceActive).Find(&devices).Error; err != nil {
+	if err := a.db.Where("status = ? AND session_expires_at IS NOT NULL AND session_expires_at > ?", model.VPNDeviceActive, time.Now()).Find(&devices).Error; err != nil {
 		response.Fail(c, 500, "读取设备失败")
 		return
 	}

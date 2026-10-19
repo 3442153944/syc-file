@@ -230,3 +230,5 @@ vpn:
   server_address: 172.1.0.254
   server_pubkey: ""
   server_endpoint: ""
+  # 服务器本机 wg 接口名；配置后后端按会话有效性自动增删 peer
+  server_interface: ""

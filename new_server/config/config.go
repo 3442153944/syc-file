@@ -61,6 +61,9 @@ type VpnConfig struct {
 	// 两者都配置后，所有客户端的 peers 里都会带上服务器节点。
 	ServerPubKey   string `mapstructure:"server_pubkey"`
 	ServerEndpoint string `mapstructure:"server_endpoint"`
+	// ServerInterface 服务器本机的 WireGuard 接口名（如 syc0）。配置后后端会自己
+	// 按「会话有效」维护 peer，不再需要外部脚本拿 token 轮询。
+	ServerInterface string `mapstructure:"server_interface"`
 }
 
 // ThumbnailConfig 图片缩略图配置（见 internal/thumb）。整段缺省即可：默认开启，

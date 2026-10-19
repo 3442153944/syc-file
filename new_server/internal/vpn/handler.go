@@ -8,12 +8,23 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"syc-file/config"
 	"syc-file/internal/model"
 	"syc-file/pkg/response"
 	"syc-file/pkg/token"
 )
 
 const enrollTTL = 5 * time.Minute
+
+// sessionTTL 设备会话有效期：与登录 token 一致（默认 7 天）。
+// heartbeat 每 30s 续期一次，用户真正离线超过这个时间，peer 才会被服务器移除。
+func sessionTTL() time.Duration {
+	days := config.Conf.Auth.TokenExpire
+	if days <= 0 {
+		days = 7
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
 
 // API 组网接口。所有路由都挂在现有 /v1 认证组下，复用 JWT + Device-Id。
 type API struct {
