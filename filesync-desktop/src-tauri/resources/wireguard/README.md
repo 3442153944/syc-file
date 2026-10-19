@@ -1,6 +1,12 @@
 # Windows 内嵌隧道依赖
 
-把官方的 `wireguard.exe`（WireGuard for Windows 安装目录里的那个）放到本目录：
+**当前固定版本：WireGuard for Windows 1.1.1**，`wireguard.exe` 已随仓库提交（9.0 MB，
+sha256 `04c71fb1…`），不需要每次打包重新下载。版本与校验值见同目录 `VERSION`。
+
+如需更换版本：改 `tools/fetch-wireguard-windows.sh` 里的 `VERSION` 与两个 `SHA256`，
+再执行 `bash tools/fetch-wireguard-windows.sh --force`，并同步更新 `VERSION`。
+
+文件位置：
 
 ```
 src-tauri/resources/wireguard/wireguard.exe
