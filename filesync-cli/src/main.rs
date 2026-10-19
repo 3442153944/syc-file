@@ -537,7 +537,20 @@ fn main() -> Result<()> {
             )?;
             ensure_ok(&v)?;
             let host = server_host(&s.server)?;
-            let server_ep = format!("{host}:51820");
+            let mut server_ep = format!("{host}:51820");
+            // 后端给了显式端点就以它为准（与 pin_server_endpoint 的规则一致）
+            if let Some(list) = v["data"]["peers"].as_array() {
+                if let Some(p) = list.iter().find(|p| {
+                    p.get("role").and_then(Value::as_str) == Some("server")
+                        || p.get("device_id").and_then(Value::as_str) == Some("syc-server")
+                }) {
+                    if let Some(ep) = p.get("endpoint").and_then(Value::as_str) {
+                        if !ep.trim().is_empty() {
+                            server_ep = ep.to_string();
+                        }
+                    }
+                }
+            }
             let peers = v["data"]["peers"].as_array().cloned().unwrap_or_default();
             let mut any_relay = false;
             for p in &peers {
@@ -651,7 +664,14 @@ fn pin_server_endpoint(mut peers: Value, server: &str, wg_port: u16) -> Value {
         for p in list.iter_mut() {
             let is_server = p.get("role").and_then(Value::as_str) == Some("server")
                 || p.get("device_id").and_then(Value::as_str) == Some("syc-server");
-            if is_server {
+            // 后端明确下发了端点（例如 ddns 的 v6 地址）就尊重它；
+            // 只有后端留空时才按当前节点推导，避免内网/回环节点拼出不可达地址。
+            let has_endpoint = p
+                .get("endpoint")
+                .and_then(Value::as_str)
+                .map(|e| !e.trim().is_empty())
+                .unwrap_or(false);
+            if is_server && !has_endpoint {
                 p["endpoint"] = json!(ep);
             }
         }
