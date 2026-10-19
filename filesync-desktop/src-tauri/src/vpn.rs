@@ -319,3 +319,21 @@ pub fn vpn_down_embedded(iface: Option<String>) -> Result<String, String> {
         Ok(format!("{}", String::from_utf8_lossy(&out.stdout)))
     }
 }
+
+/// 开机自启：Windows 写注册表 Run，Linux 写 ~/.config/autostart/*.desktop，由插件分别处理。
+#[tauri::command]
+pub fn autostart_get(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
+}

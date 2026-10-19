@@ -3,7 +3,7 @@
 // 管理员看自己机构，超管看全部；普通用户看不到这个页面（路由 MinLevel=2）。
 import {computed, h, onMounted, ref} from 'vue'
 import {
-  NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NSpace, NTag, NText, useDialog, useMessage,
+  NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NSpace, NSwitch, NTag, NText, useDialog, useMessage,
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
@@ -40,6 +40,8 @@ const showSuspend = ref(false)
 const suspendTarget = ref<MeshRow | null>(null)
 const suspendMinutes = ref(30)
 const tunnelBusy = ref(false)
+const autoStart = ref(false)
+const autoTunnel = ref(localStorage.getItem('syc_vpn_auto_tunnel') === '1')
 const onlineCount = computed(() => rows.value.filter(r => r.online).length)
 
 async function fetchOverview() {
@@ -93,7 +95,12 @@ async function startTunnel() {
     const device = await ensureVpnDevice()
     const msg = await startEmbeddedTunnel(device)
     message.success(msg)
-    await refreshTunnel()
+    // wireguard 服务启动到接口就绪有延迟，轮询几次状态再显示
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 500))
+      await refreshTunnel()
+      if (tunnelUp.value) break
+    }
   } catch (e) {
     message.error(String(e))
   } finally {
@@ -196,9 +203,35 @@ const columns: DataTableColumns<MeshRow> = [
   },
 ]
 
+async function loadAutoStart() {
+  if (!isTauri()) return
+  try {
+    const {invoke} = await import('@tauri-apps/api/core')
+    autoStart.value = await invoke<boolean>('autostart_get')
+  } catch { /* ignore */ }
+}
+
+async function toggleAutoStart(v: boolean) {
+  try {
+    const {invoke} = await import('@tauri-apps/api/core')
+    await invoke('autostart_set', {enabled: v})
+    autoStart.value = v
+    message.success(v ? '已开启开机自启' : '已关闭开机自启')
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+function toggleAutoTunnel(v: boolean) {
+  autoTunnel.value = v
+  localStorage.setItem('syc_vpn_auto_tunnel', v ? '1' : '0')
+  message.success(v ? '启动后将自动组网' : '已关闭自动组网')
+}
+
 onMounted(() => {
   fetchOverview()
   refreshTunnel()
+  loadAutoStart()
 })
 </script>
 
@@ -207,6 +240,12 @@ onMounted(() => {
     <NSpace justify="space-between" align="center" style="margin-bottom: 12px">
       <h2 style="margin: 0">组网</h2>
       <NSpace align="center">
+        <NSpace v-if="isTauri()" align="center" :size="6">
+          <NText depth="3" style="font-size: 12px">开机自启</NText>
+          <NSwitch :value="autoStart" size="small" @update:value="toggleAutoStart"/>
+          <NText depth="3" style="font-size: 12px">启动自动组网</NText>
+          <NSwitch :value="autoTunnel" size="small" @update:value="toggleAutoTunnel"/>
+        </NSpace>
         <NButton v-if="isTauri()" size="small" :loading="tunnelBusy" @click="startTunnel">启动隧道</NButton>
         <NButton v-if="isTauri()" size="small" :loading="tunnelBusy" @click="stopTunnel">停止隧道</NButton>
         <NTag size="small" :type="tunnelUp === true ? 'success' : tunnelUp === false ? 'warning' : 'default'" :bordered="false">

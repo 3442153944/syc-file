@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
 import { NMessageProvider, NDialogProvider, NNotificationProvider } from 'naive-ui'
+import { ensureVpnDevice, startEmbeddedTunnel } from './api/vpn'
 import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTransferStore } from './store/useTransferStore'
@@ -26,6 +28,26 @@ if (isTauri()) {
 
 // 尽早注册 WS 状态监听，防止 Rust setup 自动启动早于 home.vue 挂载
 useTransferStore().initWs()
+
+// 开机自启后自动组网：登录完成（有 token）且隧道未启动时，自动用会话换身份并拉起 wireguard。
+// 外部单独启动 WireGuard 服务时，隧道配置已安装，服务会自行连接；这里只兜底“还没建隧道”的情况。
+onMounted(() => {
+  if (!isTauri()) return
+  const auto = () => localStorage.getItem('syc_vpn_auto_tunnel') === '1'
+  const attempt = async () => {
+    if (!auto() || !localStorage.getItem('token')) return
+    try {
+      const {invoke} = await import('@tauri-apps/api/core')
+      if (await invoke<boolean>('vpn_tunnel_status')) return
+      const device = await ensureVpnDevice()
+      await startEmbeddedTunnel(device)
+    } catch {
+      // 未入组 / 无权限 / 非 Windows 时静默，等下一轮
+    }
+  }
+  setTimeout(attempt, 3000)
+  setInterval(attempt, 60_000)
+})
 </script>
 
 <template>
