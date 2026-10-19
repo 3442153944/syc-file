@@ -62,6 +62,8 @@ __debug_bin*
 /new_server/syc-file
 /new_server/syc-file.new
 /new_server/syc-file.prev
+/new_server/syc-file.exe
+/new_server/cmd.exe
 
 # 内嵌 ffmpeg 归档已随仓库提交（见 new_server/internal/thumb/embedded/FFMPEG.lock）
 /new_server/internal/thumb/embedded/*/*.ready

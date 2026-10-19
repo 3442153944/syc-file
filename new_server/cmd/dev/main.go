@@ -87,6 +87,8 @@ func run() error {
 	}
 	server := exec.Command(output, flag.Args()...)
 	server.Dir = root
+	// 开发启动器不托管 frpc/ddns-go：它们会抢占生产隧道和 DDNS 记录，把域名指到开发机。
+	server.Env = append(os.Environ(), "SYC_SKIP_SUPERVISOR=1")
 	server.Stdin, server.Stdout, server.Stderr = os.Stdin, os.Stdout, os.Stderr
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)

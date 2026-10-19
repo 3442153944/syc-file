@@ -23,6 +23,17 @@ use tokio::sync::mpsc;
 
 static CATCHING_UP: AtomicBool = AtomicBool::new(false);
 
+/// 一次追赶的实绩：检查了多少文件夹/文件，真正入队/上报了多少，以及服务端清单是否比对成功。
+#[derive(Default)]
+struct FolderStats {
+    files: usize,
+    dirs: usize,
+    uploads: usize,
+    deletes: usize,
+    skipped: usize,
+    scan_ok: bool,
+}
+
 /// 对全部 folder_mapping 执行 Phase1+Phase2 追赶。
 /// 幂等：正在追赶时会跳过，避免重复并发扫描。
 pub async fn catch_up_all_folders(
@@ -50,14 +61,18 @@ pub async fn catch_up_all_folders(
     }
 
     let client = ApiClient::new(&server_url, &token, &device_id);
-    let mut count = 0u64;
+    let mut total = FolderStats {
+        scan_ok: true,
+        ..Default::default()
+    };
+    let mut folders = 0usize;
 
     for mapping in &mappings {
         let root = PathBuf::from(&mapping.local_path);
         if !root.exists() {
             continue;
         }
-        catch_up_folder(
+        let stats = catch_up_folder(
             &client,
             &device_id,
             upload_tx,
@@ -66,11 +81,42 @@ pub async fn catch_up_all_folders(
             &mapping.remote_path,
         )
         .await;
-        count += 1;
+        folders += 1;
+        total.files += stats.files;
+        total.dirs += stats.dirs;
+        total.uploads += stats.uploads;
+        total.deletes += stats.deletes;
+        total.skipped += stats.skipped;
+        total.scan_ok &= stats.scan_ok;
     }
 
     CATCHING_UP.store(false, Ordering::Release);
-    logger::info("catch_up", format!("追赶完成，处理了 {} 个文件夹", count));
+    if folders == 0 {
+        logger::info("catch_up", "追赶完成: 没有可检查的文件夹");
+        return;
+    }
+    let scan = if total.scan_ok {
+        "服务端清单已比对"
+    } else {
+        "服务端清单比对失败"
+    };
+    if total.uploads + total.deletes == 0 {
+        logger::info(
+            "catch_up",
+            format!(
+                "追赶完成: 检查 {} 个文件夹、{} 个文件（{} 个目录），无本地变更（{}）",
+                folders, total.files, total.dirs, scan
+            ),
+        );
+    } else {
+        logger::info(
+            "catch_up",
+            format!(
+                "追赶完成: 检查 {} 个文件夹、{} 个文件（{} 个目录），上传入队 {}，删除 {}，未变 {}（{}）",
+                folders, total.files, total.dirs, total.uploads, total.deletes, total.skipped, scan
+            ),
+        );
+    }
 }
 
 async fn catch_up_folder(
@@ -80,11 +126,16 @@ async fn catch_up_folder(
     folder_id: u64,
     root: &Path,
     remote_root: &str,
-) {
+) -> FolderStats {
     // 递归遍历
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut dirs: Vec<String> = Vec::new();
     walk_dir(root, "", &mut files, &mut dirs);
+    let mut stats = FolderStats {
+        files: files.len(),
+        dirs: dirs.len(),
+        ..Default::default()
+    };
 
     // Phase 1：检测本地变更并上传，检测本地删除并上报
     let present: HashMap<String, bool> = files.iter().map(|(r, _)| (r.clone(), true)).collect();
@@ -96,7 +147,7 @@ async fn catch_up_folder(
             None => {
                 // 无基线：新文件，上传 + 上报 create
                 let remote_dir = join_remote(remote_root, &dir_of(rel));
-                let _ = upload_tx
+                if upload_tx
                     .send(UploadTask {
                         local_path: path.clone(),
                         remote_dir,
@@ -104,38 +155,42 @@ async fn catch_up_folder(
                         relative_path: rel.clone(),
                         action: "create".into(),
                     })
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    stats.uploads += 1;
+                }
             }
             Some(base_entry) => {
-                // 有基线：比对 stat 快照，未变则跳过（无需重算 hash）
-                if let Ok(cur_hash) = chunked_uploader::file_blake3_hex(path) {
-                    let (cur_size, cur_mtime) = base_store::stat_file(path);
-
-                    if cur_size == base_entry.size && cur_mtime == base_entry.mtime {
-                        // stat 未变：hash 也为 base，仅刷新 stat（以防旧格式 size=0,mtime=0）
-                        if cur_hash == base_entry.hash {
-                            // 内容一致，无需任何操作
-                            continue;
-                        }
-                        // stat 相等但 hash 不同（罕见：文件被截断写回同大小？）→ 仍要上传
+                let (cur_size, cur_mtime) = base_store::stat_file(path);
+                // stat 未变就先信任基线，不重算 blake3：否则每次 WS 重连都会把整个同步目录重读一遍。
+                if cur_size == base_entry.size && cur_mtime == base_entry.mtime {
+                    stats.skipped += 1;
+                    continue;
+                }
+                let Ok(cur_hash) = chunked_uploader::file_blake3_hex(path) else {
+                    continue;
+                };
+                if cur_hash != base_entry.hash {
+                    // 内容已变：上传 + 上报 modify，带旧 base_hash 走 CAS
+                    let remote_dir = join_remote(remote_root, &dir_of(rel));
+                    if upload_tx
+                        .send(UploadTask {
+                            local_path: path.clone(),
+                            remote_dir,
+                            folder_id,
+                            relative_path: rel.clone(),
+                            action: "modify".into(),
+                        })
+                        .await
+                        .is_ok()
+                    {
+                        stats.uploads += 1;
                     }
-
-                    if cur_hash != base_entry.hash {
-                        // 内容已变：上传 + 上报 modify，带旧 base_hash 走 CAS
-                        let remote_dir = join_remote(remote_root, &dir_of(rel));
-                        let _ = upload_tx
-                            .send(UploadTask {
-                                local_path: path.clone(),
-                                remote_dir,
-                                folder_id,
-                                relative_path: rel.clone(),
-                                action: "modify".into(),
-                            })
-                            .await;
-                    } else {
-                        // stat 变了但 hash 相同（touch/mtime 漂移）→ 只刷新 stat 快照
-                        base_store::set(folder_id, rel, &base_entry.hash, cur_size, cur_mtime);
-                    }
+                } else {
+                    // stat 变了但 hash 相同（touch/mtime 漂移）→ 只刷新 stat 快照
+                    base_store::set(folder_id, rel, &base_entry.hash, cur_size, cur_mtime);
+                    stats.skipped += 1;
                 }
             }
         }
@@ -151,7 +206,7 @@ async fn catch_up_folder(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        sync_api::notify(
+        match sync_api::notify(
             client,
             NotifyParams {
                 device_id: device_id.to_string(),
@@ -167,9 +222,18 @@ async fn catch_up_folder(
             },
         )
         .await
-        .ok();
-        base_store::remove(folder_id, &rel);
-        logger::info("catch_up", format!("已上报删除: {}", rel));
+        {
+            Ok(r) if r.is_ok() => {
+                base_store::remove(folder_id, &rel);
+                stats.deletes += 1;
+                logger::info("catch_up", format!("已上报删除: {}", rel));
+            }
+            Ok(r) => logger::warn(
+                "catch_up",
+                format!("上报删除失败: {} [{}] {}", rel, r.code, r.message),
+            ),
+            Err(e) => logger::warn("catch_up", format!("上报删除失败: {}: {}", rel, e)),
+        }
     }
 
     // Phase 2：全量清单交服务端比对（trunk 有本地无/不一致 → download；trunk 已软删本地还有 → delete）。
@@ -213,7 +277,7 @@ async fn catch_up_folder(
         });
     }
 
-    let _ = sync_api::scan(
+    stats.scan_ok = match sync_api::scan(
         client,
         ScanReport {
             device_id: device_id.to_string(),
@@ -221,7 +285,12 @@ async fn catch_up_folder(
             items,
         },
     )
-    .await;
+    .await
+    {
+        Ok(r) => r.is_ok(),
+        Err(_) => false,
+    };
+    stats
 }
 
 fn walk_dir(
