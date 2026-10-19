@@ -250,10 +250,19 @@ pub fn vpn_up_embedded(
         std::fs::write(&conf_path, conf).map_err(|e| e.to_string())?;
 
         let exe = find_wireguard_exe(&app)?;
-        let out = Command::new(&exe)
-            .args(["/installtunnelservice", &conf_path.to_string_lossy()])
-            .output()
-            .map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
+        let install = |exe: &std::path::Path| {
+            Command::new(exe)
+                .args(["/installtunnelservice", &conf_path.to_string_lossy()])
+                .output()
+        };
+        let mut out = install(&exe).map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
+        if !out.status.success() {
+            // 常见原因：同名隧道已存在。只卸我们自己的 syc0，不影响用户其它隧道。
+            let _ = Command::new(&exe)
+                .args(["/uninstalltunnelservice", "syc0"])
+                .output();
+            out = install(&exe).map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
+        }
         if !out.status.success() {
             return Err(format!(
                 "安装隧道失败: {}{}",
@@ -267,8 +276,9 @@ pub fn vpn_up_embedded(
 
 #[cfg(windows)]
 fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    // 只使用自依赖：开发模式用仓库内那份，安装后用手包进资源的副本。
+    // 刻意不回退到 Program Files，避免和用户自己安装/运行的 WireGuard 混用。
     let mut candidates = Vec::new();
-    // 开发模式：直接用源码树里的那份，不依赖安装目录或 Program Files
     candidates.push(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("resources")
@@ -279,17 +289,12 @@ fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Stri
         candidates.push(res.join("wireguard").join("wireguard.exe"));
         candidates.push(res.join("wireguard.exe"));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("wireguard").join("wireguard.exe"));
-            candidates.push(dir.join("wireguard.exe"));
-        }
-    }
-    candidates.push(std::path::PathBuf::from(r"C:\Program Files\WireGuard\wireguard.exe"));
     candidates
         .into_iter()
         .find(|p| p.exists())
-        .ok_or_else(|| "未找到 wireguard.exe：请把它放到 resources/wireguard/ 或安装 WireGuard for Windows".to_string())
+        .ok_or_else(|| {
+            "未找到内置 wireguard.exe：请确认 resources/wireguard/ 随包分发（开发模式检查 src-tauri/resources/wireguard/）".to_string()
+        })
 }
 
 /// 关闭内嵌隧道。
