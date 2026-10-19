@@ -30,7 +30,7 @@ export async function ensureVpnDevice(): Promise<string> {
     const cached = localStorage.getItem('syc_vpn_device')
     if (cached) return cached
 
-    const data = await httpPost<{ device_id: string }>('/v1/vpn/auto-enroll')
+    const data = await httpPost<{ device_id: string }>('/vpn/auto-enroll')
     const device = data?.device_id
     if (!device) throw new Error('自动入组响应缺少 device_id')
     localStorage.setItem('syc_vpn_device', device)
@@ -39,7 +39,7 @@ export async function ensureVpnDevice(): Promise<string> {
 
 /** 读当前设备的直连/中继状态。 */
 export async function fetchVpnLink(device: string): Promise<VpnLinkResult> {
-    return httpGet<VpnLinkResult>('/v1/vpn/link', {device_id: device})
+    return httpGet<VpnLinkResult>('/vpn/link', {device_id: device})
 }
 
 export interface MeshDeviceRow {
@@ -61,21 +61,21 @@ export interface MeshOverview {
 }
 
 export async function fetchMeshOverview(): Promise<MeshOverview> {
-    return httpGet<MeshOverview>('/v1/vpn/admin/overview')
+    return httpGet<MeshOverview>('/vpn/admin/overview')
 }
 
 export async function vpnKick(id: number): Promise<void> {
-    await httpPost(`/v1/vpn/admin/devices/${id}/kick`)
+    await httpPost(`/vpn/admin/devices/${id}/kick`)
 }
 
 export async function vpnSuspend(id: number, minutes: number): Promise<void> {
-    await httpPost(`/v1/vpn/admin/devices/${id}/suspend`, {minutes})
+    await httpPost(`/vpn/admin/devices/${id}/suspend`, {minutes})
 }
 
 export async function vpnBan(id: number, banned: boolean): Promise<void> {
-    await httpPost(`/v1/vpn/admin/devices/${id}/ban`, {banned})
+    await httpPost(`/vpn/admin/devices/${id}/ban`, {banned})
 }
 
 export async function vpnReleaseDevice(id: number): Promise<void> {
-    await httpDelete(`/v1/vpn/admin/devices/${id}`)
+    await httpDelete(`/vpn/admin/devices/${id}`)
 }

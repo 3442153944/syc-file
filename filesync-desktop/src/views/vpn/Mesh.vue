@@ -142,7 +142,10 @@ onMounted(fetchOverview)
         <NText strong>Ping 任意组内地址</NText>
         <NInput v-model:value="target" placeholder="例如 172.1.0.254" style="max-width: 220px"/>
         <NButton size="small" type="primary" :loading="pinging" @click="ping">Ping</NButton>
-        <NText depth="3" style="font-size: 12px">默认目标为服务器 {{ serverAddress }}</NText>
+        <NText depth="3" style="font-size: 12px">
+          默认目标为服务器 {{ serverAddress }}；ping 走隧道，需先在客户端启动组网隧道
+          （Linux：<code>syc up</code>；Windows 隧道尚未内置，超时属预期）
+        </NText>
       </NSpace>
       <NAlert v-if="pingOut" type="info" :bordered="false" style="margin-top: 10px; white-space: pre-wrap">
         {{ pingOut }}
