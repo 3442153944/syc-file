@@ -79,6 +79,23 @@ enum Cmd {
         #[arg(long)]
         report: bool,
     },
+    /// 一键体检：STUN 探测 + 链路状态 + 对端列表
+    Netcheck {
+        #[arg(long)]
+        device: String,
+        #[arg(long, default_value_t = 3478)]
+        stun_port: u16,
+    },
+    /// 对覆盖网地址做 ping（可指定网卡，强制走隧道）
+    Ping {
+        /// 目标覆盖地址，如 172.1.0.254
+        to: String,
+        #[arg(long, default_value_t = 3)]
+        count: u8,
+        /// 指定网卡（例：syc1），强制从隧道出去
+        #[arg(long)]
+        iface: Option<String>,
+    },
     /// 查看各对端是直连还是经中继
     Link {
         #[arg(long)]
@@ -500,15 +517,7 @@ fn main() -> Result<()> {
         } => {
             let s = load_session()?;
             let host = server_host(&s.server)?;
-            let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
-            sock.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
-            sock.send_to(b"SYC?", (host.as_str(), stun_port))?;
-            let mut buf = [0u8; 128];
-            let (n, _) = sock
-                .recv_from(&mut buf)
-                .map_err(|e| anyhow!("STUN 探测超时或失败（服务器 UDP {stun_port} 是否放行？）: {e}"))?;
-            let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-            let endpoint = reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string();
+            let endpoint = stun_probe(&host, stun_port)?;
             println!("公网端点：{endpoint}");
             if report {
                 let dev = device
@@ -523,6 +532,60 @@ fn main() -> Result<()> {
                 )?;
                 ensure_ok(&v)?;
                 println!("已上报端点，对端可用它直连");
+            }
+        }
+
+        Cmd::Netcheck { device, stun_port } => {
+            let s = load_session()?;
+            let host = server_host(&s.server)?;
+            println!("== 1. 公网端点（STUN-lite）==");
+            match stun_probe(&host, stun_port) {
+                Ok(ep) => println!("  {ep}"),
+                Err(e) => println!("  探测失败: {e}"),
+            }
+            println!("== 2. 链路状态 ==");
+            let v = request(
+                "GET",
+                &format!("{}/v1/vpn/link?device_id={}", s.server, device),
+                None,
+                Some(&s),
+                None,
+            )?;
+            ensure_ok(&v)?;
+            let mode = v["data"]["mode"].as_str().unwrap_or("unknown");
+            let label = match mode {
+                "direct" => "直连",
+                "relay" => "中继",
+                "idle" => "暂无对端",
+                _ => "未知",
+            };
+            println!("  {label}（mode={mode}）  本机 {}", v["data"]["self"]["address"].as_str().unwrap_or("?"));
+            println!("== 3. 对端 ==");
+            let peers = v["data"]["peers"].as_array().cloned().unwrap_or_default();
+            for p in &peers {
+                println!(
+                    "  {:<24} {:<8} {}",
+                    p["device_id"].as_str().unwrap_or(""),
+                    match p["mode"].as_str().unwrap_or("") { "relay" => "中继", _ => "直连" },
+                    p["endpoint"].as_str().unwrap_or("(端点未知)")
+                );
+            }
+            if peers.is_empty() {
+                println!("  （没有对端：确认对方已注册、会话未过期，且服务器 reconciler 已同步）");
+            }
+        }
+
+        Cmd::Ping { to, count, iface } => {
+            let mut cmd = Command::new("ping");
+            cmd.args(["-c", &count.to_string(), "-W", "2"]);
+            if let Some(i) = iface {
+                cmd.args(["-I", &i]);
+            }
+            cmd.arg(&to);
+            let out = cmd.output().context("执行 ping 失败（系统是否安装 iputils-ping？）")?;
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.status.success() {
+                return Err(anyhow!("ping 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
         }
 
@@ -677,6 +740,19 @@ fn pin_server_endpoint(mut peers: Value, server: &str, wg_port: u16) -> Value {
         }
     }
     peers
+}
+
+/// STUN-lite 探测：向服务器的 UDP 端口发 SYC?，返回它看到的公网端点。
+fn stun_probe(host: &str, port: u16) -> Result<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    sock.send_to(b"SYC?", (host, port))?;
+    let mut buf = [0u8; 128];
+    let (n, _) = sock
+        .recv_from(&mut buf)
+        .map_err(|e| anyhow!("STUN 探测超时或失败（服务器 UDP {port} 是否放行？）: {e}"))?;
+    let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+    Ok(reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string())
 }
 
 /// 从 server URL 取主机名（http(s)://host:port/... → host）。

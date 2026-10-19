@@ -480,8 +480,8 @@ func (a *API) Link(c *gin.Context) {
 	}
 	visible := VisiblePeers(selfRef, all, interops)
 
-	serverEP := strings.TrimSpace(config.Conf.Vpn.ServerEndpoint)
-	rows := make([]gin.H, 0, len(visible))
+	serverEP := serverEndpointFor(c, config.Conf.Vpn)
+	rows := make([]gin.H, 0, len(visible)+1)
 	mode := "direct"
 	for _, p := range visible {
 		m := "direct"
@@ -489,6 +489,15 @@ func (a *API) Link(c *gin.Context) {
 			m, mode = "relay", "relay"
 		}
 		rows = append(rows, gin.H{"device_id": p.DeviceID, "endpoint": p.Endpoint, "mode": m})
+	}
+	// 服务器自身也是一个可用对端（172.1.0.254），否则界面会显示「暂无对端」
+	if sp := ServerPeer(c); sp != nil {
+		rows = append(rows, gin.H{
+			"device_id": "syc-server",
+			"endpoint":  sp["endpoint"],
+			"mode":      "direct",
+			"role":      "server",
+		})
 	}
 	if len(rows) == 0 {
 		mode = "idle"
