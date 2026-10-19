@@ -7,6 +7,7 @@ import {
 import {useMonitor, fmtBytes, fmtRate} from '@/api/monitor/useMonitor'
 import {netState, probeAll, switchNode, healthOf} from '@/api/net'
 import {ensureVpnDevice, fetchVpnLink} from '@/api/vpn'
+import {isTauri} from '@tauri-apps/api/core'
 
 const {network, connected} = useMonitor(2)
 
@@ -42,6 +43,53 @@ const interfaces = computed(() => network.value?.interfaces ?? [])
 // ── 主动组网测试：探测端点 → 上报 → 读回直连/中继 ─────────────────
 const vpnTesting = ref(false)
 const vpnResult = ref('')
+
+function serverHost(): string {
+  const raw = netState.serverUrl || ''
+  const rest = raw.includes('://') ? raw.split('://')[1] : raw
+  return rest.split(/[/:]/)[0]
+}
+
+/** 组网体检：STUN 端点 + 链路模式 + 对端（桌面端才有 UDP 探测） */
+async function netcheck() {
+  vpnTesting.value = true
+  vpnResult.value = ''
+  try {
+    const device = await ensureVpnDevice()
+    let endpoint = '（Web 模式无法做 UDP 探测）'
+    if (isTauri()) {
+      const {invoke} = await import('@tauri-apps/api/core')
+      endpoint = await invoke<string>('vpn_stun', {host: serverHost(), port: 3478}).catch(e => `失败: ${e}`)
+    }
+    const link = await fetchVpnLink(device)
+    const modeText = link.mode === 'direct' ? '直连' : link.mode === 'relay' ? '中继' : link.mode === 'idle' ? '暂无对端' : '未知'
+    const peers = link.peers.map(p => `  ${p.device_id}  ${p.mode === 'relay' ? '中继' : '直连'}  ${p.endpoint || '(端点未知)'}`).join('\n')
+    vpnResult.value = `设备 ${device}（${link.self.address}）\n公网端点：${endpoint}\n网络环境：${modeText}\n对端 ${link.peers.length} 个\n${peers}`
+  } catch (e) {
+    vpnResult.value = String(e)
+  } finally {
+    vpnTesting.value = false
+  }
+}
+
+/** 从本机 ping 服务器覆盖地址；桌面端直接调系统 ping */
+async function pingServer() {
+  if (!isTauri()) {
+    vpnResult.value = 'Web 模式无法 ping 覆盖网地址，请用桌面端或 syc ping'
+    return
+  }
+  vpnTesting.value = true
+  vpnResult.value = ''
+  try {
+    const {invoke} = await import('@tauri-apps/api/core')
+    const out = await invoke<string>('vpn_ping', {target: '172.1.0.254', count: 3})
+    vpnResult.value = out
+  } catch (e) {
+    vpnResult.value = String(e)
+  } finally {
+    vpnTesting.value = false
+  }
+}
 
 async function testVpn() {
   vpnTesting.value = true
@@ -125,7 +173,11 @@ const nicColumns = [
           <NText strong>主动组网测试</NText>
           <div style="opacity:.65;font-size:12px">探测公网端点 → 上报 → 读回直连/中继</div>
         </div>
-        <NButton size="small" type="primary" :loading="vpnTesting" @click="testVpn">开始测试</NButton>
+        <NSpace>
+          <NButton size="small" type="primary" :loading="vpnTesting" @click="netcheck">组网体检</NButton>
+          <NButton size="small" :loading="vpnTesting" @click="pingServer">Ping 服务器</NButton>
+          <NButton size="small" quaternary :loading="vpnTesting" @click="testVpn">仅查看链路</NButton>
+        </NSpace>
       </NSpace>
       <NAlert v-if="vpnResult" type="info" :bordered="false" style="margin-top: 10px; white-space: pre-wrap">
         {{ vpnResult }}

@@ -241,6 +241,8 @@ pub fn run() {
             vpn::vpn_wg_config,
             vpn::vpn_up,
             vpn::vpn_down,
+            vpn::vpn_stun,
+            vpn::vpn_ping,
             transfers::get_transfers,
             transfers::transfer_upload_begin,
             transfers::transfer_upload_progress,

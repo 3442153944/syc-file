@@ -56,3 +56,36 @@ pub fn vpn_down(iface: Option<String>) -> Result<String, String> {
     let iface = iface.unwrap_or_else(|| "syc0".to_string());
     run_syc(&["down", "--iface", &iface])
 }
+
+/// 原生 STUN-lite 探测：不依赖 syc 会话，桌面端直接拿到自己的公网端点。
+#[tauri::command]
+pub fn vpn_stun(host: String, port: u16) -> Result<String, String> {
+    use std::net::UdpSocket;
+    use std::time::Duration;
+    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    sock.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
+    sock.send_to(b"SYC?", (host.as_str(), port)).map_err(|e| e.to_string())?;
+    let mut buf = [0u8; 128];
+    let (n, _) = sock.recv_from(&mut buf).map_err(|e| format!("STUN 超时或端口被拦: {e}"))?;
+    let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+    Ok(reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string())
+}
+
+/// ping 覆盖网地址；iface 指定时强制从隧道网卡发出。
+#[tauri::command]
+pub fn vpn_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<String, String> {
+    let count = count.unwrap_or(3);
+    let mut cmd = Command::new("ping");
+    cmd.args(["-c", &count.to_string(), "-W", "2"]);
+    if let Some(i) = iface {
+        cmd.args(["-I", &i]);
+    }
+    cmd.arg(&target);
+    let out = cmd.output().map_err(|e| format!("执行 ping 失败: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if out.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format!("{stdout}{}", String::from_utf8_lossy(&out.stderr)))
+    }
+}
