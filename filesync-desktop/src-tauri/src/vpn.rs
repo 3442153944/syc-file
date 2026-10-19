@@ -12,7 +12,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 fn run_syc(args: &[&str]) -> Result<String, String> {
     let out = Command::new("syc")
@@ -197,5 +197,135 @@ pub fn vpn_tunnel_status() -> Result<bool, String> {
     {
         let out = Command::new("ip").args(["-br", "addr"]).output().map_err(|e| e.to_string())?;
         Ok(String::from_utf8_lossy(&out.stdout).contains("172.1."))
+    }
+}
+
+/// 保存设备私钥到应用配置目录（Windows: %APPDATA%\<app>\vpn\<device>.key）。
+/// auto-enroll 只在首次返回私钥，必须在这里落盘，后续启动隧道才能用。
+#[tauri::command]
+pub fn vpn_save_key(app: tauri::AppHandle, device: String, key: String) -> Result<(), String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("vpn");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("{device}.key"));
+    std::fs::write(&path, key.trim()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn read_key(app: &tauri::AppHandle, device: &str) -> Result<String, String> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("vpn")
+        .join(format!("{device}.key"));
+    std::fs::read_to_string(&path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("读不到设备私钥 {}: {e}", path.display()))
+}
+
+#[derive(serde::Deserialize)]
+pub struct VpnPeerInput {
+    pub pubkey: String,
+    pub allowed_ips: Vec<String>,
+    pub endpoint: Option<String>,
+}
+
+/// 用内嵌/已安装的 WireGuard for Windows 启动隧道。
+/// 配置写到 ProgramData\syc\<iface>.conf，再调 wireguard.exe 安装为系统隧道服务。
+#[tauri::command]
+pub fn vpn_up_embedded(
+    app: tauri::AppHandle,
+    device: String,
+    address: String,
+    subnet: String,
+    keepalive: Option<u32>,
+    peers: Vec<VpnPeerInput>,
+) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (app, device, address, subnet, keepalive, peers);
+        Err("内嵌隧道仅 Windows 使用；Linux 请用 syc up".to_string())
+    }
+    #[cfg(windows)]
+    {
+        let key = read_key(&app, &device)?;
+        let bits = subnet.rsplit('/').next().unwrap_or("24");
+        let ka = keepalive.unwrap_or(5);
+        let mut conf = String::new();
+        conf.push_str("[Interface]\n");
+        conf.push_str(&format!("PrivateKey = {key}\n"));
+        conf.push_str(&format!("Address = {address}/{bits}\n"));
+        conf.push_str("MTU = 1280\n\n");
+        for p in peers {
+            conf.push_str("[Peer]\n");
+            conf.push_str(&format!("PublicKey = {}\n", p.pubkey));
+            conf.push_str(&format!("AllowedIPs = {}\n", p.allowed_ips.join(", ")));
+            if let Some(ep) = p.endpoint.filter(|e| !e.trim().is_empty()) {
+                conf.push_str(&format!("Endpoint = {ep}\n"));
+            }
+            conf.push_str(&format!("PersistentKeepalive = {ka}\n\n"));
+        }
+        let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
+        let dir = std::path::Path::new(&base).join("syc");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let conf_path = dir.join("syc0.conf");
+        std::fs::write(&conf_path, conf).map_err(|e| e.to_string())?;
+
+        let exe = find_wireguard_exe(&app)?;
+        let out = Command::new(&exe)
+            .args(["/installtunnelservice", &conf_path.to_string_lossy()])
+            .output()
+            .map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "安装隧道失败: {}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(format!("隧道已启动（{}）", conf_path.display()))
+    }
+}
+
+#[cfg(windows)]
+fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let mut candidates = Vec::new();
+    if let Ok(res) = app.path().resource_dir() {
+        candidates.push(res.join("wireguard").join("wireguard.exe"));
+        candidates.push(res.join("wireguard.exe"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("wireguard").join("wireguard.exe"));
+            candidates.push(dir.join("wireguard.exe"));
+        }
+    }
+    candidates.push(std::path::PathBuf::from(r"C:\Program Files\WireGuard\wireguard.exe"));
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| "未找到 wireguard.exe：请把它放到 resources/wireguard/ 或安装 WireGuard for Windows".to_string())
+}
+
+/// 关闭内嵌隧道。
+#[tauri::command]
+pub fn vpn_down_embedded(iface: Option<String>) -> Result<String, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = iface;
+        Err("内嵌隧道仅 Windows 使用；Linux 请用 syc down".to_string())
+    }
+    #[cfg(windows)]
+    {
+        let _ = iface;
+        let exe = std::path::PathBuf::from(r"C:\Program Files\WireGuard\wireguard.exe");
+        if !exe.exists() {
+            return Err("未找到 wireguard.exe".into());
+        }
+        let out = Command::new(exe)
+            .args(["/uninstalltunnelservice", "syc0"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(format!("{}", String::from_utf8_lossy(&out.stdout)))
     }
 }

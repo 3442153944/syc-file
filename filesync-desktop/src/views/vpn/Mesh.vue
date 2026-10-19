@@ -8,7 +8,8 @@ import {
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
 import {
-  fetchMeshOverview, vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
+  ensureVpnDevice, fetchMeshOverview, startEmbeddedTunnel, stopEmbeddedTunnel,
+  vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
 } from '@/api/vpn'
 
 interface MeshRow {
@@ -38,6 +39,7 @@ const tunnelUp = ref<boolean | null>(null)
 const showSuspend = ref(false)
 const suspendTarget = ref<MeshRow | null>(null)
 const suspendMinutes = ref(30)
+const tunnelBusy = ref(false)
 const onlineCount = computed(() => rows.value.filter(r => r.online).length)
 
 async function fetchOverview() {
@@ -82,6 +84,33 @@ async function ping() {
     pinging.value = false
     unLine()
     unDone()
+  }
+}
+
+async function startTunnel() {
+  tunnelBusy.value = true
+  try {
+    const device = await ensureVpnDevice()
+    const msg = await startEmbeddedTunnel(device)
+    message.success(msg)
+    await refreshTunnel()
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    tunnelBusy.value = false
+  }
+}
+
+async function stopTunnel() {
+  tunnelBusy.value = true
+  try {
+    await stopEmbeddedTunnel()
+    message.success('隧道已停止')
+    await refreshTunnel()
+  } catch (e) {
+    message.error(String(e))
+  } finally {
+    tunnelBusy.value = false
   }
 }
 
@@ -178,6 +207,8 @@ onMounted(() => {
     <NSpace justify="space-between" align="center" style="margin-bottom: 12px">
       <h2 style="margin: 0">组网</h2>
       <NSpace align="center">
+        <NButton v-if="isTauri()" size="small" :loading="tunnelBusy" @click="startTunnel">启动隧道</NButton>
+        <NButton v-if="isTauri()" size="small" :loading="tunnelBusy" @click="stopTunnel">停止隧道</NButton>
         <NTag size="small" :type="tunnelUp === true ? 'success' : tunnelUp === false ? 'warning' : 'default'" :bordered="false">
           隧道 {{ tunnelUp === true ? '已启动' : tunnelUp === false ? '未启动' : '未知' }}
         </NTag>
