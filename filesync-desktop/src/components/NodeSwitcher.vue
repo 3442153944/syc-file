@@ -15,7 +15,8 @@ import {computed, onMounted, onBeforeUnmount, ref} from 'vue'
 import {NDropdown, NTag, useMessage} from 'naive-ui'
 import type {DropdownOption} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
-import {netState, probeAll, switchNode, healthOf, refreshVpnMode} from '@/api/net'
+import {netState, probeAll, switchNode, healthOf} from '@/api/net'
+import {ensureVpnDevice, fetchVpnLink} from '@/api/vpn'
 import ServerSettings from '@/views/person/ServerSettings.vue'
 
 const message = useMessage()
@@ -56,6 +57,16 @@ const vpnType = computed(() => {
 })
 
 let vpnTimer: number | undefined
+
+async function refreshVpn() {
+  try {
+    const device = await ensureVpnDevice()
+    const link = await fetchVpnLink(device)
+    netState.vpnMode = link.mode
+  } catch {
+    netState.vpnMode = 'unknown'
+  }
+}
 
 const tooltip = computed(() => {
   const h = activeHealth.value
@@ -111,8 +122,8 @@ async function handleSelect(key: string) {
 
 onMounted(async () => {
   // 组网链路状态：桌面端注册设备后（localStorage.syc_vpn_device）才显示直连/中继
-  refreshVpnMode().catch(() => {})
-  vpnTimer = window.setInterval(() => refreshVpnMode().catch(() => {}), 30_000)
+  refreshVpn().catch(() => {})
+  vpnTimer = window.setInterval(() => refreshVpn().catch(() => {}), 30_000)
   if (!isTauri()) return
   // 原生菜单栏「网络 → 网络节点设置…」发来的事件
   const {listen} = await import('@tauri-apps/api/event')

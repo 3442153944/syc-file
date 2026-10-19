@@ -7,7 +7,9 @@ import {
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
-import {netState} from '@/api/net'
+import {
+  fetchMeshOverview, vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
+} from '@/api/vpn'
 
 interface MeshRow {
   id: number
@@ -36,15 +38,11 @@ const onlineCount = computed(() => rows.value.filter(r => r.online).length)
 async function fetchOverview() {
   loading.value = true
   try {
-    const res = await fetch(`${netState.serverUrl}/v1/vpn/admin/overview`, {
-      headers: {Token: localStorage.getItem('token') || ''},
-    })
-    const body = await res.json()
-    if (body?.code !== 200) throw new Error(body?.message || '读取失败')
-    rows.value = body.data.devices || []
-    if (body.data.server_address) {
-      serverAddress.value = body.data.server_address
-      target.value = body.data.server_address
+    const data = await fetchMeshOverview()
+    rows.value = (data.devices || []) as MeshRow[]
+    if (data.server_address) {
+      serverAddress.value = data.server_address
+      target.value = data.server_address
     }
   } catch (e) {
     message.error(String(e))
@@ -72,15 +70,12 @@ async function ping() {
   }
 }
 
-async function deviceAction(row: MeshRow, path: string, method: 'POST' | 'DELETE' = 'POST', body?: unknown) {
+async function deviceAction(row: MeshRow, kind: 'kick' | 'suspend' | 'ban' | 'release') {
   try {
-    const res = await fetch(`${netState.serverUrl}/v1/vpn/admin/devices/${row.id}${path}`, {
-      method,
-      headers: {'Content-Type': 'application/json', Token: localStorage.getItem('token') || ''},
-      body: method === 'DELETE' ? undefined : JSON.stringify(body || {}),
-    })
-    const data = await res.json()
-    if (data?.code !== 200) throw new Error(data?.message || '操作失败')
+    if (kind === 'kick') await vpnKick(row.id)
+    else if (kind === 'suspend') await vpnSuspend(row.id, 30)
+    else if (kind === 'ban') await vpnBan(row.id, row.status !== 'banned')
+    else await vpnReleaseDevice(row.id)
     message.success('已执行')
     await fetchOverview()
   } catch (e) {
@@ -94,7 +89,7 @@ function confirmRelease(row: MeshRow) {
     content: `确定释放 ${row.device_id}（${row.address}）？设备与地址都会被删除。`,
     positiveText: '释放',
     negativeText: '取消',
-    onPositiveClick: () => deviceAction(row, '', 'DELETE'),
+    onPositiveClick: () => deviceAction(row, 'release'),
   })
 }
 
@@ -118,10 +113,10 @@ const columns: DataTableColumns<MeshRow> = [
     title: '操作', key: 'actions', width: 300,
     render: r => h(NSpace, {size: 4}, {
       default: () => [
-        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, '/kick')}, {default: () => '踢下线'}),
-        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, '/suspend', 'POST', {minutes: 30})}, {default: () => '停用30m'}),
+        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, 'kick')}, {default: () => '踢下线'}),
+        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, 'suspend')}, {default: () => '停用30m'}),
         h(NButton, {size: 'tiny', type: r.status === 'banned' ? 'primary' : 'warning',
-          onClick: () => deviceAction(r, '/ban', 'POST', {banned: r.status !== 'banned'})},
+          onClick: () => deviceAction(r, 'ban')},
           {default: () => (r.status === 'banned' ? '解封' : '封禁')}),
         h(NButton, {size: 'tiny', type: 'error', onClick: () => confirmRelease(r)}, {default: () => '释放'}),
       ],

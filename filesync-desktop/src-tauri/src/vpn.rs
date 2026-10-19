@@ -71,21 +71,43 @@ pub fn vpn_stun(host: String, port: u16) -> Result<String, String> {
     Ok(reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string())
 }
 
-/// ping 覆盖网地址；iface 指定时强制从隧道网卡发出。
+/// ping 覆盖网地址；iface 指定时强制从隧道网卡发出（仅 Unix）。
+///
+/// Windows 的 ping 参数和编码都不同：`-n/-w` 且输出是 GBK，
+/// 直接按 UTF-8 解码会变成乱码，所以这里分平台处理。
 #[tauri::command]
 pub fn vpn_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<String, String> {
-    let count = count.unwrap_or(3);
+    let count = count.unwrap_or(3).to_string();
     let mut cmd = Command::new("ping");
-    cmd.args(["-c", &count.to_string(), "-W", "2"]);
-    if let Some(i) = iface {
-        cmd.args(["-I", &i]);
+    #[cfg(windows)]
+    {
+        let _ = iface; // Windows ping 没有 -I
+        cmd.args(["-n", &count, "-w", "2000", &target]);
     }
-    cmd.arg(&target);
+    #[cfg(not(windows))]
+    {
+        cmd.args(["-c", &count, "-W", "2"]);
+        if let Some(i) = iface {
+            cmd.args(["-I", &i]);
+        }
+        cmd.arg(&target);
+    }
     let out = cmd.output().map_err(|e| format!("执行 ping 失败: {e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let decode = |b: &[u8]| -> String {
+        #[cfg(windows)]
+        {
+            let (text, _, _) = encoding_rs::GBK.decode(b);
+            text.into_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            String::from_utf8_lossy(b).into_owned()
+        }
+    };
+    let stdout = decode(&out.stdout);
     if out.status.success() {
         Ok(stdout)
     } else {
-        Err(format!("{stdout}{}", String::from_utf8_lossy(&out.stderr)))
+        Err(format!("{stdout}{}", decode(&out.stderr)))
     }
 }

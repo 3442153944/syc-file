@@ -8,8 +8,7 @@
  * 没加入任何组时后端返回 409，这里静默失败——等管理端把用户加进组后，
  * 下次登录或点「主动组网测试」会自动补上。
  */
-import {netState} from './net'
-import {getDeviceId} from './platform'
+import {httpDelete, httpGet, httpPost} from './http'
 
 export interface VpnLinkPeer {
     device_id: string
@@ -23,27 +22,16 @@ export interface VpnLinkResult {
     peers: VpnLinkPeer[]
 }
 
-function authHeaders(): Record<string, string> {
-    return {
-        Token: localStorage.getItem('token') || '',
-        'Device-Id': getDeviceId(),
-    }
-}
+// 统一走 http.ts：Tauri 模式由 Rust 侧带 token，Web 模式走 fetch，
+// 页面里不要再直接 fetch，否则 Tauri 下会因为没有 localStorage.token 被判未登录。
 
 /** 确保本机有组网设备；返回设备名，失败抛错。 */
 export async function ensureVpnDevice(): Promise<string> {
     const cached = localStorage.getItem('syc_vpn_device')
     if (cached) return cached
 
-    const res = await fetch(`${netState.serverUrl}/v1/vpn/auto-enroll`, {
-        method: 'POST',
-        headers: authHeaders(),
-    })
-    const body = await res.json()
-    if (body?.code !== 200) {
-        throw new Error(body?.message || '自动入组失败（可能还没加入任何组）')
-    }
-    const device = body.data?.device_id as string
+    const data = await httpPost<{ device_id: string }>('/v1/vpn/auto-enroll')
+    const device = data?.device_id
     if (!device) throw new Error('自动入组响应缺少 device_id')
     localStorage.setItem('syc_vpn_device', device)
     return device
@@ -51,11 +39,43 @@ export async function ensureVpnDevice(): Promise<string> {
 
 /** 读当前设备的直连/中继状态。 */
 export async function fetchVpnLink(device: string): Promise<VpnLinkResult> {
-    const res = await fetch(
-        `${netState.serverUrl}/v1/vpn/link?device_id=${encodeURIComponent(device)}`,
-        {headers: authHeaders()},
-    )
-    const body = await res.json()
-    if (body?.code !== 200) throw new Error(body?.message || '读取链路状态失败')
-    return body.data as VpnLinkResult
+    return httpGet<VpnLinkResult>('/v1/vpn/link', {device_id: device})
+}
+
+export interface MeshDeviceRow {
+    id: number
+    device_id: string
+    username: string
+    group: string
+    org: string
+    address: string
+    status: string
+    online: boolean
+    endpoint: string
+    last_seen: string | null
+}
+
+export interface MeshOverview {
+    devices: MeshDeviceRow[]
+    server_address: string
+}
+
+export async function fetchMeshOverview(): Promise<MeshOverview> {
+    return httpGet<MeshOverview>('/v1/vpn/admin/overview')
+}
+
+export async function vpnKick(id: number): Promise<void> {
+    await httpPost(`/v1/vpn/admin/devices/${id}/kick`)
+}
+
+export async function vpnSuspend(id: number, minutes: number): Promise<void> {
+    await httpPost(`/v1/vpn/admin/devices/${id}/suspend`, {minutes})
+}
+
+export async function vpnBan(id: number, banned: boolean): Promise<void> {
+    await httpPost(`/v1/vpn/admin/devices/${id}/ban`, {banned})
+}
+
+export async function vpnReleaseDevice(id: number): Promise<void> {
+    await httpDelete(`/v1/vpn/admin/devices/${id}`)
 }
