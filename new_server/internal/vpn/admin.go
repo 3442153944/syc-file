@@ -498,7 +498,14 @@ func (a *API) Overview(c *gin.Context) {
 	}
 
 	now := time.Now()
-	rows := make([]gin.H, 0, len(devices))
+	rows := make([]gin.H, 0, len(devices)+1)
+	// 服务器固定排在最上面，方便对照 172.1.0.254
+	rows = append(rows, gin.H{
+		"id": 0, "device_id": "syc-server", "user_id": 0, "username": "服务器",
+		"group": "-", "org": "-", "address": config.Conf.Vpn.ServerAddress,
+		"status": "active", "online": true, "endpoint": "",
+		"role": "server", "last_seen": now,
+	})
 	for _, d := range devices {
 		online := d.Status == model.VPNDeviceActive && d.LastSeen != nil &&
 			now.Sub(*d.LastSeen) < 90*time.Second &&

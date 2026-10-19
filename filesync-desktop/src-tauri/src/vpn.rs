@@ -10,7 +10,9 @@
 //!
 //! 前端 NodeSwitcher 的「直连/中继」标签读 /v1/vpn/link，数据源就是 vpn_link 的返回。
 
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+use tauri::Emitter;
 
 fn run_syc(args: &[&str]) -> Result<String, String> {
     let out = Command::new("syc")
@@ -120,5 +122,80 @@ fn run_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<
         Ok(stdout)
     } else {
         Err(format!("{stdout}{}", decode(&out.stderr)))
+    }
+}
+
+/// 统一的 ping 命令构造（平台参数不同）。
+fn build_ping(target: &str, count: u8, iface: Option<&str>) -> Command {
+    let mut cmd = Command::new("ping");
+    #[cfg(windows)]
+    {
+        let _ = iface;
+        cmd.args(["-n", &count.to_string(), "-w", "2000", target]);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.args(["-c", &count.to_string(), "-W", "2"]);
+        if let Some(i) = iface {
+            cmd.args(["-I", i]);
+        }
+        cmd.arg(target);
+    }
+    cmd
+}
+
+fn decode_bytes(b: &[u8]) -> String {
+    #[cfg(windows)]
+    {
+        let (text, _, _) = encoding_rs::GBK.decode(b);
+        text.into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(b).into_owned()
+    }
+}
+
+/// 实时输出 ping：逐行 emit `vpn-ping-line`，结束时 emit `vpn-ping-done`。
+#[tauri::command]
+pub async fn vpn_ping_stream(
+    app: tauri::AppHandle,
+    target: String,
+    count: Option<u8>,
+    iface: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = build_ping(&target, count.unwrap_or(3), iface.as_deref());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("执行 ping 失败: {e}"))?;
+        if let Some(out) = child.stdout.take() {
+            for line in BufReader::new(out).split(b'\n') {
+                let bytes = line.map_err(|e| e.to_string())?;
+                let _ = app.emit("vpn-ping-line", decode_bytes(&bytes));
+            }
+        }
+        let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+        let _ = app.emit("vpn-ping-done", ok);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("ping 任务失败: {e}"))?
+}
+
+/// 本机是否存在 172.1.x 的隧道地址（用于区分「未启动隧道」和「隧道通但不通」）。
+#[tauri::command]
+pub fn vpn_tunnel_status() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let out = Command::new("netsh")
+            .args(["interface", "ipv4", "show", "addresses"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(decode_bytes(&out.stdout).contains("172.1."))
+    }
+    #[cfg(not(windows))]
+    {
+        let out = Command::new("ip").args(["-br", "addr"]).output().map_err(|e| e.to_string())?;
+        Ok(String::from_utf8_lossy(&out.stdout).contains("172.1."))
     }
 }

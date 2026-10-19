@@ -3,7 +3,7 @@
 // 管理员看自己机构，超管看全部；普通用户看不到这个页面（路由 MinLevel=2）。
 import {computed, h, onMounted, ref} from 'vue'
 import {
-  NAlert, NButton, NCard, NDataTable, NInput, NSpace, NTag, NText, useDialog, useMessage,
+  NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NSpace, NTag, NText, useDialog, useMessage,
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
@@ -12,6 +12,7 @@ import {
 } from '@/api/vpn'
 
 interface MeshRow {
+  role?: string
   id: number
   device_id: string
   user_id: number
@@ -33,6 +34,10 @@ const serverAddress = ref('172.1.0.254')
 const target = ref('172.1.0.254')
 const pingOut = ref('')
 const pinging = ref(false)
+const tunnelUp = ref<boolean | null>(null)
+const showSuspend = ref(false)
+const suspendTarget = ref<MeshRow | null>(null)
+const suspendMinutes = ref(30)
 const onlineCount = computed(() => rows.value.filter(r => r.online).length)
 
 async function fetchOverview() {
@@ -60,20 +65,55 @@ async function ping() {
   }
   pinging.value = true
   pingOut.value = ''
-  try {
-    const {invoke} = await import('@tauri-apps/api/core')
-    pingOut.value = await invoke<string>('vpn_ping', {target: t, count: 3})
-  } catch (e) {
-    pingOut.value = String(e)
-  } finally {
+  const {invoke} = await import('@tauri-apps/api/core')
+  const {listen} = await import('@tauri-apps/api/event')
+  const unLine = await listen<string>('vpn-ping-line', e => {
+    pingOut.value += e.payload + '\n'
+  })
+  const unDone = await listen<boolean>('vpn-ping-done', () => {
     pinging.value = false
+    unLine()
+    unDone()
+  })
+  try {
+    await invoke('vpn_ping_stream', {target: t, count: 3})
+  } catch (e) {
+    pingOut.value += String(e)
+    pinging.value = false
+    unLine()
+    unDone()
   }
 }
 
-async function deviceAction(row: MeshRow, kind: 'kick' | 'suspend' | 'ban' | 'release') {
+async function refreshTunnel() {
+  if (!isTauri()) {
+    tunnelUp.value = null
+    return
+  }
+  try {
+    const {invoke} = await import('@tauri-apps/api/core')
+    tunnelUp.value = await invoke<boolean>('vpn_tunnel_status')
+  } catch {
+    tunnelUp.value = null
+  }
+}
+
+function openSuspend(row: MeshRow) {
+  suspendTarget.value = row
+  suspendMinutes.value = 30
+  showSuspend.value = true
+}
+
+async function doSuspend() {
+  if (!suspendTarget.value) return
+  await deviceAction(suspendTarget.value, 'suspend', suspendMinutes.value)
+  showSuspend.value = false
+}
+
+async function deviceAction(row: MeshRow, kind: 'kick' | 'suspend' | 'ban' | 'release', minutes = 30) {
   try {
     if (kind === 'kick') await vpnKick(row.id)
-    else if (kind === 'suspend') await vpnSuspend(row.id, 30)
+    else if (kind === 'suspend') await vpnSuspend(row.id, minutes)
     else if (kind === 'ban') await vpnBan(row.id, row.status !== 'banned')
     else await vpnReleaseDevice(row.id)
     message.success('已执行')
@@ -111,20 +151,26 @@ const columns: DataTableColumns<MeshRow> = [
     render: r => r.endpoint || '(未知)'},
   {
     title: '操作', key: 'actions', width: 300,
-    render: r => h(NSpace, {size: 4}, {
-      default: () => [
-        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, 'kick')}, {default: () => '踢下线'}),
-        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, 'suspend')}, {default: () => '停用30m'}),
-        h(NButton, {size: 'tiny', type: r.status === 'banned' ? 'primary' : 'warning',
-          onClick: () => deviceAction(r, 'ban')},
-          {default: () => (r.status === 'banned' ? '解封' : '封禁')}),
-        h(NButton, {size: 'tiny', type: 'error', onClick: () => confirmRelease(r)}, {default: () => '释放'}),
-      ],
-    }),
+    render: r => {
+      if (r.role === 'server') return h(NText, {depth: 3}, {default: () => '—'})
+      return h(NSpace, {size: 4}, {
+        default: () => [
+          h(NButton, {size: 'tiny', onClick: () => deviceAction(r, 'kick')}, {default: () => '踢下线'}),
+          h(NButton, {size: 'tiny', onClick: () => openSuspend(r)}, {default: () => '停用'}),
+          h(NButton, {size: 'tiny', type: r.status === 'banned' ? 'primary' : 'warning',
+            onClick: () => deviceAction(r, 'ban')},
+            {default: () => (r.status === 'banned' ? '解封' : '封禁')}),
+          h(NButton, {size: 'tiny', type: 'error', onClick: () => confirmRelease(r)}, {default: () => '释放'}),
+        ],
+      })
+    },
   },
 ]
 
-onMounted(fetchOverview)
+onMounted(() => {
+  fetchOverview()
+  refreshTunnel()
+})
 </script>
 
 <template>
@@ -132,6 +178,9 @@ onMounted(fetchOverview)
     <NSpace justify="space-between" align="center" style="margin-bottom: 12px">
       <h2 style="margin: 0">组网</h2>
       <NSpace align="center">
+        <NTag size="small" :type="tunnelUp === true ? 'success' : tunnelUp === false ? 'warning' : 'default'" :bordered="false">
+          隧道 {{ tunnelUp === true ? '已启动' : tunnelUp === false ? '未启动' : '未知' }}
+        </NTag>
         <NTag size="small" round type="success" :bordered="false">在线 {{ onlineCount }} / {{ rows.length }}</NTag>
         <NButton size="small" :loading="loading" @click="fetchOverview">刷新</NButton>
       </NSpace>
@@ -162,5 +211,20 @@ onMounted(fetchOverview)
         :pagination="{pageSize: 20}"
       />
     </NCard>
+
+    <NModal v-model:show="showSuspend" preset="card" title="临时停用" style="max-width: 380px">
+      <NSpace vertical>
+        <NText>设备 {{ suspendTarget?.device_id }}（{{ suspendTarget?.address }}）</NText>
+        <NSpace align="center">
+          <NInputNumber v-model:value="suspendMinutes" :min="1" :max="10080" style="width: 160px">
+            <template #suffix>分钟</template>
+          </NInputNumber>
+          <NButton size="small" @click="suspendMinutes = 30">30m</NButton>
+          <NButton size="small" @click="suspendMinutes = 60">1h</NButton>
+          <NButton size="small" @click="suspendMinutes = 1440">1d</NButton>
+        </NSpace>
+        <NButton type="warning" @click="doSuspend">确定停用</NButton>
+      </NSpace>
+    </NModal>
   </div>
 </template>
