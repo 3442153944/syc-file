@@ -42,6 +42,8 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	update.RegisterUpdateRouter(v1, db)
 	// 管理域：用户/设备/操作日志/存储配额/角色权限/粘贴快传缓存 + 系统监控
 	admin.RegisterAdminRouter(v1, db, redisClient)
+	// DSH 令牌兑换入口：/dsh/auth?t=...，公开访问（不经过 /v1 认证）
+	admin.RegisterDSHPublicRouter(r, db)
 	// 剪贴板同步（纯转发 + Redis 短期历史，不落 MySQL）
 	clipboard.RegisterClipboardRouter(v1, redisClient)
 	// 注：/monitor 的 HTTP 路由在 admin.RegisterAdminRouter 里注册，此处不要重复挂

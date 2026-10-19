@@ -51,6 +51,10 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	// 缓存管理：粘贴快传的内存/落盘缓存，管理员可跨用户查看、手动清理
 	a.GET("/quick-share", h.ListQuickShare)
 	a.DELETE("/quick-share/:code", h.RevokeQuickShare)
+	// DSH 访问令牌：签发一次性短链 / 长期 token，并支持吊销
+	a.GET("/dsh/tokens", h.ListDSHTokens)
+	a.POST("/dsh/tokens", h.CreateDSHToken)
+	a.DELETE("/dsh/tokens/:id", h.RevokeDSHToken)
 
 	// 当前用户视角
 	rg.GET("/devices", h.ListDevices)

@@ -131,6 +131,7 @@ func main() {
 		&model.AppSetting{},
 		&model.Route{},
 		&model.UserRoute{},
+		&model.DSHToken{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
@@ -252,6 +253,12 @@ func main() {
 	// 而现象只是"服务好好的但访问不了"。以前靠 start.bat 手动拉起、死了没人管，
 	// 现在跟着后端一起起、一起停，并且死了会自动重启（见 internal/supervisor）。
 	svCfg := config.Conf.Supervisor
+	// 开发启动器显式跳过外部进程：本机的 frpc/ddns-go 会抢生产隧道和 DDNS 记录，
+	// 把 ddns/jp 域名指到开发机，导致客户端上传被开发环境的后端按另一套空间拒绝。
+	if os.Getenv("SYC_SKIP_SUPERVISOR") == "1" {
+		logger.Logger.Info("开发启动器：跳过外部进程托管（frpc/ddns-go），避免抢占生产隧道与 DDNS 记录")
+		svCfg.Enabled = false
+	}
 	if config.IsProd() && svCfg.Enabled {
 		// 容器里没有宿主机的 frpc / ddns-go 二进制，托管只会反复拉起失败；内网穿透放宿主机或另起容器
 		logger.Logger.Warn("生产模式不托管外部进程，已忽略 supervisor 配置")
