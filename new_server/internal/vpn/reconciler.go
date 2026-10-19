@@ -50,9 +50,15 @@ func StartServerReconciler(db *gorm.DB) {
 }
 
 func reconcilePeers(db *gorm.DB, iface, wgBin string) {
+	// 临时停用到期自动恢复
+	now := time.Now()
+	db.Model(&model.VPNDevice{}).
+		Where("status = ? AND suspended_until IS NOT NULL AND suspended_until <= ?", model.VPNDeviceSuspended, now).
+		Updates(map[string]any{"status": model.VPNDeviceActive, "suspended_until": nil})
+
 	var devices []model.VPNDevice
 	err := db.Where("status = ? AND session_expires_at IS NOT NULL AND session_expires_at > ?",
-		model.VPNDeviceActive, time.Now()).Find(&devices).Error
+		model.VPNDeviceActive, now).Find(&devices).Error
 	if err != nil {
 		logger.Logger.Warn("组网 peer 对账：读取设备失败", zap.Error(err))
 		return

@@ -2,6 +2,8 @@ package vpn
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -509,4 +511,108 @@ func (a *API) Overview(c *gin.Context) {
 		})
 	}
 	response.OK(c, gin.H{"devices": rows, "server_address": config.Conf.Vpn.ServerAddress})
+}
+
+// kickPeer 立即从服务器 wg 接口移除一个公钥（用于踢下线/停用/封禁）。
+func kickPeer(pub string) {
+	iface := strings.TrimSpace(config.Conf.Vpn.ServerInterface)
+	if iface == "" || strings.TrimSpace(pub) == "" || os.Geteuid() != 0 {
+		return
+	}
+	wg, err := ensureWgBinary()
+	if err != nil {
+		return
+	}
+	_ = exec.Command(wg, "set", iface, "peer", pub, "remove").Run()
+}
+
+func (a *API) adminDevice(c *gin.Context) (*model.VPNDevice, bool) {
+	u, ok := a.currentUser(c)
+	if !ok {
+		return nil, false
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		response.Fail(c, 400, "id 非法")
+		return nil, false
+	}
+	var dev model.VPNDevice
+	if err := a.db.First(&dev, uint(id)).Error; err != nil {
+		response.Fail(c, 404, "设备不存在")
+		return nil, false
+	}
+	if !a.canManageGroup(u, dev.GroupID) && u.ID != dev.UserID {
+		response.Fail(c, 403, "无此组管理权限")
+		return nil, false
+	}
+	return &dev, true
+}
+
+// KickDevice 立即断开当前隧道，但保留设备与地址，客户端可马上重连。
+func (a *API) KickDevice(c *gin.Context) {
+	dev, ok := a.adminDevice(c)
+	if !ok {
+		return
+	}
+	kickPeer(dev.PubKey)
+	a.db.Model(dev).Updates(map[string]any{"endpoint": "", "last_seen": nil})
+	response.OK(c, gin.H{"kicked": true})
+}
+
+// SuspendDevice 临时停用：到期后由 reconciler 自动恢复，地址保留。
+func (a *API) SuspendDevice(c *gin.Context) {
+	dev, ok := a.adminDevice(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Minutes int `json:"minutes"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if req.Minutes <= 0 {
+		req.Minutes = 30
+	}
+	until := time.Now().Add(time.Duration(req.Minutes) * time.Minute)
+	kickPeer(dev.PubKey)
+	a.db.Model(dev).Updates(map[string]any{
+		"status": model.VPNDeviceSuspended, "suspended_until": until,
+		"endpoint": "", "last_seen": nil,
+	})
+	response.OK(c, gin.H{"suspended_until": until})
+}
+
+// BanDevice 封禁/解封：封禁后不能重新登记，需管理员解封。
+func (a *API) BanDevice(c *gin.Context) {
+	dev, ok := a.adminDevice(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Banned bool `json:"banned"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if req.Banned {
+		kickPeer(dev.PubKey)
+		a.db.Model(dev).Updates(map[string]any{
+			"status": model.VPNDeviceBanned, "suspended_until": nil,
+			"endpoint": "", "last_seen": nil,
+		})
+	} else {
+		a.db.Model(dev).Updates(map[string]any{"status": model.VPNDeviceActive})
+	}
+	response.OK(c, gin.H{"banned": req.Banned})
+}
+
+// ReleaseAdminDevice 永久释放：删除设备并交回地址。
+func (a *API) ReleaseAdminDevice(c *gin.Context) {
+	dev, ok := a.adminDevice(c)
+	if !ok {
+		return
+	}
+	kickPeer(dev.PubKey)
+	if err := a.db.Delete(dev).Error; err != nil {
+		response.Fail(c, 500, "释放失败")
+		return
+	}
+	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }

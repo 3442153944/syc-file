@@ -554,6 +554,14 @@ func (a *API) AutoEnroll(c *gin.Context) {
 	// 已登记：地址保持不变（IP 持久），被吊销的走重新激活
 	var existing model.VPNDevice
 	if err := a.db.Where("user_id = ? AND device_id = ?", u.ID, deviceID).First(&existing).Error; err == nil {
+		if existing.Status == model.VPNDeviceBanned {
+			response.Fail(c, 403, "设备已封禁，请联系管理员解封")
+			return
+		}
+		if existing.Status == model.VPNDeviceSuspended && existing.SuspendedUntil != nil && existing.SuspendedUntil.After(time.Now()) {
+			response.Fail(c, 403, "设备临时停用中，稍后再试")
+			return
+		}
 		if existing.Status == model.VPNDeviceActive && strings.TrimSpace(existing.PrivKeyEnc) != "" {
 			now := time.Now()
 			exp := now.Add(sessionTTL())

@@ -17,8 +17,10 @@ const (
 	VPNKeySourceServer = "server" // 服务端生成并托管密文私钥
 	VPNKeySourceClient = "client" // 客户端生成，服务端只存公钥
 
-	VPNDeviceActive  = "active"
-	VPNDeviceRevoked = "revoked"
+	VPNDeviceActive    = "active"
+	VPNDeviceRevoked   = "revoked"
+	VPNDeviceSuspended = "suspended" // 临时停用，到 SuspendedUntil 自动恢复
+	VPNDeviceBanned    = "banned"    // 封禁，需管理员手动解封
 
 	VPNInteropAdminsOnly = "admins_only"
 	VPNInteropFull       = "full"
@@ -74,9 +76,11 @@ type VPNDevice struct {
 	LastSeen   *time.Time `json:"last_seen"`
 	// SessionExpiresAt 用户会话的最后有效期：由登录/心跳续期，过期后服务器会移除该 peer。
 	SessionExpiresAt *time.Time `gorm:"index" json:"session_expires_at"`
-	Status     string     `gorm:"size:16;not null;default:active;index" json:"status"`
-	CreatedAt  time.Time  `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt  time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
+	// SuspendedUntil 临时停用到期时间：到点后 reconciler 自动恢复为 active。
+	SuspendedUntil *time.Time `json:"suspended_until"`
+	Status         string     `gorm:"size:16;not null;default:active;index" json:"status"`
+	CreatedAt      time.Time  `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt      time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
 }
 
 func (VPNDevice) TableName() string { return "vpn_device" }

@@ -35,4 +35,8 @@ func RegisterVPNRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	a.GET("/interops", h.ListInterops)
 	a.GET("/server-peers", h.ServerPeers)
 	a.GET("/overview", h.Overview)
+	a.POST("/devices/:id/kick", h.KickDevice)
+	a.POST("/devices/:id/suspend", h.SuspendDevice)
+	a.POST("/devices/:id/ban", h.BanDevice)
+	a.DELETE("/devices/:id", h.ReleaseAdminDevice)
 }

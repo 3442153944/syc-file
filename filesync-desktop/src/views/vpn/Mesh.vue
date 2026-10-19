@@ -3,7 +3,7 @@
 // 管理员看自己机构，超管看全部；普通用户看不到这个页面（路由 MinLevel=2）。
 import {computed, h, onMounted, ref} from 'vue'
 import {
-  NAlert, NButton, NCard, NDataTable, NInput, NSpace, NTag, NText, useMessage,
+  NAlert, NButton, NCard, NDataTable, NInput, NSpace, NTag, NText, useDialog, useMessage,
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
@@ -24,6 +24,7 @@ interface MeshRow {
 }
 
 const message = useMessage()
+const dialog = useDialog()
 const rows = ref<MeshRow[]>([])
 const loading = ref(false)
 const serverAddress = ref('172.1.0.254')
@@ -71,6 +72,32 @@ async function ping() {
   }
 }
 
+async function deviceAction(row: MeshRow, path: string, method: 'POST' | 'DELETE' = 'POST', body?: unknown) {
+  try {
+    const res = await fetch(`${netState.serverUrl}/v1/vpn/admin/devices/${row.id}${path}`, {
+      method,
+      headers: {'Content-Type': 'application/json', Token: localStorage.getItem('token') || ''},
+      body: method === 'DELETE' ? undefined : JSON.stringify(body || {}),
+    })
+    const data = await res.json()
+    if (data?.code !== 200) throw new Error(data?.message || '操作失败')
+    message.success('已执行')
+    await fetchOverview()
+  } catch (e) {
+    message.error(String(e))
+  }
+}
+
+function confirmRelease(row: MeshRow) {
+  dialog.warning({
+    title: '永久释放',
+    content: `确定释放 ${row.device_id}（${row.address}）？设备与地址都会被删除。`,
+    positiveText: '释放',
+    negativeText: '取消',
+    onPositiveClick: () => deviceAction(row, '', 'DELETE'),
+  })
+}
+
 const columns: DataTableColumns<MeshRow> = [
   {title: '用户', key: 'username', width: 140},
   {title: '设备', key: 'device_id', width: 200, ellipsis: {tooltip: true}},
@@ -87,6 +114,19 @@ const columns: DataTableColumns<MeshRow> = [
   },
   {title: '端点', key: 'endpoint', ellipsis: {tooltip: true},
     render: r => r.endpoint || '(未知)'},
+  {
+    title: '操作', key: 'actions', width: 300,
+    render: r => h(NSpace, {size: 4}, {
+      default: () => [
+        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, '/kick')}, {default: () => '踢下线'}),
+        h(NButton, {size: 'tiny', onClick: () => deviceAction(r, '/suspend', 'POST', {minutes: 30})}, {default: () => '停用30m'}),
+        h(NButton, {size: 'tiny', type: r.status === 'banned' ? 'primary' : 'warning',
+          onClick: () => deviceAction(r, '/ban', 'POST', {banned: r.status !== 'banned'})},
+          {default: () => (r.status === 'banned' ? '解封' : '封禁')}),
+        h(NButton, {size: 'tiny', type: 'error', onClick: () => confirmRelease(r)}, {default: () => '释放'}),
+      ],
+    }),
+  },
 ]
 
 onMounted(fetchOverview)
