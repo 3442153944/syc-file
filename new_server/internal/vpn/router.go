@@ -34,4 +34,5 @@ func RegisterVPNRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	a.PUT("/interops", h.SetInterop)
 	a.GET("/interops", h.ListInterops)
 	a.GET("/server-peers", h.ServerPeers)
+	a.GET("/overview", h.Overview)
 }

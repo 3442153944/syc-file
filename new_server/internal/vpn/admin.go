@@ -445,3 +445,68 @@ func (a *API) ServerPeers(c *gin.Context) {
 	}
 	response.OK(c, rows)
 }
+
+// Overview 组网总览：设备、用户、组、地址、在线状态（管理员/超管）。
+// 超管看全量；管理员看自己 org_admin 的机构；其余只看自己的设备。
+func (a *API) Overview(c *gin.Context) {
+	u, ok := a.currentUser(c)
+	if !ok {
+		return
+	}
+	q := a.db.Model(&model.VPNDevice{}).Order("id")
+	if u.Level < model.LevelSuper {
+		var orgIDs []uint
+		a.db.Table("vpn_member AS m").
+			Joins("JOIN vpn_group AS g ON g.id = m.group_id").
+			Where("m.user_id = ? AND m.role = ?", u.ID, model.VPNRoleOrgAdmin).
+			Distinct().Pluck("g.org_id", &orgIDs)
+		if len(orgIDs) == 0 {
+			q = q.Where("user_id = ?", u.ID)
+		} else {
+			var gids []uint
+			a.db.Model(&model.VPNGroup{}).Where("org_id IN ?", orgIDs).Pluck("id", &gids)
+			q = q.Where("group_id IN ?", gids)
+		}
+	}
+	var devices []model.VPNDevice
+	if err := q.Find(&devices).Error; err != nil {
+		response.Fail(c, 500, "读取设备失败")
+		return
+	}
+
+	var users []model.User
+	a.db.Select("id", "username", "level").Find(&users)
+	userName := make(map[uint]string, len(users))
+	for _, x := range users {
+		userName[x.ID] = x.Username
+	}
+	var groups []model.VPNGroup
+	a.db.Find(&groups)
+	groupName := make(map[uint]string, len(groups))
+	groupOrg := make(map[uint]uint, len(groups))
+	for _, g := range groups {
+		groupName[g.ID] = g.Name
+		groupOrg[g.ID] = g.OrgID
+	}
+	var orgs []model.VPNOrg
+	a.db.Find(&orgs)
+	orgName := make(map[uint]string, len(orgs))
+	for _, o := range orgs {
+		orgName[o.ID] = o.Name
+	}
+
+	now := time.Now()
+	rows := make([]gin.H, 0, len(devices))
+	for _, d := range devices {
+		online := d.Status == model.VPNDeviceActive && d.LastSeen != nil &&
+			now.Sub(*d.LastSeen) < 90*time.Second &&
+			d.SessionExpiresAt != nil && d.SessionExpiresAt.After(now)
+		rows = append(rows, gin.H{
+			"id": d.ID, "device_id": d.DeviceID, "user_id": d.UserID, "username": userName[d.UserID],
+			"group": groupName[d.GroupID], "org": orgName[groupOrg[d.GroupID]],
+			"address": d.Address, "status": d.Status, "online": online,
+			"endpoint": d.Endpoint, "last_seen": d.LastSeen, "session_expires_at": d.SessionExpiresAt,
+		})
+	}
+	response.OK(c, gin.H{"devices": rows, "server_address": config.Conf.Vpn.ServerAddress})
+}
