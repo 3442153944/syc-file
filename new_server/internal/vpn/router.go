@@ -14,6 +14,7 @@ func RegisterVPNRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	// 设备侧
 	g.POST("/enroll", h.Enroll)
 	g.POST("/register", h.Register)
+	g.POST("/auto-enroll", h.AutoEnroll)
 	g.GET("/peers", h.Peers)
 	g.POST("/heartbeat", h.Heartbeat)
 	g.GET("/devices/my", h.MyDevices)

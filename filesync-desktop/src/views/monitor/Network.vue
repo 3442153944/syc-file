@@ -4,9 +4,9 @@ import {computed, ref, watch} from 'vue'
 import {
   NCard, NGrid, NGi, NStatistic, NSpace, NText, NTag, NDataTable, NEmpty, NButton, NAlert, useMessage,
 } from 'naive-ui'
-import {isTauri} from '@tauri-apps/api/core'
 import {useMonitor, fmtBytes, fmtRate} from '@/api/monitor/useMonitor'
 import {netState, probeAll, switchNode, healthOf} from '@/api/net'
+import {ensureVpnDevice, fetchVpnLink} from '@/api/vpn'
 
 const {network, connected} = useMonitor(2)
 
@@ -44,26 +44,15 @@ const vpnTesting = ref(false)
 const vpnResult = ref('')
 
 async function testVpn() {
-  const device = localStorage.getItem('syc_vpn_device') || ''
-  if (!device) {
-    vpnResult.value = '本机还没有组网设备：先完成入组并写入 localStorage.syc_vpn_device'
-    return
-  }
   vpnTesting.value = true
   vpnResult.value = ''
   try {
-    if (isTauri()) {
-      const {invoke} = await import('@tauri-apps/api/core')
-      const nat = await invoke<string>('vpn_nat', {device})
-      const link = await invoke<string>('vpn_link', {device})
-      vpnResult.value = `${nat}\n${link}`
-    } else {
-      const url = `${netState.serverUrl}/v1/vpn/link?device_id=${encodeURIComponent(device)}`
-      const res = await fetch(url, {headers: {Token: localStorage.getItem('token') || ''}})
-      const body = await res.json()
-      const mode = body?.data?.mode ?? 'unknown'
-      vpnResult.value = `模式：${mode === 'direct' ? '直连' : mode === 'relay' ? '中继' : mode}`
-    }
+    // 没登记过就自动入组（选用户第一个已加入的组）
+    const device = await ensureVpnDevice()
+    const link = await fetchVpnLink(device)
+    const modeText = link.mode === 'direct' ? '直连' : link.mode === 'relay' ? '中继' : link.mode === 'idle' ? '暂无对端' : '未知'
+    const peers = link.peers.map(p => `  ${p.device_id}  ${p.mode === 'relay' ? '中继' : '直连'}  ${p.endpoint || '(端点未知)'}`).join('\n')
+    vpnResult.value = `设备 ${device}（${link.self.address}）\n网络环境：${modeText}\n对端 ${link.peers.length} 个\n${peers}`
   } catch (e) {
     vpnResult.value = String(e)
   } finally {

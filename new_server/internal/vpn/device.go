@@ -525,3 +525,87 @@ func serverEndpointFor(c *gin.Context, cfg config.VpnConfig) string {
 	}
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
+
+// AutoEnroll 给桌面端用的自动入组：用登录设备号（Device-Id 头）作为组网设备名，
+// 选该用户第一个已加入的组，服务端生成并托管密钥，直接完成登记。
+//
+// 目的：登录后客户端不需要再让用户手选组、手填设备名；没有加入任何组时返回 409，
+// 由管理端先把人加进组。
+func (a *API) AutoEnroll(c *gin.Context) {
+	u, ok := a.currentUser(c)
+	if !ok {
+		return
+	}
+	deviceID := strings.TrimSpace(c.GetHeader("Device-Id"))
+	if deviceID == "" {
+		response.Fail(c, 400, "缺少 Device-Id")
+		return
+	}
+	// 已登记就直接返回，登录/重进页面可重复调用
+	var existing model.VPNDevice
+	if err := a.db.Where("user_id = ? AND device_id = ? AND status = ?", u.ID, deviceID, model.VPNDeviceActive).
+		First(&existing).Error; err == nil {
+		response.OK(c, gin.H{
+			"device_id": existing.DeviceID, "address": existing.Address,
+			"pubkey": existing.PubKey, "group_id": existing.GroupID, "existing": true,
+		})
+		return
+	}
+	var m model.VPNMember
+	if err := a.db.Where("user_id = ?", u.ID).Order("id").First(&m).Error; err != nil {
+		response.Fail(c, 409, "还没有加入任何组，请让管理员先把你加入组")
+		return
+	}
+	var group model.VPNGroup
+	if err := a.db.First(&group, m.GroupID).Error; err != nil {
+		response.Fail(c, 409, "所在组不存在")
+		return
+	}
+	if _, err := MasterKey(); err != nil {
+		response.Fail(c, 503, err.Error())
+		return
+	}
+	priv, pub, err := GenerateKeypair()
+	if err != nil {
+		response.Fail(c, 500, "生成密钥失败")
+		return
+	}
+	enc, err := EncryptPrivate(mustMasterKey(), priv, deviceID)
+	if err != nil {
+		response.Fail(c, 500, "加密私钥失败")
+		return
+	}
+	var used []string
+	a.db.Model(&model.VPNDevice{}).Where("group_id = ? AND status = ?", group.ID, model.VPNDeviceActive).
+		Pluck("address", &used)
+	usedSet := make(map[string]bool, len(used))
+	for _, addr := range used {
+		usedSet[addr] = true
+	}
+	addr, err := NextAddress(group.Subnet, usedSet)
+	if err != nil {
+		response.Fail(c, 409, err.Error())
+		return
+	}
+	now := time.Now()
+	exp := now.Add(sessionTTL())
+	dev := model.VPNDevice{
+		UserID: u.ID, GroupID: group.ID, DeviceID: deviceID,
+		PubKey: pub, PrivKeyEnc: enc, KeySource: model.VPNKeySourceServer,
+		Address: addr, Status: model.VPNDeviceActive,
+		LastSeen: &now, SessionExpiresAt: &exp,
+	}
+	if err := a.db.Create(&dev).Error; err != nil {
+		response.Fail(c, 500, "登记设备失败")
+		return
+	}
+	response.OK(c, gin.H{
+		"device_id": dev.DeviceID, "address": dev.Address, "pubkey": dev.PubKey,
+		"group_id": dev.GroupID, "subnet": group.Subnet, "private_key": priv, "existing": false,
+	})
+}
+
+func mustMasterKey() []byte {
+	k, _ := MasterKey()
+	return k
+}
