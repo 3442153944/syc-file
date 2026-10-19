@@ -13,6 +13,7 @@ mod desktop_update;
 mod hotkey_codec;
 mod logger;
 mod net;
+mod vpn;
 mod speedtest;
 mod sync_engine;
 mod transfers;
@@ -234,6 +235,12 @@ pub fn run() {
             app_shell::log_window::get_recent_logs,
             // 主窗口生命周期 / 传输状态
             app_shell::window::take_pending_network_settings,
+            // 组网（薄封装，实际协议在 filesync-cli）
+            vpn::vpn_nat,
+            vpn::vpn_link,
+            vpn::vpn_wg_config,
+            vpn::vpn_up,
+            vpn::vpn_down,
             transfers::get_transfers,
             transfers::transfer_upload_begin,
             transfers::transfer_upload_progress,

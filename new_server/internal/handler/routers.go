@@ -12,6 +12,7 @@ import (
 	"syc-file/internal/sync"
 	"syc-file/internal/system"
 	"syc-file/internal/update"
+	"syc-file/internal/vpn"
 	"syc-file/internal/ws"
 )
 
@@ -46,6 +47,8 @@ func RegisterRouters(r *gin.Engine, db *gorm.DB, redisClient *redis.Client, engi
 	admin.RegisterDSHPublicRouter(r, db)
 	// 剪贴板同步（纯转发 + Redis 短期历史，不落 MySQL）
 	clipboard.RegisterClipboardRouter(v1, redisClient)
+	// 组网：设备入组、对端下发、组与互通管理（密钥只入库，不落配置文件）
+	vpn.RegisterVPNRouter(v1, db)
 	// 注：/monitor 的 HTTP 路由在 admin.RegisterAdminRouter 里注册，此处不要重复挂
 	// （重复注册同一路径 gin 会直接 panic）。实时刷新走 WS 推送（monitor/broadcaster.go）。
 }

@@ -28,20 +28,39 @@ func IsProd() bool { return Conf.Server.Mode == ModeProd }
 
 // Config 根节点配置，完全对齐你的 YAML
 type Config struct {
-	DB         DBConfig         `mapstructure:"db"`
-	Log        LogConfig        `mapstructure:"log"`
-	Whitelist  []string         `mapstructure:"whitelist"` // 白名单路由
-	Auth       AuthConfig       `mapstructure:"auth"`
-	Server     ServerConfig     `mapstructure:"server"`
-	Redis      RedisConfig      `mapstructure:"redis"`
-	File       FileConfig       `mapstructure:"file"`
-	User       UserCfg          `mapstructure:"user"`
-	Share      ShareConfig      `mapstructure:"share"`
-	QuickShare QuickShareConfig `mapstructure:"quick_share"`
-	Sync       SyncConfig       `mapstructure:"sync"`
+	DB         DBConfig          `mapstructure:"db"`
+	Log        LogConfig         `mapstructure:"log"`
+	Whitelist  []string          `mapstructure:"whitelist"` // 白名单路由
+	Auth       AuthConfig        `mapstructure:"auth"`
+	Server     ServerConfig      `mapstructure:"server"`
+	Redis      RedisConfig       `mapstructure:"redis"`
+	File       FileConfig        `mapstructure:"file"`
+	User       UserCfg           `mapstructure:"user"`
+	Share      ShareConfig       `mapstructure:"share"`
+	QuickShare QuickShareConfig  `mapstructure:"quick_share"`
+	Sync       SyncConfig        `mapstructure:"sync"`
 	Supervisor supervisor.Config `mapstructure:"supervisor"`
-	Monitor    MonitorConfig    `mapstructure:"monitor"`
-	Thumbnail  ThumbnailConfig  `mapstructure:"thumbnail"`
+	Monitor    MonitorConfig     `mapstructure:"monitor"`
+	Thumbnail  ThumbnailConfig   `mapstructure:"thumbnail"`
+	// Vpn 组网地址池。整段缺省即可：默认从 172.1.0.0/16 里按 /24 切分给各个组。
+	Vpn VpnConfig `mapstructure:"vpn"`
+}
+
+// VpnConfig 组网配置。主密钥不放这里，走环境变量 SYC_VPN_MASTER_KEY。
+type VpnConfig struct {
+	// Pool 组网地址池（IPv4）。建组时未指定 subnet 就从池里自动分配一个 /24；
+	// 显式指定的 subnet 必须落在池内，避免不同环境之间地址重叠。
+	Pool string `mapstructure:"pool"`
+	// StunPort STUN-lite 的 UDP 端口：客户端探测自己的公网端点后随 heartbeat 上报。
+	// 0 表示默认 3478；负数表示关闭。
+	StunPort int `mapstructure:"stun_port"`
+	// ServerAddress 服务器在覆盖网里的固定地址（默认 172.1.0.254），
+	// 让普通 HTTP/DB 等业务也能走 P2P 直达，而不是绕公网域名。
+	ServerAddress string `mapstructure:"server_address"`
+	// ServerPubKey / ServerEndpoint 服务器自身 WireGuard 接口的公钥与公网端点。
+	// 两者都配置后，所有客户端的 peers 里都会带上服务器节点。
+	ServerPubKey   string `mapstructure:"server_pubkey"`
+	ServerEndpoint string `mapstructure:"server_endpoint"`
 }
 
 // ThumbnailConfig 图片缩略图配置（见 internal/thumb）。整段缺省即可：默认开启，
@@ -261,6 +280,17 @@ func Init() error {
 
 	if v := strings.TrimSpace(os.Getenv("SYC_MODE")); v != "" {
 		Conf.Server.Mode = v
+	}
+
+	// 组网地址池：整段缺省时用 172.1.0.0/16，避免各环境各自写一份还写不一致。
+	if strings.TrimSpace(Conf.Vpn.Pool) == "" {
+		Conf.Vpn.Pool = "172.1.0.0/16"
+	}
+	if strings.TrimSpace(Conf.Vpn.ServerAddress) == "" {
+		Conf.Vpn.ServerAddress = "172.1.0.254"
+	}
+	if Conf.Vpn.StunPort == 0 {
+		Conf.Vpn.StunPort = 3478
 	}
 	Conf.Server.Mode = strings.ToLower(strings.TrimSpace(Conf.Server.Mode))
 	switch Conf.Server.Mode {

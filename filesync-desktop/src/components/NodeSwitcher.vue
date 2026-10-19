@@ -15,7 +15,7 @@ import {computed, onMounted, onBeforeUnmount, ref} from 'vue'
 import {NDropdown, NTag, useMessage} from 'naive-ui'
 import type {DropdownOption} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
-import {netState, probeAll, switchNode, healthOf} from '@/api/net'
+import {netState, probeAll, switchNode, healthOf, refreshVpnMode} from '@/api/net'
 import ServerSettings from '@/views/person/ServerSettings.vue'
 
 const message = useMessage()
@@ -34,6 +34,28 @@ const dotClass = computed(() => {
 })
 
 const label = computed(() => netState.activeName || '未选择节点')
+
+/** 组网链路环境：直连 / 中继 / 未启用，显示在节点指示器左边 */
+const vpnLabel = computed(() => {
+  switch (netState.vpnMode) {
+    case 'direct': return '直连'
+    case 'relay': return '中继'
+    case 'idle': return '无对端'
+    case 'off': return '未组网'
+    default: return '组网?'
+  }
+})
+
+const vpnType = computed(() => {
+  switch (netState.vpnMode) {
+    case 'direct': return 'success'
+    case 'relay': return 'warning'
+    case 'idle': return 'default'
+    default: return 'default'
+  }
+})
+
+let vpnTimer: number | undefined
 
 const tooltip = computed(() => {
   const h = activeHealth.value
@@ -88,6 +110,9 @@ async function handleSelect(key: string) {
 }
 
 onMounted(async () => {
+  // 组网链路状态：桌面端注册设备后（localStorage.syc_vpn_device）才显示直连/中继
+  refreshVpnMode().catch(() => {})
+  vpnTimer = window.setInterval(() => refreshVpnMode().catch(() => {}), 30_000)
   if (!isTauri()) return
   // 原生菜单栏「网络 → 网络节点设置…」发来的事件
   const {listen} = await import('@tauri-apps/api/event')
@@ -103,6 +128,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (vpnTimer) window.clearInterval(vpnTimer)
   unlisten?.()
   unlisten = null
 })
@@ -114,6 +140,7 @@ defineExpose({open: () => (showSettings.value = true)})
 <template>
   <n-dropdown trigger="click" :options="options" @select="handleSelect">
     <div class="node-switcher" :title="tooltip">
+      <n-tag size="small" :type="vpnType" :bordered="false">{{ vpnLabel }}</n-tag>
       <span :class="dotClass"></span>
       <span class="node-name">{{ label }}</span>
       <n-tag v-if="netState.offline" size="small" type="error" :bordered="false">离线</n-tag>

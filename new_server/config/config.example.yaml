@@ -221,3 +221,12 @@ thumbnail:
   # 到期时间记在 Redis 里、后台定时销毁；被再次访问会顺延。
   temp_ttl_minutes: 720          # 临时缩略图保留时长（分钟），默认 12 小时
   # temp_dir: ""                 # 临时缩略图目录；默认 <盘>/<base_path>/<temp_path>/thumbs
+
+# 组网（云梯组网）：密钥只入库，下面的 pubkey/endpoint 是服务器自身 wg 接口的，
+# 由 deploy/vpn-server.sh 生成并打印。
+vpn:
+  pool: 172.1.0.0/16
+  stun_port: 3478
+  server_address: 172.1.0.254
+  server_pubkey: ""
+  server_endpoint: ""

@@ -26,6 +26,7 @@ import (
 	"syc-file/internal/sync"
 	"syc-file/internal/system"
 	"syc-file/internal/thumb"
+	"syc-file/internal/vpn"
 	"syc-file/internal/ws"
 	"syc-file/pkg/device_store"
 	"syc-file/pkg/logger"
@@ -132,6 +133,13 @@ func main() {
 		&model.Route{},
 		&model.UserRoute{},
 		&model.DSHToken{},
+		&model.VPNOrg{},
+		&model.VPNGroup{},
+		&model.VPNMember{},
+		&model.VPNDevice{},
+		&model.VPNEnrollToken{},
+		&model.VPNInterop{},
+		&model.VPNDeviceHistory{},
 	); err != nil {
 		logger.Logger.Fatal("数据库迁移失败", zap.Error(err))
 	}
@@ -244,6 +252,11 @@ func main() {
 	}
 
 	// 分享文件统一经过下载接口校验，不公开挂载临时目录。
+
+	// 组网 STUN-lite：客户端用它发现自己的公网端点，再用 heartbeat 上报。
+	if _, err := vpn.StartSTUN(config.Conf.Vpn.StunPort); err != nil {
+		logger.Logger.Warn("STUN-lite 启动失败（组网仍可走中继）", zap.Error(err))
+	}
 
 	handler.RegisterRouters(r, db, redisClient, syncEngine)
 
