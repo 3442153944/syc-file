@@ -105,7 +105,7 @@ export async function startEmbeddedTunnel(device: string): Promise<string> {
     const {invoke} = await import('@tauri-apps/api/core')
     return invoke<string>('vpn_up_embedded', {
         device,
-        private_key: identity.private_key,
+        privateKey: identity.private_key,
         address: data.self.address,
         subnet: data.self.subnet,
         keepalive: data.self.keepalive ?? 5,
