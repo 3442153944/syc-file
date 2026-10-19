@@ -18,8 +18,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import com.example.filesync.data.sync.WebSocketManager
 import androidx.navigation.NavController
 import com.sunyuanling.filesync.AppConfig
+import com.sunyuanling.filesync.network.ServerAddress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +36,7 @@ private enum class PingLineType { NORMAL, SUCCESS, WARNING, ERROR }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServerSettingsScreen(navController: NavController) {
+    val context = LocalContext.current
     var serverAddress by remember { mutableStateOf(AppConfig.server) }
     var serverPort by remember { mutableStateOf(AppConfig.port.toString()) }
     var httpsEnabled by remember { mutableStateOf(AppConfig.isHttps) }
@@ -45,6 +49,7 @@ fun ServerSettingsScreen(navController: NavController) {
     var pingLines by remember { mutableStateOf<List<PingLine>>(emptyList()) }
     var pingResult by remember { mutableStateOf<Boolean?>(null) }
     val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
 
     val terminalScrollState = rememberScrollState()
 
@@ -53,6 +58,7 @@ fun ServerSettingsScreen(navController: NavController) {
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 title = { Text("服务器设置") },
@@ -63,14 +69,27 @@ fun ServerSettingsScreen(navController: NavController) {
                 },
                 actions = {
                     TextButton(onClick = {
+                        val validPort = serverPort.toIntOrNull()
+                        if (serverAddress.isBlank() || validPort == null || validPort !in 1..65535) {
+                            scope.launch { snackbar.showSnackbar("请填写服务器地址和 1–65535 范围内的端口") }
+                            return@TextButton
+                        }
+                        val previousServer = AppConfig.getBaseUrl()
                         AppConfig.server = serverAddress.trim()
-                        AppConfig.port = serverPort.toIntOrNull() ?: 8891
+                        AppConfig.port = validPort
                         AppConfig.isHttps = httpsEnabled
                         AppConfig.connectTimeoutMs = connectTimeout * 1000
                         AppConfig.readTimeoutMs = readTimeout * 1000
                         AppConfig.wsReconnectIntervalMs = wsReconnectInterval * 1000L
                         AppConfig.routePath = routerPath.trim()
-                        ConfigManager.save()
+                        val saved = runCatching { ConfigManager.save() }
+                        if (previousServer != AppConfig.getBaseUrl() && WebSocketManager.isConnected()) {
+                            WebSocketManager.disconnect()
+                            WebSocketManager.connect(context.applicationContext)
+                        }
+                        scope.launch {
+                            snackbar.showSnackbar(if (saved.isSuccess) "服务器设置已保存，无需重启" else "当前连接设置已更新，但未能保存，请检查存储权限")
+                        }
                     }) { Text("保存") }
                 }
             )
@@ -84,6 +103,7 @@ fun ServerSettingsScreen(navController: NavController) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            FailoverSettings()
             // HTTPS 开关
             Card(modifier = Modifier.fillMaxWidth()) {
                 Row(
@@ -167,7 +187,7 @@ fun ServerSettingsScreen(navController: NavController) {
                         val host = serverAddress.trim()
                         val port = serverPort.toIntOrNull() ?: 8891
                         val lines = mutableListOf<PingLine>()
-                        val newLines = testConnection(host, port, httpsEnabled, AppConfig.routePath)
+                        val newLines = testConnection(host, port, httpsEnabled, routerPath)
                         newLines.forEach { line ->
                             lines.add(line)
                             pingLines = lines.toList()
@@ -268,8 +288,7 @@ private suspend fun testConnection(host: String, port: Int, httpsEnabled: Boolea
     return withContext(Dispatchers.IO) {
         val lines = mutableListOf<PingLine>()
         try {
-            val protocol = if (httpsEnabled) "https" else "http"
-            val url = "$protocol://$host:$port$routePath"
+            val url = "${ServerAddress.base(host, port, httpsEnabled, routePath)}/v1/ping"
             lines.add(PingLine("$ curl $url", PingLineType.NORMAL))
 
             val start = System.currentTimeMillis()
@@ -277,17 +296,20 @@ private suspend fun testConnection(host: String, port: Int, httpsEnabled: Boolea
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             connection.requestMethod = "GET"
-            connection.connect()
-            val elapsed = System.currentTimeMillis() - start
-            val code = connection.responseCode
-            connection.disconnect()
-
-            lines.add(PingLine("HTTP $code  ${elapsed}ms", when {
-                code in 200..299 -> PingLineType.SUCCESS
-                elapsed > 1000   -> PingLineType.WARNING
-                else             -> PingLineType.ERROR
-            }))
-            lines.add(PingLine("连接成功: $url", PingLineType.SUCCESS))
+            try {
+                connection.instanceFollowRedirects = false
+                val code = connection.responseCode
+                val elapsed = System.currentTimeMillis() - start
+                val body = if (code == 200) connection.inputStream.bufferedReader().use { it.readText() } else ""
+                val healthy = ServerAddress.healthy(code, body)
+                lines.add(PingLine("HTTP $code  ${elapsed}ms", if (healthy) PingLineType.SUCCESS else PingLineType.ERROR))
+                lines.add(PingLine(
+                    if (healthy) "后端接口正常: $url" else "HTTP 已响应，但健康检查未通过，请核对端口和路由路径",
+                    if (healthy) PingLineType.SUCCESS else PingLineType.ERROR,
+                ))
+            } finally {
+                connection.disconnect()
+            }
         } catch (e: Exception) {
             val msg = when {
                 e.message?.contains("Unable to parse TLS") == true ->

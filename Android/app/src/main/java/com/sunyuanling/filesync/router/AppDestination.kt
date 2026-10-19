@@ -19,6 +19,8 @@ import kotlinx.serialization.Serializable
 @Serializable data class FileDetailDestination(val fileId: String)
 /**文件上传*/
 @Serializable data object FileUploadDestination
+/** 快传队列与分享历史 */
+@Serializable data object QuickShareDestination
 /**文件搜索*/
 @Serializable data object FileSearchDestination
 

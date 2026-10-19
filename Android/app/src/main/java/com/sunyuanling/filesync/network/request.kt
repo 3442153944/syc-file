@@ -32,17 +32,9 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 object Request {
 
-    var baseUrl = "${AppConfig.getBaseUrl()}/v1"
-        set(value) {
-            field = value.trimEnd('/')
-            Log.d(TAG, "基础 URL: $field")
-        }
-
-    var baseStaticUrl = AppConfig.getBaseUrl()
-        set(value) {
-            field = value.trimEnd('/')
-            Log.d(TAG, "基础静态 URL: $field")
-        }
+    // 每次构造请求时读取最新配置，保存服务器设置后无需重启。
+    val baseUrl: String get() = "${AppConfig.getBaseUrl()}/v1"
+    val baseStaticUrl: String get() = AppConfig.getBaseUrl()
 
     private var appContext: Context? = null
 
@@ -59,6 +51,12 @@ object Request {
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            try { chain.proceed(chain.request()) } catch (error: java.io.IOException) {
+                NodeFailover.reportFailure(chain.request().url.toString())
+                throw error
+            }
+        }
         // 服务端的 token 绑定设备：请求必须带 Device-Id（头或 device_id 参数），否则当作未登录，
         // 且文件下载这类接口是返回 HTTP 200 + {"code":401} 的 JSON，调用方很容易把它当文件内容。
         // 在客户端层统一补上，下载/预览/同步等直接用 client 发请求的地方就不会漏。
@@ -82,6 +80,7 @@ object Request {
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        NodeFailover.init(context)
         Log.d(TAG, "Request 初始化成功")
     }
 
@@ -101,6 +100,7 @@ object Request {
     }
 
     suspend fun clearToken() {
+        com.sunyuanling.filesync.share.QuickShareController.cancelAll()
         appContext?.dataStore?.edit { preferences ->
             preferences.remove(TOKEN_KEY)
         }

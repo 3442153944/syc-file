@@ -14,6 +14,7 @@ mod hotkey_codec;
 mod logger;
 mod net;
 mod vpn;
+mod mesh_proxy_commands;
 mod speedtest;
 mod sync_engine;
 mod transfers;
@@ -70,6 +71,7 @@ pub fn run() {
         .manage(sync_engine::init_sync_engine())
         .manage(clipboard_state.clone())
         .manage(desktop_update::init())
+        .manage(mesh_proxy_commands::MeshProxyState::default())
         .setup(move |app| {
             // 启动时 tauri.conf.json 自动建出的主窗口用的是配置里写死的默认位置/大小，
             // 补上一次关闭时缓存的值（没有缓存就保持默认，见 app_shell::window）
@@ -253,6 +255,9 @@ pub fn run() {
             vpn::vpn_down_embedded,
             vpn::autostart_get,
             vpn::autostart_set,
+            mesh_proxy_commands::mesh_proxy_status,
+            mesh_proxy_commands::mesh_proxy_start,
+            mesh_proxy_commands::mesh_proxy_stop,
             transfers::get_transfers,
             transfers::transfer_upload_begin,
             transfers::transfer_upload_progress,

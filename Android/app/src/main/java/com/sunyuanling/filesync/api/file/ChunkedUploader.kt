@@ -26,6 +26,7 @@ import com.sunyuanling.filesync.api.ApiRoutes
 import com.sunyuanling.filesync.core.SyncCore
 import com.sunyuanling.filesync.core.SyncPlanner
 import com.sunyuanling.filesync.network.Request
+import com.sunyuanling.filesync.network.awaitResponse
 import com.sunyuanling.filesync.util.Blake3Util
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -41,6 +42,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -92,7 +94,14 @@ object ChunkedUploader {
         /** 并发覆盖：null=planner 的 per-node AIMD 窗口；显式值=固定路径的 Semaphore 并发数。 */
         val concurrency: Int? = null,
         /** 本机设备 id，服务端派发同步任务时排除源设备。空字符串表示不传。 */
-        val deviceId: String = ""
+        val deviceId: String = "",
+        /** 快传与普通上传共用调度核心，仅初始化和完成结果不同。 */
+        val quickShare: Boolean = false,
+        val baseUrl: String = AppConfig.getBaseUrl(),
+        val resume: UploadInitData? = null,
+        val onSession: suspend (String) -> Unit = {},
+        /** 平台节点注册表可显式注入；规划与选片仍由 Rust 决定。 */
+        val nodes: List<PlannerNode>? = null
     )
 
     data class Description(
@@ -194,7 +203,7 @@ object ChunkedUploader {
         runUploadOnce(desc, file, remoteDir, options, onProgress)
     } catch (e: SessionGoneException) {
         // 会话过期：重新 init 整流程一次（不会重算哈希）
-        runUploadOnce(desc, file, remoteDir, options, onProgress)
+        runUploadOnce(desc, file, remoteDir, options.copy(resume = null), onProgress)
     }
 
     /**
@@ -223,7 +232,7 @@ object ChunkedUploader {
             )
         }
 
-        val missing = if (init.missing.isNotEmpty()) init.missing else (0 until desc.chunkCount).toList()
+        val missing = init.missing
         // 已落盘分片估算基线（用片数×chunkSize 上界，complete 时会自然修正）
         val bytesSent = AtomicLong((desc.chunkCount - missing.size).toLong() * desc.chunkSize)
         onProgress(minOf(bytesSent.get(), desc.totalSize), desc.totalSize)
@@ -235,20 +244,20 @@ object ChunkedUploader {
                 ensureActive()
                 sem.withPermit {
                     ensureActive()
-                    val len = readAndUploadChunk(file, init.uploadId, index, desc)
+                    val len = readAndUploadChunk(file, init.uploadId, index, desc, options)
                     val now = minOf(bytesSent.addAndGet(len.toLong()), desc.totalSize)
                     onProgress(now, desc.totalSize)
                 }
             }
         }.awaitAll()
 
-        completeUpload(init.uploadId, options.deviceId)
+        completeUpload(init.uploadId, options)
     }
 
     /** 读出该片字节并上传（单次尝试：失败抛给上层——planner 路径才是重试机制；
      *  固定路径的重试语义 = 外层 SessionGone 重 init 一次 + 上层 SyncEngine 重试）。 */
     private suspend fun readAndUploadChunk(
-        file: File, uploadId: String, index: Int, desc: Description
+        file: File, uploadId: String, index: Int, desc: Description, options: UploadOptions
     ): Int {
         val offset = index.toLong() * desc.chunkSize
         val len = minOf(desc.chunkSize.toLong(), desc.totalSize - offset).toInt()
@@ -257,7 +266,8 @@ object ChunkedUploader {
             raf.seek(offset)
             raf.readFully(data)
         }
-        FileApi.uploadChunk(uploadId, index, data).getOrElse { throw it }
+        if (options.quickShare) quickApi(options).chunk(uploadId, index, data)
+        else FileApi.uploadChunk(uploadId, index, data).getOrElse { throw it }
         return len
     }
 
@@ -268,7 +278,7 @@ object ChunkedUploader {
     // 结果经 Channel 喂回循环；Task::Wait = 无任务可分派，挂在 Channel 上等在途分片的 Report。
 
     /** planner 节点配置（对齐 sync_core PlannerNodeConfig）。 */
-    private data class PlannerNode(val id: String, val url: String, val parent: String? = null)
+    data class PlannerNode(val id: String, val url: String, val parent: String? = null)
 
     /** planner 任务（Task JSON 的解析结果，变体与 upload_planner::Task 一一对应）。 */
     private sealed interface PlannerTask {
@@ -305,11 +315,11 @@ object ChunkedUploader {
         onProgress: (Long, Long) -> Unit
     ): UploadCompleteData = coroutineScope {
         val total = file.length()
-        val pool = buildNodePool()
+        val pool = options.nodes ?: buildNodePool(options.baseUrl)
         if (!SyncPlanner.available || pool.isEmpty()) {
             // 原生 planner 不可用（.so 缺失/过旧）：退回固定分片单路径
             Log.w(TAG, "[upload] planner 原生不可用，退回固定分片上传")
-            val desc = describe(file, DEFAULT_CHUNK_SIZE)
+            val desc = describe(file, options.resume?.chunkSize?.toInt() ?: DEFAULT_CHUNK_SIZE)
             onProgress(0, desc.totalSize)
             return@coroutineScope runFixedWithRetry(desc, file, remoteDir, options, onProgress)
         }
@@ -317,7 +327,7 @@ object ChunkedUploader {
         val handle = SyncPlanner.newPlanner(buildPlannerInput(total, pool))
         if (handle == 0L) {
             Log.w(TAG, "[upload] planner 创建失败，退回固定分片上传")
-            val desc = describe(file, DEFAULT_CHUNK_SIZE)
+            val desc = describe(file, options.resume?.chunkSize?.toInt() ?: DEFAULT_CHUNK_SIZE)
             onProgress(0, desc.totalSize)
             return@coroutineScope runFixedWithRetry(desc, file, remoteDir, options, onProgress)
         }
@@ -332,13 +342,13 @@ object ChunkedUploader {
 
     /** 构造 planner 节点池：当前 baseUrl 为激活节点（id="active"，main_node），叠加内置多路径节点；
      *  URL 与激活节点相同的内置节点去重跳过，其子节点的父引用重指到保留节点。 */
-    private fun buildNodePool(): List<PlannerNode> {
+    private fun buildNodePool(baseUrl: String): List<PlannerNode> {
         val builtIns = listOf(
             PlannerNode("ddns", "https://ddns.sunyuanling.cn/file"),
             PlannerNode("jp", "https://jp.sunyuanling.cn:8443/file"),
             PlannerNode("hk", "https://hk.sunyuanling.cn:8443/file", parent = "ddns"),
         )
-        val pool = mutableListOf(PlannerNode("active", AppConfig.getBaseUrl()))
+        val pool = mutableListOf(PlannerNode("active", baseUrl))
         val idRemap = HashMap<String, String>()
         for (n in builtIns) {
             val dup = pool.firstOrNull { it.url.trimEnd('/') == n.url.trimEnd('/') }
@@ -351,6 +361,10 @@ object ChunkedUploader {
             if (parent != null && pool.none { it.id == parent }) continue
             pool.add(n.copy(parent = parent))
         }
+        com.sunyuanling.filesync.network.NodeFailover.backups.lineSequence()
+            .filter { it.isNotBlank() }.forEachIndexed { index, url ->
+                if (pool.none { it.url.trimEnd('/') == url.trimEnd('/') }) pool.add(PlannerNode("custom-$index", url))
+            }
         return pool
     }
 
@@ -387,7 +401,7 @@ object ChunkedUploader {
     ): UploadCompleteData {
         // 分片大小只由文件大小决定，不再等探测：describe/init 立即开始，首字节即时发出。
         // 探测改为传输期后台补测（见 runTransfer），样本回来后经 report 并入调度。
-        val chunkSize = SyncPlanner.chunkSize(handle)
+        val chunkSize = options.resume?.chunkSize ?: SyncPlanner.chunkSize(handle)
         if (chunkSize <= 0L) throw Exception("上传规划失败：无法确定分片大小")
 
         // describe 与文件大小档位对应（一趟顺序读，叶子+树根+整文件）
@@ -423,7 +437,7 @@ object ChunkedUploader {
         options: UploadOptions,
         onProgress: (Long, Long) -> Unit
     ): UploadCompleteData {
-        val missing = if (init.missing.isNotEmpty()) init.missing else (0 until desc.chunkCount).toList()
+        val missing = init.missing
         // 已落盘分片估算基线（用片数×chunkSize 上界，complete 时会自然修正）
         val bytesSent = AtomicLong((desc.chunkCount - missing.size).toLong() * desc.chunkSize)
         onProgress(minOf(bytesSent.get(), desc.totalSize), desc.totalSize)
@@ -437,12 +451,14 @@ object ChunkedUploader {
         // 传输期后台探测的样本聚合，结束时统一打一行规划日志
         val probeRtt = HashMap<String, Long>()
         val probeBps = HashMap<String, Double>()
+        val inFlight = mutableListOf<kotlinx.coroutines.Job>()
+        try {
         while (true) {
             when (val task = nextTask(handle)) {
                 is PlannerTask.Chunk -> {
                     val uid = uploadId // 闭包捕获当前值：Reinit 后在途旧会话分片不受影响
                     val t = task
-                    launch {
+                    inFlight += launch {
                         val outcome = try {
                             executeChunk(file, uid, desc.chunkSize, desc.totalSize, t)
                         } catch (ce: CancellationException) {
@@ -456,7 +472,7 @@ object ChunkedUploader {
                 // 边传边测：planner 只在派不出分片时顺手给探测，用富余带宽补测其它线路
                 is PlannerTask.Probe -> {
                     val t = task
-                    launch {
+                    inFlight += launch {
                         // 只把 Report 送进 channel；样本聚合统一在下面的消费侧做（单协程，避免并发写 Map）
                         val (reportJson, _, _) = runProbe(t)
                         channel.send(ChunkOutcome.Report(reportJson))
@@ -496,7 +512,7 @@ object ChunkedUploader {
                 }
                 PlannerTask.Reinit -> {
                     Log.i(TAG, "[upload] 会话过期，重新 init 后续传: ${file.name}")
-                    val init2 = callInit(desc, file.name, remoteDir, options)
+                    val init2 = callInit(desc, file.name, remoteDir, options.copy(resume = null))
                     if (init2.instant) {
                         // 重传期间已由其它设备传完同一内容：按完成处理（不能再走 complete）
                         onProgress(desc.totalSize, desc.totalSize)
@@ -509,7 +525,7 @@ object ChunkedUploader {
                         )
                     }
                     uploadId = init2.uploadId
-                    val missing2 = if (init2.missing.isNotEmpty()) init2.missing else (0 until desc.chunkCount).toList()
+                    val missing2 = init2.missing
                     // 进度基线按新的 missing 重算（服务端已收到的片不再重复计数）
                     bytesSent.set((desc.chunkCount - missing2.size).toLong() * desc.chunkSize)
                     onProgress(minOf(bytesSent.get(), desc.totalSize), desc.totalSize)
@@ -517,10 +533,20 @@ object ChunkedUploader {
                 }
                 PlannerTask.Done -> {
                     logPlan(handle, pool, probeRtt, probeBps, desc.chunkSize.toLong())
-                    return completeUpload(uploadId, options.deviceId)
+                    if (options.quickShare) {
+                        val eligible = SyncPlanner.windows(handle).filter { it.second > 0 }
+                            .mapNotNull { window -> pool.firstOrNull { it.id == window.first }?.url }
+                        return plannerJson.decodeFromJsonElement(quickApi(options).completeData(uploadId, eligible))
+                    }
+                    return completeUpload(uploadId, options)
                 }
                 is PlannerTask.Failed -> throw Exception(task.reason)
             }
+        }
+        } finally {
+            // 完成后关闭无关的慢线路探测，避免小文件已上传却仍等待 TCP 超时。
+            inFlight.forEach { it.cancel() }
+            channel.close()
         }
     }
 
@@ -536,7 +562,7 @@ object ChunkedUploader {
             val builder = OkRequest.Builder().url(url).post(body)
             token?.let { builder.header("Token", it) }
             builder.header("Device-Id", Request.deviceId())
-            Request.client.newCall(builder.build()).execute().use { resp ->
+            Request.client.newCall(builder.build()).awaitResponse().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 val elapsed = (SystemClock.elapsedRealtime() - started).coerceAtLeast(1)
                 val obj = runCatching { plannerJson.parseToJsonElement(text).jsonObject }.getOrNull()
@@ -588,7 +614,7 @@ object ChunkedUploader {
             val builder = OkRequest.Builder().url(url).post(body)
             token?.let { builder.header("Token", it) }
             builder.header("Device-Id", Request.deviceId())
-            callClient.newCall(builder.build()).execute().use { resp ->
+            callClient.newCall(builder.build()).awaitResponse().use { resp ->
                 val elapsed = (SystemClock.elapsedRealtime() - started).coerceAtLeast(1)
                 when {
                     resp.code == 422 -> ChunkOutcome.Report(seqReport("chunk_data_error", task.seq))
@@ -784,6 +810,15 @@ object ChunkedUploader {
     private suspend fun callInit(
         desc: Description, name: String, remoteDir: String, options: UploadOptions
     ): UploadInitData {
+        options.resume?.let { options.onSession(it.uploadId); return it }
+        if (options.quickShare) {
+            val params = UploadInitParams(remoteDir, name, desc.totalSize, desc.chunkSize.toLong(), desc.chunkCount,
+                desc.merkleRootHex, desc.fileHashHex, desc.leafHashesHex, options.deviceId, true)
+            val data = plannerJson.decodeFromJsonElement<UploadInitData>(quickApi(options).post("/file/upload/init",
+                plannerJson.encodeToJsonElement(UploadInitParams.serializer(), params).jsonObject))
+            options.onSession(data.uploadId)
+            return data
+        }
         val res = FileApi.uploadInit(
             UploadInitParams(
                 path = remoteDir,
@@ -800,8 +835,12 @@ object ChunkedUploader {
         return res.getOrElse { throw it }.data ?: throw Exception("init 响应为空")
     }
 
-    private suspend fun completeUpload(uploadId: String, deviceId: String): UploadCompleteData {
-        val res = FileApi.uploadComplete(UploadCompleteParams(uploadId = uploadId, deviceId = deviceId))
+    private suspend fun quickApi(options: UploadOptions) = com.sunyuanling.filesync.share.ShareTransport(
+        options.baseUrl, Request.getToken() ?: error("请先登录"), options.deviceId)
+
+    private suspend fun completeUpload(uploadId: String, options: UploadOptions): UploadCompleteData {
+        if (options.quickShare) return plannerJson.decodeFromJsonElement(quickApi(options).completeData(uploadId))
+        val res = FileApi.uploadComplete(UploadCompleteParams(uploadId = uploadId, deviceId = options.deviceId))
         val data = res.getOrElse { throw it }.data ?: throw Exception("complete 响应为空")
         return data
     }

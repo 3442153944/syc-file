@@ -1,0 +1,11 @@
+[package]
+name = "filesync-mesh-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Shared FileSync mesh HTTP/SOCKS5 TCP proxy for desktop and CLI"
+
+[dependencies]
+base64 = "0.22"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

@@ -20,6 +20,9 @@ import java.net.URLEncoder
 
 object FileApi {
 
+    suspend fun uploadSpace(): Result<ApiResponse<UploadSpace>> =
+        Request.getSuspend<ApiResponse<UploadSpace>>("/storage/space")
+
     /**
      * 获取可用磁盘列表。
      */
@@ -163,7 +166,7 @@ object FileApi {
 
     /**
      * 删除远端单个文件（拒绝目录）。
-     * 同步覆盖上传前置：服务端 init 拒绝已存在文件，先删旧再传新（delete-before-upload）。
+     * 供用户明确删除文件使用；同步上传不能先删除旧内容。
      * 文件不存在（404）对调用方视为可忽略的失败。
      */
     suspend fun deleteFile(params: DeleteFileParams): Result<ApiResponse<Unit?>> {

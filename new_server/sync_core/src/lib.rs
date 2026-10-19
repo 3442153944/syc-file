@@ -53,6 +53,7 @@ use rayon::prelude::*;
 
 mod sys_info;
 pub mod upload_planner;
+pub mod node_selection;
 
 pub const FC_OK: i32 = 0;
 pub const FC_ERR_IO: i32 = -1;

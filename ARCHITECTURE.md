@@ -224,18 +224,19 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 
 ---
 
-## 5. Android 端（`Android/`，包 `com.sunyuanling.filesync`，versionName 1.3.1）
+## 5. Android 端（`Android/`，包 `com.sunyuanling.filesync`，versionName 1.3.4）
 
-- **架构**：MVVM（无 domain / Repository，每屏重新请求）。`api/`（门面 object：file/user/ws/sync/update）→ `network/`（`Request` 单例：OkHttp 30s、`Token` 头、401 → `AuthManager` 广播、`New-Token` 续期）；`WebSocketManager`（指数退避，重连上限读 `AppConfig.wsMaxReconnectAttempts`，负数无限；`events` SharedFlow 不丢消息）。
+- **架构**：MVVM（无 domain / Repository，每屏重新请求）。`api/`（门面 object：file/user/ws/sync/update）→ `network/`（`Request` 单例：OkHttp 30s、`Token` 头、401 → `AuthManager` 广播）；`WebSocketManager` 按 `wsReconnectIntervalMs` 固定间隔持续重连，重连前检查灾备入口，令牌失效时停止并通知登录；`events` 为 SharedFlow。
 - **配置 / 持久化**：`AppConfig` + `ConfigManager`（`<ExternalStorage>/FileSync/config.conf`）；DataStore 存 token；下载任务（`pending_downloads.json`）、同步映射（`sync_mappings.json`）、基线（`sync_base.json`）均在 `FileSync/` 下。
 - **下载**：`DownloadController` 进程级单例 + `DownloadService` 前台服务 + 通知 action；PRDownloader（token 走 query）。上传走 `ChunkedUploader`。
 - **同步**（`sync/SyncEngine`，对标 `SYNC_PROTOCOL.md`）：
   - 执行：`task_created`（download 流式 + blake3 校验 + `.synctmp` 原子发布 / delete / mkdir）→ REST 回报；
   - 探测：`RecursiveWatcher`（inotify 递归）→ 2s 稳定窗 + size/mtime 复查 → delete-before-upload + 分片 → `notify`（带 base CAS）；
   - 追赶（每次 WS Connected）：Phase1 上传离线变更 + Phase2 `scan`；stat 缓存避免重算；上传 / 下载各 Semaphore(2)；`syncOnWifiOnly` 门控；
-  - 冲突：本地分叉隔离 `.syncpending/<conflictId>_<name>`；`keep_local` 以 server_hash 为 base 回放重传；自写路径 10s 抑制回环。
+  - 冲突：本地副本隔离 `.syncpending/<conflictId>/content`，相对路径单独保存；`keep_local` 按原子目录恢复，以 server_hash 为 base 回放重传；上传或上报失败保留隔离副本。旧格式缺少路径时保留供手动恢复。自写路径 10s 抑制回环。
 - **保活**：`SyncKeepAliveService`（dataSync 前台服务，30s 守护重连，`forceKeepAliveEnabled`）；root 设备进程级守护（LSPosed 看门狗）在 app 外部维护；持久化续传（`persistentDownloadEnabled`）仅 root 可见。
-- **Rust 内核**：`sync_core_jni`（cdylib，`build.ps1` 需 NDK + cargo-ndk）→ `core/SyncCore`（`describe` / `hashChunk` / `merkleRoot`；多路径上传决策走 `core/SyncPlanner`），缺 .so 回退纯 Java。
+- **Rust 内核**：`sync_core_jni`（cdylib，需 NDK + cargo-ndk）→ `core/SyncCore`（`describe` / `hashChunk` / `merkleRoot`）；普通上传和快传的多路径决策均走 `core/SyncPlanner` → 共享 `sync_core::upload_planner`。入口健康选择走 `core/NodeSelector` → 共享 `sync_core::node_selection`，Windows 灾备也调用同一函数；Kotlin 执行探测、HTTP、持久化和界面，不重新实现选路。缺 .so 时普通上传回退 Java 固定分片，自动选路不做 Kotlin 替代。
+- **快传 / 灾备**：首页“快传与分享管理”提供暂存队列、暂停恢复、取消、自动复制和服务端分享历史；`QuickShareService` 提供半透明图标投递窗与前台通知，拖入才展开，`QuickShareActivity` 接系统分享和文件 URI 授权。快传完成在同后端入口间重试，复制前校验真实 Range 下载。服务器设置可编辑备用入口与灾备开关。当前进度、验证和边界见 `Android/PROGRESS.md`。
 - **其它能力**：文件在线预览（`previewUtil/` + `ui/screen/preview/`：图 / 视频 / 音频 / PDF / 文本 / Office，Office 经 POI，**需真机验证**）；应用更新（`update/UpdateController`：check + WS 推送 + 复用下载 + FileProvider 安装 + 强制更新）；设备监控（`DevicesList`，admin 多一个「所有在线设备」分区）；同步列表分页（每页 10 条）。
 - 底部四标签：Home / Files / Monitor / Personal；导航为 Navigation-Compose 类型安全路由（`router/AppRoute.kt` 为死代码）。
 
@@ -268,14 +269,13 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 **P1**
 - **公网安全一轮**（服务经 DDNS 公网暴露）：CORS `*`、WS `CheckOrigin:true`、`RequireRole` 未接线、download token 走 query（进访问日志）、Android 明文记住密码（桌面端已走 OS 凭据管理器）。
 - **sync 引擎无自动化测试**：CAS 快进 / 冲突 / scan / 幂等吸收 / 自愈全靠手工联调；前后端整体基本无测试。
-- `AppConfig` 的 `autoSyncIntervalMs` 等个别配置无消费者；`Request.baseUrl` 单例 init 求值，运行时改服务器配置后可能陈旧。
+- `AppConfig` 的 `autoSyncIntervalMs` 等个别配置无消费者。
 
 **P2**
 - 重命名 / 移动被当成 delete + create（断版本史）；Office 稳定窗口桌面端未对齐 Android 的 2s 稳定窗。
 - 旧 multipart `upload.go`（`SaveUploadedFile` 缓冲落盘）仍在，客户端已弃用；`file.storage.*` 配置未用。
 - 经 `/file/delete` 删同步目录内文件仅 `os.Remove`，不更新 trunk。
 - Android `cleartext` 全开、manifest 过度权限；DataStore 名 `secure_prefs` 实际未加密。
-- 冲突 `keep_local` 的子目录回放（Android 按根目录名回放，靠重扫兜底）。
 
 **组网（§9）待办**
 - Windows 内嵌隧道已真机验证（`syc0` 安装 + 路由 + ping 0% 丢包）；仍待验证：开机自启的注册表 Run 项、NSIS 卸载清理、封禁/停用后的实际断连。
@@ -331,6 +331,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 - **桌面端**：Tauri 命令 `vpn_nat/link/wg_config/up/down/stun/ping/ping_stream/tunnel_status/up_embedded/down_embedded`；独立「组网」页（`views/vpn/Mesh.vue`）：总览（服务器置顶）、任意地址 ping（逐行实时输出）、踢/停用（可选时长）/封禁/释放。`NodeSwitcher` 显示直连/中继。
 - **Windows 内嵌隧道**：`src-tauri/resources/wireguard/wireguard.exe` 固定 **WireGuard for Windows 1.1.1**（仓库入库，sha256 见 `VERSION`），只认自依赖、不回退 `Program Files`；生成配置写 `%ProgramData%\syc\syc0.conf` 后调 `/installtunnelservice`，只操作 `syc0`，不影响用户其它 WireGuard 隧道。
 - **自启与自动组网**：`tauri-plugin-autostart`（Windows 注册表 / Linux `~/.config/autostart`）；启动后若开关开启且隧道未起，自动用会话换身份拉起隧道；NSIS 卸载钩子清理 Run 项、`syc0` 服务与 ProgramData 配置。
+- **本机 / 局域网代理**：桌面「组网」页与 `syc proxy` 共用 `filesync-cli/mesh-proxy/`，HTTP / HTTPS CONNECT / SOCKS5 TCP 混合端口默认 `7897`。默认仅回环，认证由客户端独立开关控制、默认关闭，LAN 也可免密码；仅转发 `172.1.0.0/16`，出站绑定已有隧道地址。支持实时连接/流量统计与停止释放，不修改系统代理或防火墙。使用与验证见 `filesync-cli/MESH_PROXY.md`；Android 接入准备见 `Android/MESH_INTEGRATION_PLAN.md`。
 
 ### 9.7 验证与边界
 

@@ -304,8 +304,8 @@ object SyncEngine {
         try {
             val hasher = Blake3Util.newHasher()
             val contentLength = Request.client.newCall(OkRequest.Builder().url(url).get().build()).execute().use { resp ->
-                if (!resp.isSuccessful) return Result.failure(Exception("HTTP ${resp.code} url=$url"))
-                val body = resp.body ?: return Result.failure(Exception("响应体为空 url=$url"))
+                if (!resp.isSuccessful) return Result.failure(Exception("HTTP ${resp.code} url=${url.substringBefore('?')}"))
+                val body = resp.body ?: return Result.failure(Exception("响应体为空 url=${url.substringBefore('?')}"))
                 var total = 0L
                 tmp.outputStream().use { out ->
                     body.byteStream().use { input ->
@@ -322,7 +322,7 @@ object SyncEngine {
                 total
             }
             val actual = Blake3Util.toHex(hasher.digest())
-            log("下载校验 url=$url actualHash=$actual size=$contentLength expectedHash=$expectedHash")
+            log("下载校验 url=${url.substringBefore('?')} actualHash=$actual size=$contentLength expectedHash=$expectedHash")
             if (!expectedHash.isNullOrEmpty() && !expectedHash.equals(actual, ignoreCase = true)) {
                 // 服务端拒绝（如未登录/设备不匹配）时返回的是 HTTP 200 + 一小段 JSON，
                 // 不是文件内容；直接报 hash 不匹配会把真实原因藏起来。
@@ -596,7 +596,8 @@ object SyncEngine {
         file: File,
         action: String,
         baseHash: String,
-    ) {
+    ): Boolean {
+        var accepted = false
         uploadSem.withPermit {
             val remoteDir = joinRemote(folder.remotePath, rel.substringBeforeLast('/', ""))
             log("上传 $rel")
@@ -622,6 +623,7 @@ object SyncEngine {
                     // notify 失败则不落基线，留给下次追赶重报。
                     SyncBaseStore.set(folder.id, rel, complete.fileHash, file.length(), file.lastModified() / 1000)
                     log("已上传并上报 $rel")
+                    accepted = true
                 }.onFailure { e ->
                     log("上报失败 $rel（基线未更新，追赶时重报）: ${e.message}")
                 }
@@ -629,6 +631,7 @@ object SyncEngine {
                 log("上传失败 $rel: ${e.message}")
             }
         }
+        return accepted
     }
 
     // ------------------------------------------------------------------ 冲突
@@ -640,13 +643,14 @@ object SyncEngine {
         val rel = sanitizeRel(cf.relativePath) ?: return
         val main = File(localRoot, rel)
 
-        // 1) 本地分叉隔离到 .syncpending/<conflictId>_<name>（resolution 时可定位）
-        val pendDir = File(localRoot, ".syncpending").apply { mkdirs() }
-        val quarantine = File(pendDir, "${cf.conflictId}_${cf.fileName}")
-        if (main.exists()) {
+        // 1) 本地副本隔离到 .syncpending/<conflictId>/，同时保存完整相对路径。
+        val quarantine = runCatching { ConflictFiles.quarantine(localRoot, cf.conflictId, rel) }
+            .getOrElse { log("无法隔离冲突 #${cf.conflictId}: ${it.message}"); return }
+        if (main.exists() && !quarantine.exists()) {
             muteWatch(cf.folderId, rel)
             if (!main.renameTo(quarantine)) {
-                runCatching { main.copyTo(quarantine, overwrite = true); main.delete() }
+                runCatching { main.copyTo(quarantine); check(main.delete()) }
+                    .onFailure { quarantine.delete(); log("隔离冲突失败，保留本地文件: ${it.message}"); return }
             }
         }
         log("冲突 #${cf.conflictId} $rel：本地版已隔离，收敛服务端版本")
@@ -667,29 +671,31 @@ object SyncEngine {
         val hit = folders.value.keys.asSequence()
             .mapNotNull { fid ->
                 val mapping = SyncMappingStore.enabledMappingFor(fid) ?: return@mapNotNull null
-                val pend = File(mapping.localPath, ".syncpending")
-                pend.listFiles()?.firstOrNull { it.name.startsWith("${cr.conflictId}_") }
-                    ?.let { Triple(fid, mapping, it) }
+                val entry = runCatching { ConflictFiles.locate(File(mapping.localPath), cr.conflictId) }.getOrNull()
+                entry?.let { Triple(fid, mapping, it) }
             }
-            .firstOrNull() ?: return
-        val (folderId, mapping, quarantine) = hit
+            .firstOrNull() ?: run { log("冲突 #${cr.conflictId} 未找到带路径的副本；旧格式副本保留供手动恢复"); return }
+        val (folderId, mapping, entry) = hit
+        val (quarantine, rel) = entry
         val folder = folders.value[folderId] ?: return
 
         when (cr.resolution) {
             "accept_server" -> {
-                quarantine.delete()
+                ConflictFiles.discard(quarantine)
                 log("冲突 #${cr.conflictId} 采用服务器版，已丢弃本地副本")
             }
             "keep_local" -> {
-                val origName = quarantine.name.removePrefix("${cr.conflictId}_")
-                // 副本以原名放回主目录（覆盖服务端版），再以 server_hash 为 base 上报——快进
+                // 副本按原相对路径恢复，再以服务端哈希为基线上报。
                 val localRoot = File(mapping.localPath)
-                val rel = origName // 隔离时未保留子目录信息，冲突文件按根目录名回放；子目录场景由重扫兜底
-                val main = File(localRoot, rel)
                 muteWatch(folderId, rel)
-                runCatching { quarantine.copyTo(main, overwrite = true); quarantine.delete() }
-                uploadAndNotify(folder, localRoot, rel, main, action = "modify", baseHash = cr.serverHash)
-                log("冲突 #${cr.conflictId} 保留本地版，已重新上传")
+                val main = runCatching { ConflictFiles.restore(localRoot, quarantine, rel) }
+                    .getOrElse { log("恢复冲突失败，已保留副本: ${it.message}"); return }
+                if (uploadAndNotify(folder, localRoot, rel, main, action = "modify", baseHash = cr.serverHash)) {
+                    ConflictFiles.discard(quarantine)
+                    log("冲突 #${cr.conflictId} 保留本地版，已重新上传 $rel")
+                } else {
+                    log("冲突 #${cr.conflictId} 重新上传失败，隔离副本仍保留")
+                }
             }
         }
     }

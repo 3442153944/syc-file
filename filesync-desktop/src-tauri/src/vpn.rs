@@ -299,7 +299,12 @@ fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, Stri
 
 /// 关闭内嵌隧道。
 #[tauri::command]
-pub fn vpn_down_embedded(iface: Option<String>) -> Result<String, String> {
+pub async fn vpn_down_embedded(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::mesh_proxy_commands::MeshProxyState>,
+    iface: Option<String>,
+) -> Result<String, String> {
+    crate::mesh_proxy_commands::mesh_proxy_stop(app.clone(), state).await?;
     #[cfg(not(windows))]
     {
         let _ = iface;
@@ -308,14 +313,18 @@ pub fn vpn_down_embedded(iface: Option<String>) -> Result<String, String> {
     #[cfg(windows)]
     {
         let _ = iface;
-        let exe = std::path::PathBuf::from(r"C:\Program Files\WireGuard\wireguard.exe");
-        if !exe.exists() {
-            return Err("未找到 wireguard.exe".into());
+        let exe = find_wireguard_exe(&app)?;
+        let out = tauri::async_runtime::spawn_blocking(move || {
+            Command::new(exe)
+                .args(["/uninstalltunnelservice", "syc0"])
+                .output()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(format!("停止隧道失败: {}{}", decode_bytes(&out.stdout), decode_bytes(&out.stderr)));
         }
-        let out = Command::new(exe)
-            .args(["/uninstalltunnelservice", "syc0"])
-            .output()
-            .map_err(|e| e.to_string())?;
         Ok(format!("{}", String::from_utf8_lossy(&out.stdout)))
     }
 }
