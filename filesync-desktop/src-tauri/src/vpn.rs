@@ -59,16 +59,20 @@ pub fn vpn_down(iface: Option<String>) -> Result<String, String> {
 
 /// 原生 STUN-lite 探测：不依赖 syc 会话，桌面端直接拿到自己的公网端点。
 #[tauri::command]
-pub fn vpn_stun(host: String, port: u16) -> Result<String, String> {
-    use std::net::UdpSocket;
-    use std::time::Duration;
-    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
-    sock.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
-    sock.send_to(b"SYC?", (host.as_str(), port)).map_err(|e| e.to_string())?;
-    let mut buf = [0u8; 128];
-    let (n, _) = sock.recv_from(&mut buf).map_err(|e| format!("STUN 超时或端口被拦: {e}"))?;
-    let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-    Ok(reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string())
+pub async fn vpn_stun(host: String, port: u16) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::net::UdpSocket;
+        use std::time::Duration;
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+        sock.set_read_timeout(Some(Duration::from_secs(3))).map_err(|e| e.to_string())?;
+        sock.send_to(b"SYC?", (host.as_str(), port)).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 128];
+        let (n, _) = sock.recv_from(&mut buf).map_err(|e| format!("STUN 超时或端口被拦: {e}"))?;
+        let reply = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+        Ok(reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string())
+    })
+    .await
+    .map_err(|e| format!("STUN 任务失败: {e}"))?
 }
 
 /// ping 覆盖网地址；iface 指定时强制从隧道网卡发出（仅 Unix）。
@@ -76,7 +80,14 @@ pub fn vpn_stun(host: String, port: u16) -> Result<String, String> {
 /// Windows 的 ping 参数和编码都不同：`-n/-w` 且输出是 GBK，
 /// 直接按 UTF-8 解码会变成乱码，所以这里分平台处理。
 #[tauri::command]
-pub fn vpn_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<String, String> {
+pub async fn vpn_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<String, String> {
+    // ping 最长要几秒；同步命令会占住 Tauri 的命令线程，页面其它请求全被卡住。
+    tauri::async_runtime::spawn_blocking(move || run_ping(target, count, iface))
+        .await
+        .map_err(|e| format!("ping 任务失败: {e}"))?
+}
+
+fn run_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<String, String> {
     let count = count.unwrap_or(3).to_string();
     let mut cmd = Command::new("ping");
     #[cfg(windows)]
