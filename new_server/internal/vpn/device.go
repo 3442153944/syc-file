@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -156,7 +157,7 @@ func (a *API) Register(c *gin.Context) {
 	err = a.db.Transaction(func(tx *gorm.DB) error {
 		// 地址分配：同组已用地址排除
 		var usedAddrs []string
-		if err := tx.Model(&model.VPNDevice{}).Where("group_id = ? AND status = ?", group.ID, model.VPNDeviceActive).
+		if err := tx.Model(&model.VPNDevice{}).Where("group_id = ?", group.ID).
 			Pluck("address", &usedAddrs).Error; err != nil {
 			return err
 		}
@@ -541,20 +542,62 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		response.Fail(c, 400, "缺少 Device-Id")
 		return
 	}
-	// 已登记就直接返回，登录/重进页面可重复调用
+	// 已登记：地址保持不变（IP 持久），被吊销的走重新激活
 	var existing model.VPNDevice
-	if err := a.db.Where("user_id = ? AND device_id = ? AND status = ?", u.ID, deviceID, model.VPNDeviceActive).
-		First(&existing).Error; err == nil {
+	if err := a.db.Where("user_id = ? AND device_id = ?", u.ID, deviceID).First(&existing).Error; err == nil {
+		if existing.Status == model.VPNDeviceActive && strings.TrimSpace(existing.PrivKeyEnc) != "" {
+			now := time.Now()
+			exp := now.Add(sessionTTL())
+			a.db.Model(&existing).Updates(map[string]any{
+				"last_seen": now, "session_expires_at": exp,
+			})
+			response.OK(c, gin.H{
+				"device_id": existing.DeviceID, "address": existing.Address,
+				"pubkey": existing.PubKey, "group_id": existing.GroupID, "existing": true,
+			})
+			return
+		}
+		// 被吊销过：保留原地址，重新生成密钥并激活
+		priv, pub, err := GenerateKeypair()
+		if err != nil {
+			response.Fail(c, 500, "生成密钥失败")
+			return
+		}
+		enc, err := EncryptPrivate(mustMasterKey(), priv, deviceID)
+		if err != nil {
+			response.Fail(c, 500, "加密私钥失败")
+			return
+		}
+		now := time.Now()
+		exp := now.Add(sessionTTL())
+		a.db.Model(&existing).Updates(map[string]any{
+			"pubkey": pub, "priv_key_enc": enc, "status": model.VPNDeviceActive,
+			"key_source": model.VPNKeySourceServer, "last_seen": now, "session_expires_at": exp,
+		})
 		response.OK(c, gin.H{
-			"device_id": existing.DeviceID, "address": existing.Address,
-			"pubkey": existing.PubKey, "group_id": existing.GroupID, "existing": true,
+			"device_id": existing.DeviceID, "address": existing.Address, "pubkey": pub,
+			"group_id": existing.GroupID, "private_key": priv, "existing": true, "reactivated": true,
 		})
 		return
 	}
+
 	var m model.VPNMember
 	if err := a.db.Where("user_id = ?", u.ID).Order("id").First(&m).Error; err != nil {
-		response.Fail(c, 409, "还没有加入任何组，请让管理员先把你加入组")
-		return
+		// 管理员/超管不该被「没加组」卡住：自动落到第一个组，没有组就建默认机构+默认组
+		if u.Level < model.LevelAdmin {
+			response.Fail(c, 409, "还没有加入任何组，请让管理员先把你加入组")
+			return
+		}
+		gid, err := a.ensureDefaultGroup(u)
+		if err != nil {
+			response.Fail(c, 500, "创建默认组失败: "+err.Error())
+			return
+		}
+		m = model.VPNMember{GroupID: gid, UserID: u.ID, Role: model.VPNRoleOrgAdmin}
+		if err := a.db.Create(&m).Error; err != nil {
+			response.Fail(c, 500, "加入默认组失败")
+			return
+		}
 	}
 	var group model.VPNGroup
 	if err := a.db.First(&group, m.GroupID).Error; err != nil {
@@ -576,8 +619,7 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		return
 	}
 	var used []string
-	a.db.Model(&model.VPNDevice{}).Where("group_id = ? AND status = ?", group.ID, model.VPNDeviceActive).
-		Pluck("address", &used)
+	a.db.Model(&model.VPNDevice{}).Where("group_id = ?", group.ID).Pluck("address", &used)
 	usedSet := make(map[string]bool, len(used))
 	for _, addr := range used {
 		usedSet[addr] = true
@@ -608,4 +650,58 @@ func (a *API) AutoEnroll(c *gin.Context) {
 func mustMasterKey() []byte {
 	k, _ := MasterKey()
 	return k
+}
+
+// ensureDefaultGroup 给没有组的管理员兜底：优先用系统里第一个组；一个组都没有就建默认机构+默认组。
+func (a *API) ensureDefaultGroup(u *model.User) (uint, error) {
+	var g model.VPNGroup
+	if err := a.db.Order("id").First(&g).Error; err == nil {
+		return g.ID, nil
+	}
+	org := model.VPNOrg{Name: "默认机构", OwnerUserID: u.ID}
+	if err := a.db.Create(&org).Error; err != nil {
+		// 并发下可能已被别的请求建出来
+		if err := a.db.Where("name = ?", "默认机构").First(&org).Error; err != nil {
+			return 0, err
+		}
+	}
+	var used []string
+	a.db.Model(&model.VPNGroup{}).Pluck("subnet", &used)
+	subnet, err := AllocateSubnet(config.Conf.Vpn.Pool, used)
+	if err != nil {
+		return 0, err
+	}
+	g = model.VPNGroup{OrgID: org.ID, Name: "默认组", Subnet: subnet}
+	if err := a.db.Create(&g).Error; err != nil {
+		return 0, err
+	}
+	return g.ID, nil
+}
+
+// ReleaseDevice 客户端显式放弃地址：删除设备（地址随即释放，下一次分配才可能复用）。
+func (a *API) ReleaseDevice(c *gin.Context) {
+	u, ok := a.currentUser(c)
+	if !ok {
+		return
+	}
+	idStr := strings.TrimSpace(c.Param("id"))
+	var id uint64
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id == 0 {
+		response.Fail(c, 400, "id 非法")
+		return
+	}
+	var dev model.VPNDevice
+	if err := a.db.First(&dev, uint(id)).Error; err != nil {
+		response.Fail(c, 404, "设备不存在")
+		return
+	}
+	if dev.UserID != u.ID && u.Level < model.LevelAdmin {
+		response.Fail(c, 403, "无权释放该设备")
+		return
+	}
+	if err := a.db.Delete(&dev).Error; err != nil {
+		response.Fail(c, 500, "释放失败")
+		return
+	}
+	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }

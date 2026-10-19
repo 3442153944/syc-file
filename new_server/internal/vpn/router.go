@@ -18,6 +18,7 @@ func RegisterVPNRouter(rg *gin.RouterGroup, db *gorm.DB) {
 	g.GET("/peers", h.Peers)
 	g.POST("/heartbeat", h.Heartbeat)
 	g.GET("/devices/my", h.MyDevices)
+	g.DELETE("/devices/:id", h.ReleaseDevice)
 	g.GET("/link", h.Link)
 
 	// 管理侧
