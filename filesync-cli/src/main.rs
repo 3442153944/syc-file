@@ -536,7 +536,16 @@ fn main() -> Result<()> {
                 None,
             )?;
             ensure_ok(&v)?;
-            let mode = v["data"]["mode"].as_str().unwrap_or("unknown");
+            let host = server_host(&s.server)?;
+            let server_ep = format!("{host}:51820");
+            let peers = v["data"]["peers"].as_array().cloned().unwrap_or_default();
+            let mut any_relay = false;
+            for p in &peers {
+                if p["endpoint"].as_str() == Some(server_ep.as_str()) {
+                    any_relay = true;
+                }
+            }
+            let mode = if peers.is_empty() { "idle" } else if any_relay { "relay" } else { "direct" };
             let label = match mode {
                 "direct" => "直连",
                 "relay" => "中继",
@@ -568,6 +577,7 @@ fn main() -> Result<()> {
                 None,
             )?;
             ensure_ok(&v)?;
+            let v = pin_server_endpoint(v, &s.server, 51820);
             print!("{}", build_wg_config(&v, &key, true, 0)?);
         }
 
@@ -585,6 +595,7 @@ fn main() -> Result<()> {
                 None,
             )?;
             ensure_ok(&v)?;
+            let v = pin_server_endpoint(v, &s.server, 51820);
             let conf = build_wg_config(&v, &key, false, listen_port)?;
 
             let path = env::temp_dir().join(format!("syc-{iface}.conf"));
@@ -626,6 +637,26 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 把 peers 里服务器节点的端点替换成「当前选中节点 + wg 端口」。
+/// 这样节点灾备一切换，WireGuard 端点自动跟着换，而不是钉死在某个 DDNS 域名上。
+fn pin_server_endpoint(mut peers: Value, server: &str, wg_port: u16) -> Value {
+    let host = match server_host(server) {
+        Ok(h) => h,
+        Err(_) => return peers,
+    };
+    let ep = format!("{host}:{wg_port}");
+    if let Some(list) = peers.get_mut("data").and_then(|d| d.get_mut("peers")).and_then(|p| p.as_array_mut()) {
+        for p in list.iter_mut() {
+            let is_server = p.get("role").and_then(Value::as_str) == Some("server")
+                || p.get("device_id").and_then(Value::as_str) == Some("syc-server");
+            if is_server {
+                p["endpoint"] = json!(ep);
+            }
+        }
+    }
+    peers
 }
 
 /// 从 server URL 取主机名（http(s)://host:port/... → host）。

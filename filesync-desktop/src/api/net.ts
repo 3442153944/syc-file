@@ -161,6 +161,14 @@ export async function refreshVpnMode(): Promise<void> {
         return
     }
     try {
+        // Tauri 模式直接问本地 CLI（它会按当前选中的节点拼服务器端点）；
+        // Web 模式没有 CLI，退化为后端 /v1/vpn/link。
+        if (isTauri()) {
+            const {invoke} = await import('@tauri-apps/api/core')
+            const out = await invoke<string>('vpn_link', {device})
+            netState.vpnMode = out.includes('中继') ? 'relay' : out.includes('直连') ? 'direct' : 'idle'
+            return
+        }
         // 直接用 fetch 而不是 http.ts：http.ts 反过来依赖 net.ts（registerAbort），
         // 互相 import 会在模块初始化时拿到 undefined。
         const res = await fetch(
