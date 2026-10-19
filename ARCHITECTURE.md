@@ -278,7 +278,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 - 冲突 `keep_local` 的子目录回放（Android 按根目录名回放，靠重扫兜底）。
 
 **组网（§9）待办**
-- Windows 内嵌隧道 / 自启 / NSIS 卸载清理目前仅 `cargo check` 通过，需 Windows 真机验证（重点：`wireguard.exe` 资源路径、注册表 Run 项、`syc0` 服务安装）。
+- Windows 内嵌隧道已真机验证（`syc0` 安装 + 路由 + ping 0% 丢包）；仍待验证：开机自启的注册表 Run 项、NSIS 卸载清理、封禁/停用后的实际断连。
 - 组网无自动化集成测试；纯 IPv4 入口无法直连服务器节点（服务器 AAAA 可达时才行）。
 - 生产路由表已初始化，新增「组网」页需在「系统管理 → 路由管理」手动补两条（`/vpn` 分组 + `views/vpn/Mesh.vue`）。
 
@@ -335,6 +335,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 ### 9.7 验证与边界
 
 - 已验证：`internal/vpn` 单测 21 项；E2E 32/32、角色 23/23；锥形 NAT 打洞双向 5039 包；对称 NAT 随机端口 0 包、中继 928 字节；端口预测无干扰 100%、1 个并发 38–48%、2 个 6–15%、5 个约 0%；netns 数据面握手成功、`ping 0% 丢包`。
-- 边界：**纯 IPv4 入口连不到服务器节点**（`server_endpoint` 解析 AAAA 时），但客户端之间仍可 v4 打洞；Windows 内嵌分支需在真机构建验证；组网尚无自动化集成测试。
+- 已验证（Windows 真机，2026-10-19）：内嵌 `wireguard.exe` 安装 `syc0` 成功，路由生效，`ping 172.1.0.254` **0% 丢包**（TTL 64，2–4 ms）；隧道状态标签最初因刷新过早显示“未启动”，已改为启动后轮询。
+- 边界：**纯 IPv4 入口连不到服务器节点**（`server_endpoint` 解析 AAAA 时），但客户端之间仍可 v4 打洞；组网尚无自动化集成测试。
 - 设计细节与 NAT 实验数据：工作区 `docs/mesh-vpn-design.md`（不入仓库）。
 
