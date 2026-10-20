@@ -14,11 +14,12 @@ src-tauri/resources/wireguard/wireguard.exe
 
 打包时会随应用分发；运行时 `vpn_up_embedded` 依次查找：
 
-1. `<resource_dir>/wireguard/wireguard.exe`
-2. `<exe 所在目录>/wireguard/wireguard.exe`
-3. `C:\Program Files\WireGuard\wireguard.exe`
+1. `<resource_dir>/resources/wireguard/wireguard.exe`（安装包布局；Windows 上 `resource_dir` 即安装目录）
+2. `<resource_dir>/wireguard/wireguard.exe`（手工绿色包/旧布局兼容）
+3. `<exe 所在目录>/resources/wireguard/wireguard.exe`
+4. 开发模式（仅 debug 构建）：仓库 `src-tauri/resources/wireguard/wireguard.exe`
 
-找不到会返回明确错误，不会静默失败。
+找不到会返回明确错误并列出实际查找过的路径，不会静默失败。
 
 获取方式：
 - 安装 WireGuard for Windows 后从安装目录复制；

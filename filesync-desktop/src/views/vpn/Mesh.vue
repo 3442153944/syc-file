@@ -1,13 +1,14 @@
 <script setup lang="ts">
 // 组网总览：设备 / 用户 / 分配地址 / 在线状态，外加任意地址 ping。
 // 管理员看自己机构，超管看全部；普通用户看不到这个页面（路由 MinLevel=2）。
-import {computed, h, onMounted, ref} from 'vue'
+import {computed, h, onBeforeUnmount, onMounted, ref} from 'vue'
 import {
   NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NSpace, NSwitch, NTag, NText, useDialog, useMessage,
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
 import MeshProxyPanel from '@/components/MeshProxyPanel.vue'
+import {meshNodeName} from '@/api/net'
 import {
   ensureVpnDevice, fetchMeshOverview, startEmbeddedTunnel, stopEmbeddedTunnel,
   vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
@@ -37,12 +38,15 @@ const target = ref('172.1.0.254')
 const pingOut = ref('')
 const pinging = ref(false)
 const tunnelUp = ref<boolean | null>(null)
+/** 本次隧道实际使用的组网协调节点（按延迟自动选，和当前文件节点无关） */
+const meshNode = ref('')
 const showSuspend = ref(false)
 const suspendTarget = ref<MeshRow | null>(null)
 const suspendMinutes = ref(30)
 const tunnelBusy = ref(false)
 const autoStart = ref(false)
 const autoTunnel = ref(localStorage.getItem('syc_vpn_auto_tunnel') === '1')
+// 组网在线由后端按服务器 WireGuard 接口的实时流量判断，不再看 last_seen
 const onlineCount = computed(() => rows.value.filter(r => r.online).length)
 
 async function fetchOverview() {
@@ -95,7 +99,8 @@ async function startTunnel() {
   try {
     const device = await ensureVpnDevice()
     const msg = await startEmbeddedTunnel(device)
-    message.success(msg)
+    meshNode.value = meshNodeName()
+    message.success(`${msg}（组网节点：${meshNode.value}）`)
     // wireguard 服务启动到接口就绪有延迟，轮询几次状态再显示
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 500))
@@ -130,6 +135,7 @@ async function refreshTunnel() {
   try {
     const {invoke} = await import('@tauri-apps/api/core')
     tunnelUp.value = await invoke<boolean>('vpn_tunnel_status')
+    if (tunnelUp.value) meshNode.value = meshNodeName()
   } catch {
     tunnelUp.value = null
   }
@@ -229,10 +235,21 @@ function toggleAutoTunnel(v: boolean) {
   message.success(v ? '启动后将自动组网' : '已关闭自动组网')
 }
 
+let overviewTimer: number | undefined
+let tunnelTimer: number | undefined
 onMounted(() => {
   fetchOverview()
   refreshTunnel()
   loadAutoStart()
+  // 在线状态靠 2s 心跳刷新，页面停留时 5s 拉一次
+  overviewTimer = window.setInterval(fetchOverview, 5_000)
+  // 隧道状态要调 netsh，没必要 5s 一次；30s 足够
+  tunnelTimer = window.setInterval(refreshTunnel, 30_000)
+})
+
+onBeforeUnmount(() => {
+  if (overviewTimer) window.clearInterval(overviewTimer)
+  if (tunnelTimer) window.clearInterval(tunnelTimer)
 })
 </script>
 
@@ -252,6 +269,7 @@ onMounted(() => {
         <NTag size="small" :type="tunnelUp === true ? 'success' : tunnelUp === false ? 'warning' : 'default'" :bordered="false">
           隧道 {{ tunnelUp === true ? '已启动' : tunnelUp === false ? '未启动' : '未知' }}
         </NTag>
+        <NTag v-if="tunnelUp === true" size="small" :bordered="false">组网节点 {{ meshNode || '—' }}</NTag>
         <NTag size="small" round type="success" :bordered="false">在线 {{ onlineCount }} / {{ rows.length }}</NTag>
         <NButton size="small" :loading="loading" @click="fetchOverview">刷新</NButton>
       </NSpace>

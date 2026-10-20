@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { NMessageProvider, NDialogProvider, NNotificationProvider } from 'naive-ui'
-import { ensureVpnDevice, startEmbeddedTunnel } from './api/vpn'
+import { ensureVpnDevice, startEmbeddedTunnel, startVpnHeartbeat } from './api/vpn'
+import { meshNodePinned } from './api/net'
 import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTransferStore } from './store/useTransferStore'
@@ -34,11 +35,21 @@ useTransferStore().initWs()
 onMounted(() => {
   if (!isTauri()) return
   const auto = () => localStorage.getItem('syc_vpn_auto_tunnel') === '1'
+  // 老版本建的隧道没有组网节点标记：端点可能是按错误的文件节点推导的，重装一次让新逻辑接管。
+  // 只在本进程试一次，避免启动失败时每分钟反复重装。
+  let meshMigrated = false
   const attempt = async () => {
     if (!auto() || !localStorage.getItem('token')) return
     try {
       const {invoke} = await import('@tauri-apps/api/core')
-      if (await invoke<boolean>('vpn_tunnel_status')) return
+      if (await invoke<boolean>('vpn_tunnel_status')) {
+        // 隧道在跑：保证在线心跳（升级 / 页面重载后也能续上）
+        const dev = localStorage.getItem('syc_vpn_device')
+        if (dev) startVpnHeartbeat(dev)
+        if (meshNodePinned()) return
+        if (meshMigrated) return
+        meshMigrated = true
+      }
       const device = await ensureVpnDevice()
       await startEmbeddedTunnel(device)
     } catch {

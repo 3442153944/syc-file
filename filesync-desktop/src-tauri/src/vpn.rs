@@ -14,8 +14,19 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use tauri::{Emitter, Manager};
 
+/// 统一构造子进程：Windows 下加 CREATE_NO_WINDOW，避免 GUI 应用每几秒弹一次黑框。
+fn command<P: AsRef<std::ffi::OsStr>>(program: P) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd
+}
+
 fn run_syc(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("syc")
+    let out = command("syc")
         .args(args)
         .output()
         .map_err(|e| format!("未找到 syc 命令行客户端（需随桌面端安装）: {e}"))?;
@@ -91,7 +102,7 @@ pub async fn vpn_ping(target: String, count: Option<u8>, iface: Option<String>) 
 
 fn run_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<String, String> {
     let count = count.unwrap_or(3).to_string();
-    let mut cmd = Command::new("ping");
+    let mut cmd = command("ping");
     #[cfg(windows)]
     {
         let _ = iface; // Windows ping 没有 -I
@@ -127,7 +138,7 @@ fn run_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<
 
 /// 统一的 ping 命令构造（平台参数不同）。
 fn build_ping(target: &str, count: u8, iface: Option<&str>) -> Command {
-    let mut cmd = Command::new("ping");
+    let mut cmd = command("ping");
     #[cfg(windows)]
     {
         let _ = iface;
@@ -187,15 +198,55 @@ pub async fn vpn_ping_stream(
 pub fn vpn_tunnel_status() -> Result<bool, String> {
     #[cfg(windows)]
     {
-        let out = Command::new("netsh")
-            .args(["interface", "ipv4", "show", "addresses"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        Ok(decode_bytes(&out.stdout).contains("172.1."))
+        // 直接用 IP Helper API 枚举本机 IPv4，不再起 netsh 子进程。
+        use std::net::Ipv4Addr;
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+            GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+
+        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+        let mut size: u32 = 16 * 1024;
+        let mut buf: Vec<u8> = vec![0; size as usize];
+        let mut addrs = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+        let mut ret = unsafe {
+            GetAdaptersAddresses(AF_INET as u32, flags, std::ptr::null_mut(), addrs, &mut size)
+        };
+        if ret == windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW {
+            buf.resize(size as usize, 0);
+            addrs = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
+            ret = unsafe {
+                GetAdaptersAddresses(AF_INET as u32, flags, std::ptr::null_mut(), addrs, &mut size)
+            };
+        }
+        if ret != 0 {
+            return Err(format!("GetAdaptersAddresses 失败: {ret}"));
+        }
+        let mut cur = addrs;
+        while !cur.is_null() {
+            let mut ua = unsafe { (*cur).FirstUnicastAddress };
+            while !ua.is_null() {
+                let sa = unsafe { (*ua).Address };
+                if !sa.lpSockaddr.is_null()
+                    && unsafe { (*sa.lpSockaddr).sa_family } == AF_INET as u16
+                {
+                    let sin = sa.lpSockaddr as *const SOCKADDR_IN;
+                    let raw = unsafe { (*sin).sin_addr.S_un.S_addr };
+                    let ip = Ipv4Addr::from(raw.to_ne_bytes());
+                    if ip.octets()[0] == 172 && ip.octets()[1] == 1 {
+                        return Ok(true);
+                    }
+                }
+                ua = unsafe { (*ua).Next };
+            }
+            cur = unsafe { (*cur).Next };
+        }
+        Ok(false)
     }
     #[cfg(not(windows))]
     {
-        let out = Command::new("ip").args(["-br", "addr"]).output().map_err(|e| e.to_string())?;
+        let out = command("ip").args(["-br", "addr"]).output().map_err(|e| e.to_string())?;
         Ok(String::from_utf8_lossy(&out.stdout).contains("172.1."))
     }
 }
@@ -233,7 +284,10 @@ pub fn vpn_up_embedded(
         conf.push_str("[Interface]\n");
         conf.push_str(&format!("PrivateKey = {key}\n"));
         conf.push_str(&format!("Address = {address}/{bits}\n"));
-        conf.push_str("MTU = 1280\n\n");
+        conf.push_str("MTU = 1280\n");
+        // 固定客户端监听端口：对端才能用「本机 IP:51821」直连；
+        // 随机端口时只有服务器 wg show 能看到，无法通过心跳/请求头上报。
+        conf.push_str("ListenPort = 51821\n\n");
         for p in peers {
             conf.push_str("[Peer]\n");
             conf.push_str(&format!("PublicKey = {}\n", p.pubkey));
@@ -251,14 +305,14 @@ pub fn vpn_up_embedded(
 
         let exe = find_wireguard_exe(&app)?;
         let install = |exe: &std::path::Path| {
-            Command::new(exe)
+            command(exe)
                 .args(["/installtunnelservice", &conf_path.to_string_lossy()])
                 .output()
         };
         let mut out = install(&exe).map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
         if !out.status.success() {
             // 常见原因：同名隧道已存在。只卸我们自己的 syc0，不影响用户其它隧道。
-            let _ = Command::new(&exe)
+            let _ = command(&exe)
                 .args(["/uninstalltunnelservice", "syc0"])
                 .output();
             out = install(&exe).map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
@@ -274,26 +328,59 @@ pub fn vpn_up_embedded(
     }
 }
 
+/// 候选路径（按优先级）：安装包布局 → 绿色包/旧布局 → 开发模式仓库副本。
+///
+/// Tauri v2 会把 `bundle.resources` 里的 `resources/wireguard/*` 原样放到
+/// `<resource_dir>/resources/wireguard/`；Windows 上 `resource_dir` 就是 exe 所在目录，
+/// 所以安装后实际路径是 `<安装目录>\resources\wireguard\wireguard.exe`。
+fn wireguard_candidates(
+    resource_dir: Option<&std::path::Path>,
+    exe_dir: Option<&std::path::Path>,
+    manifest_dir: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    for base in [resource_dir, exe_dir].into_iter().flatten() {
+        candidates.push(base.join("resources").join("wireguard").join("wireguard.exe"));
+        // 兼容手工绿色包 / 早期布局：<目录>\wireguard\wireguard.exe
+        candidates.push(base.join("wireguard").join("wireguard.exe"));
+    }
+    // 仓库内副本只在 debug 构建兜底，release 不能依赖编译机上的源码目录。
+    if let Some(dir) = manifest_dir {
+        candidates.push(dir.join("resources").join("wireguard").join("wireguard.exe"));
+    }
+    // Windows 上 resource_dir 与 exe 目录相同，去重后错误信息里不会重复同一路径。
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|p| seen.insert(p.clone()));
+    candidates
+}
+
 #[cfg(windows)]
 fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    // 只使用自依赖：开发模式用仓库内那份，安装后用手包进资源的副本。
+    // 只使用自依赖：安装后用随包分发的副本，开发模式用仓库内那份。
     // 刻意不回退到 Program Files，避免和用户自己安装/运行的 WireGuard 混用。
-    let mut candidates = Vec::new();
-    candidates.push(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources")
-            .join("wireguard")
-            .join("wireguard.exe"),
-    );
-    if let Ok(res) = app.path().resource_dir() {
-        candidates.push(res.join("wireguard").join("wireguard.exe"));
-        candidates.push(res.join("wireguard.exe"));
-    }
+    let resource_dir = app.path().resource_dir().ok();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    // debug 构建（cargo run / tauri dev 未拷贝资源时）才回退到仓库目录；
+    // 安装版是 release 构建，不能把编译机的绝对路径当成资源位置。
+    let manifest_dir =
+        cfg!(debug_assertions).then(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let candidates =
+        wireguard_candidates(resource_dir.as_deref(), exe_dir.as_deref(), manifest_dir.as_deref());
     candidates
-        .into_iter()
+        .iter()
         .find(|p| p.exists())
+        .cloned()
         .ok_or_else(|| {
-            "未找到内置 wireguard.exe：请确认 resources/wireguard/ 随包分发（开发模式检查 src-tauri/resources/wireguard/）".to_string()
+            let searched = candidates
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "未找到内置 wireguard.exe：请确认 resources/wireguard/ 随包分发（开发模式检查 src-tauri/resources/wireguard/）。已查找：\n{searched}"
+            )
         })
 }
 
@@ -315,7 +402,7 @@ pub async fn vpn_down_embedded(
         let _ = iface;
         let exe = find_wireguard_exe(&app)?;
         let out = tauri::async_runtime::spawn_blocking(move || {
-            Command::new(exe)
+            command(exe)
                 .args(["/uninstalltunnelservice", "syc0"])
                 .output()
         })
@@ -344,5 +431,38 @@ pub fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String>
         mgr.enable().map_err(|e| e.to_string())
     } else {
         mgr.disable().map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wireguard_candidates;
+    use std::path::PathBuf;
+
+    #[test]
+    fn prefers_bundled_resource_layout() {
+        // 安装版布局：<安装目录>\resources\wireguard\wireguard.exe
+        let install = PathBuf::from("install");
+        let candidates = wireguard_candidates(Some(&install), None, None);
+        let expected = install.join("resources").join("wireguard").join("wireguard.exe");
+        assert_eq!(candidates.first(), Some(&expected));
+    }
+
+    #[test]
+    fn keeps_legacy_and_dev_fallbacks() {
+        let install = PathBuf::from("install");
+        let repo = PathBuf::from("repo");
+        let candidates = wireguard_candidates(Some(&install), None, Some(&repo));
+        assert!(candidates.contains(&install.join("wireguard").join("wireguard.exe")));
+        assert!(candidates.contains(&repo.join("resources").join("wireguard").join("wireguard.exe")));
+    }
+
+    #[test]
+    fn dedupes_resource_and_exe_dir() {
+        // Windows 上 resource_dir 与 exe 目录通常相同，重复候选不影响结果。
+        let install = PathBuf::from("install");
+        let candidates = wireguard_candidates(Some(&install), Some(&install), None);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], install.join("resources").join("wireguard").join("wireguard.exe"));
     }
 }

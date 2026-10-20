@@ -61,6 +61,9 @@ tauri-plugin-updater = "=2.13.3"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_System_DataExchange",
     "Win32_UI_Shell",
 ] }

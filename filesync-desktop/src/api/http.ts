@@ -41,9 +41,11 @@ function logOutgoing(method: string, url: string, headers: Record<string, string
   console.info(`[http] → ${method} ${url}`, safeHeaders)
 }
 
-async function send<T>(method: string, path: string, body?: unknown): Promise<T> {
-  // 基地址现取：切节点后 getServerUrl() 立刻返回新节点，不用重启页面
-  const url = `${getServerUrl()}/v1${path}`
+async function send<T>(method: string, path: string, body?: unknown, base?: string): Promise<T> {
+  // 基地址现取：切节点后 getServerUrl() 立刻返回新节点，不用重启页面。
+  // base 用于少数必须固定走某个节点的请求（例如组网协调节点，见 vpn.ts）。
+  const root = (base || getServerUrl()).replace(/\/+$/, '')
+  const url = `${root}/v1${path}`
   const token = getToken()
   const headers: Record<string, string> = {}
   if (token) headers['Token'] = token
@@ -103,6 +105,17 @@ export function httpPut<T = void>(path: string, body?: unknown): Promise<T> {
 export function httpGet<T>(path: string, params?: Record<string, string>): Promise<T> {
   const qs = params ? '?' + new URLSearchParams(params).toString() : ''
   return send<T>('GET', path + qs)
+}
+
+/** 指定基地址的 GET：组网接口要固定走「组网协调节点」，不能跟随当前文件节点。 */
+export function httpGetFrom<T>(base: string, path: string, params?: Record<string, string>): Promise<T> {
+  const qs = params ? '?' + new URLSearchParams(params).toString() : ''
+  return send<T>('GET', path + qs, undefined, base)
+}
+
+/** 指定基地址的 POST，用途同 httpGetFrom。 */
+export function httpPostFrom<T>(base: string, path: string, body?: unknown): Promise<T> {
+  return send<T>('POST', path, body, base)
 }
 
 export function httpDelete<T = void>(path: string): Promise<T> {

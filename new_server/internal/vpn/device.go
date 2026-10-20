@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -258,6 +260,127 @@ func (a *API) Register(c *gin.Context) {
 	response.OK(c, out)
 }
 
+// ── 服务器侧实时端点与活跃度（打洞 / 组网在线）────────────────────
+
+type wgPeerLive struct {
+	Endpoint      string
+	LastHandshake time.Time
+	// LastActive 是服务器最后一次看到该 peer 的收发计数变化的时间。
+	// 客户端 PersistentKeepalive=5，会持续产生流量；用它判断「组网在线」
+	// 比 latest-handshake 更灵敏（握手每 2 分钟才刷新一次）。
+	LastActive time.Time
+	rx         uint64
+	tx         uint64
+}
+
+type wgPeerSeen struct {
+	rx, tx     uint64
+	observedAt time.Time
+	activeAt   time.Time
+}
+
+var (
+	liveEpMu  sync.Mutex
+	liveEpAt  time.Time
+	liveEpMap map[string]wgPeerLive
+	liveSeen  = map[string]wgPeerSeen{}
+	wgPathMu  sync.Mutex
+	wgPath    string
+	wgPathAt  time.Time
+)
+
+// cachedWgBinary 复用 ensureWgBinary 的副本，避免每次请求都复制一遍 wg。
+func cachedWgBinary() (string, error) {
+	wgPathMu.Lock()
+	defer wgPathMu.Unlock()
+	if wgPath != "" && time.Since(wgPathAt) < 10*time.Minute {
+		return wgPath, nil
+	}
+	p, err := ensureWgBinary()
+	if err != nil {
+		return "", err
+	}
+	wgPath, wgPathAt = p, time.Now()
+	return p, nil
+}
+
+// parseWgDump 解析 `wg show <iface> dump`：首行是接口信息，之后每行一个 peer。
+// 列：pubkey、preshared、endpoint、allowed-ips、latest-handshake、rx、tx、keepalive。
+// 空/(none)/回环端点不算可用直连地址（回环是经 frp 中继的客户端）。
+func parseWgDump(out string) map[string]wgPeerLive {
+	peers := make(map[string]wgPeerLive)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) < 7 {
+			continue
+		}
+		pub := strings.TrimSpace(f[0])
+		if pub == "" {
+			continue
+		}
+		ep := strings.TrimSpace(f[2])
+		if ep == "(none)" || strings.HasPrefix(ep, "127.0.0.1:") || strings.HasPrefix(ep, "[::1]:") {
+			ep = ""
+		}
+		hs, _ := strconv.ParseInt(strings.TrimSpace(f[4]), 10, 64)
+		rx, _ := strconv.ParseUint(strings.TrimSpace(f[5]), 10, 64)
+		tx, _ := strconv.ParseUint(strings.TrimSpace(f[6]), 10, 64)
+		p := wgPeerLive{Endpoint: ep, rx: rx, tx: tx}
+		if hs > 0 {
+			p.LastHandshake = time.Unix(hs, 0)
+		}
+		peers[pub] = p
+	}
+	return peers
+}
+
+// liveEndpoints 返回服务器 WireGuard 接口当前看到的每个 peer 的实时信息。
+// 这是打洞的关键：客户端直连服务器时，服务器能看到它的局域网/公网 IP:port，
+// 再通过 /peers 下发给其它客户端；经 frp 中继的客户端是 127.0.0.1，端点置空。
+func liveEndpoints() map[string]wgPeerLive {
+	iface := strings.TrimSpace(config.Conf.Vpn.ServerInterface)
+	if iface == "" {
+		return nil
+	}
+	liveEpMu.Lock()
+	defer liveEpMu.Unlock()
+	if liveEpMap != nil && time.Since(liveEpAt) < time.Second {
+		return liveEpMap
+	}
+	wgBin, err := cachedWgBinary()
+	if err != nil {
+		return nil
+	}
+	out, err := exec.Command(wgBin, "show", iface, "dump").Output()
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	parsed := parseWgDump(string(out))
+	for pub, p := range parsed {
+		prev, ok := liveSeen[pub]
+		active := now
+		if ok {
+			active = prev.activeAt
+			if (prev.rx != p.rx || prev.tx != p.tx) && now.Sub(prev.observedAt) <= 10*time.Second {
+				// 只有两次采样足够近，才能确定流量是刚刚发生的；
+				// 间隔太久时保守沿用旧时间，避免刷新页面把已断开设备误判为在线。
+				active = now
+			}
+		}
+		p.LastActive = active
+		liveSeen[pub] = wgPeerSeen{rx: p.rx, tx: p.tx, observedAt: now, activeAt: active}
+		parsed[pub] = p
+	}
+	liveEpMap = parsed
+	liveEpAt = now
+	return liveEpMap
+}
+
 // Peers 返回按 ACL 裁剪后的对端列表。
 func (a *API) Peers(c *gin.Context) {
 	u, ok := a.currentUser(c)
@@ -334,11 +457,22 @@ func (a *API) Peers(c *gin.Context) {
 	visible := VisiblePeers(selfRef, all, interops)
 
 	rows := make([]gin.H, 0, len(visible)+1)
+	live := liveEndpoints()
+	serverEP := serverEndpointFor(c, config.Conf.Vpn)
 	for _, p := range visible {
+		ep := p.Endpoint
+		if le, ok := live[p.PubKey]; ok && le.Endpoint != "" {
+			ep = le.Endpoint
+		}
+		mode := "direct"
+		if ep == "" || (serverEP != "" && ep == serverEP) {
+			mode = "relay"
+		}
 		rows = append(rows, gin.H{
 			"device_id":   p.DeviceID,
 			"pubkey":      p.PubKey,
-			"endpoint":    p.Endpoint,
+			"endpoint":    ep,
+			"mode":        mode,
 			"address":     p.Address,
 			"allowed_ips": AllowedIPsOf(p.Address),
 			"role":        p.Role,
@@ -481,14 +615,19 @@ func (a *API) Link(c *gin.Context) {
 	visible := VisiblePeers(selfRef, all, interops)
 
 	serverEP := serverEndpointFor(c, config.Conf.Vpn)
+	live := liveEndpoints()
 	rows := make([]gin.H, 0, len(visible)+1)
 	mode := "direct"
 	for _, p := range visible {
+		ep := p.Endpoint
+		if le, ok := live[p.PubKey]; ok && le.Endpoint != "" {
+			ep = le.Endpoint
+		}
 		m := "direct"
-		if serverEP != "" && strings.TrimSpace(p.Endpoint) == serverEP {
+		if ep == "" || (serverEP != "" && ep == serverEP) {
 			m, mode = "relay", "relay"
 		}
-		rows = append(rows, gin.H{"device_id": p.DeviceID, "endpoint": p.Endpoint, "mode": m})
+		rows = append(rows, gin.H{"device_id": p.DeviceID, "endpoint": ep, "mode": m})
 	}
 	// 服务器自身也是一个可用对端（172.1.0.254），否则界面会显示「暂无对端」
 	if sp := ServerPeer(c); sp != nil {

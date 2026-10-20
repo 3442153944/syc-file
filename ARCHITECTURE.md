@@ -329,6 +329,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 
 - **CLI** `filesync-cli/`（bin `syc`）：`login/status/devices/groups/enroll/register/peers/link/nat/wg-config/up/down/netcheck/ping`；`up` 用 `wg setconf` + 临时 `ListenPort=0`，`wg-config` 输出 wg-quick 格式；`netcheck` 一次看公网端点、链路模式、对端；`ping` 可 `--iface` 强制走隧道。
 - **桌面端**：Tauri 命令 `vpn_nat/link/wg_config/up/down/stun/ping/ping_stream/tunnel_status/up_embedded/down_embedded`；独立「组网」页（`views/vpn/Mesh.vue`）：总览（服务器置顶）、任意地址 ping（逐行实时输出）、踢/停用（可选时长）/封禁/释放。`NodeSwitcher` 显示直连/中继。
+- **组网协调节点**：`/v1/vpn/*` 请求不跟随当前文件节点，而是按探测延迟从低到高选可达节点（失败自动降级），并在本次隧道生命周期内固定；服务器 peer 端点由后端 `vpn.server_endpoint` 固定（生产 `ali.sunyuanling.cn:52000`，阿里 frp UDP 再转到 VM 的 51820），客户端不按协调节点自行拼端点。
 - **Windows 内嵌隧道**：`src-tauri/resources/wireguard/wireguard.exe` 固定 **WireGuard for Windows 1.1.1**（仓库入库，sha256 见 `VERSION`），只认自依赖、不回退 `Program Files`；生成配置写 `%ProgramData%\syc\syc0.conf` 后调 `/installtunnelservice`，只操作 `syc0`，不影响用户其它 WireGuard 隧道。
 - **自启与自动组网**：`tauri-plugin-autostart`（Windows 注册表 / Linux `~/.config/autostart`）；启动后若开关开启且隧道未起，自动用会话换身份拉起隧道；NSIS 卸载钩子清理 Run 项、`syc0` 服务与 ProgramData 配置。
 - **本机 / 局域网代理**：桌面「组网」页与 `syc proxy` 共用 `filesync-cli/mesh-proxy/`，HTTP / HTTPS CONNECT / SOCKS5 TCP 混合端口默认 `7897`。默认仅回环，认证由客户端独立开关控制、默认关闭，LAN 也可免密码；仅转发 `172.1.0.0/16`，出站绑定已有隧道地址。支持实时连接/流量统计与停止释放，不修改系统代理或防火墙。使用与验证见 `filesync-cli/MESH_PROXY.md`；Android 接入准备见 `Android/MESH_INTEGRATION_PLAN.md`。

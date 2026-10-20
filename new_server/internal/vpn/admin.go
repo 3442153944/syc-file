@@ -498,6 +498,7 @@ func (a *API) Overview(c *gin.Context) {
 	}
 
 	now := time.Now()
+	live := liveEndpoints()
 	rows := make([]gin.H, 0, len(devices)+1)
 	// 服务器固定排在最上面，方便对照 172.1.0.254
 	rows = append(rows, gin.H{
@@ -507,9 +508,17 @@ func (a *API) Overview(c *gin.Context) {
 		"role": "server", "last_seen": now,
 	})
 	for _, d := range devices {
-		online := d.Status == model.VPNDeviceActive && d.LastSeen != nil &&
-			now.Sub(*d.LastSeen) < 90*time.Second &&
+		// 组网页的「在线」= 组网在线：服务器 WireGuard 接口最近还看到这个 peer 有流量。
+		// 不用 last_seen（那是客户端 HTTP 心跳，主页有自己的在线指示）。
+		online := d.Status == model.VPNDeviceActive &&
 			d.SessionExpiresAt != nil && d.SessionExpiresAt.After(now)
+		if online {
+			if le, ok := live[d.PubKey]; ok && !le.LastActive.IsZero() {
+				online = now.Sub(le.LastActive) < 20*time.Second
+			} else {
+				online = false
+			}
+		}
 		rows = append(rows, gin.H{
 			"id": d.ID, "device_id": d.DeviceID, "user_id": d.UserID, "username": userName[d.UserID],
 			"group": groupName[d.GroupID], "org": orgName[groupOrg[d.GroupID]],

@@ -78,6 +78,8 @@ export interface PingData {
 
 const KEY_NODES = 'filesync_nodes'
 const KEY_ACTIVE = 'filesync_active_node'
+/** 本次隧道固定的组网协调节点 URL（见 meshBaseUrl） */
+const KEY_MESH_URL = 'filesync_mesh_node_url'
 const KEY_FAILOVER = 'filesync_failover'
 /** 旧版只存一个地址，升级上来时要迁移 */
 const KEY_LEGACY_SERVER = 'filesync_server_url'
@@ -220,6 +222,90 @@ export function baseUrl(): string {
     if (netState.serverUrl) return netState.serverUrl.replace(/\/+$/, '')
     // 还没初始化完（比如 App 刚起、第一条请求就发了）：用同步能拿到的兜底值
     return fallbackBaseUrl()
+}
+
+/**
+ * 组网协调节点：与「当前文件节点」解耦，固定选延迟最低的可达节点。
+ *
+ * 为什么不能跟随当前节点：WireGuard 服务器端点由后端 `vpn.server_endpoint` 固定
+ * （生产指向阿里 52000/udp，再经 frp 转到 VM 的 51820），协调节点只负责发 HTTP
+ * 请求。如果文件功能挂在半死的备用节点上，组网照样走阿里，不受影响。
+ * 组网只需要一个 HTTP 协调入口，选延迟最低的才合理。
+ *
+ * 选中后由启动方（vpn.ts）在真正建隧道时固定下来，避免每 30s 的链路查询
+ * 因为延迟抖动换到另一个节点、拿到另一套对端端点。
+ */
+export function meshBaseUrl(): string {
+    const pinned = localStorage.getItem(KEY_MESH_URL)
+    if (pinned) {
+        const h = netState.health.find(x => normUrl(x.serverUrl) === pinned)
+        // 没探测过就先用着；明确不可达则丢弃重选
+        if (!h || h.reachable) return pinned
+        localStorage.removeItem(KEY_MESH_URL)
+    }
+    const alive = netState.health
+        .filter(h => h.reachable && h.latencyMs >= 0)
+        .sort((a, b) => a.latencyMs - b.latencyMs)
+    if (alive.length) return normUrl(alive[0].serverUrl)
+    return baseUrl()
+}
+
+/**
+ * 组网协调节点的候选顺序：已固定的 → 可达节点按延迟升序 → 当前文件节点兜底。
+ * 启动隧道时逐个试，避免延迟最低但组网接口半死的节点把整个流程卡死。
+ */
+export function meshCandidates(): string[] {
+    const out: string[] = []
+    const add = (u: string) => {
+        const url = normUrl(u)
+        if (url && !out.includes(url)) out.push(url)
+    }
+    add(localStorage.getItem(KEY_MESH_URL) || '')
+    netState.health
+        .filter(h => h.reachable && h.latencyMs >= 0)
+        .sort((a, b) => a.latencyMs - b.latencyMs)
+        .forEach(h => add(h.serverUrl))
+    add(baseUrl())
+    return out
+}
+
+/** 清掉本次固定的组网节点（隧道停止后调用，下次启动重新按延迟选） */
+export function resetMeshNode(): void {
+    localStorage.removeItem(KEY_MESH_URL)
+}
+
+/** 固定本次隧道使用的组网协调节点（URL 原样保存，调用方保证已归一化） */
+export function pinMeshNode(url: string): void {
+    if (url) localStorage.setItem(KEY_MESH_URL, url)
+}
+
+/** 当前是否已经固定过组网节点（老版本隧道没有这个标记） */
+export function meshNodePinned(): boolean {
+    return !!localStorage.getItem(KEY_MESH_URL)
+}
+
+/** 当前组网协调节点名字，给界面提示用 */
+export function meshNodeName(): string {
+    const url = meshBaseUrl()
+    const node = netState.nodes.find(n => normUrl(n.server_url) === url)
+    return node?.name || url
+}
+
+/**
+ * 组网启动前刷新一次节点延迟。健康数据太旧（默认 5 分钟）才重新探测，
+ * 避免每次自动重连都等一轮 6s 超时。
+ */
+export async function refreshMeshHealth(maxAgeMs = 5 * 60_000): Promise<void> {
+    const last = netState.health.reduce((m, h) => Math.max(m, h.checkedAt || 0), 0)
+    if (Date.now() - last < maxAgeMs) return
+    try {
+        await probeAll()
+    } catch { /* 探测失败就按现有延迟/当前节点兜底 */
+    }
+}
+
+function normUrl(url: string): string {
+    return (url || '').replace(/\/+$/, '')
 }
 
 /** 当前激活节点的 WS 基地址（不含 /v1/ws/connect） */
