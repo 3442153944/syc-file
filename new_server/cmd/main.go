@@ -133,6 +133,7 @@ func main() {
 		&model.Route{},
 		&model.UserRoute{},
 		&model.DSHToken{},
+		&model.VpsNode{},
 		&model.VPNOrg{},
 		&model.VPNGroup{},
 		&model.VPNMember{},

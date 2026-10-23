@@ -55,6 +55,15 @@ func RegisterAdminRouter(rg *gin.RouterGroup, db *gorm.DB, redisClient *redis.Cl
 	a.GET("/dsh/tokens", h.ListDSHTokens)
 	a.POST("/dsh/tokens", h.CreateDSHToken)
 	a.DELETE("/dsh/tokens/:id", h.RevokeDSHToken)
+	// VPS 节点面板：每节点一条随机入口路径 + 访问秘钥，点开即进面板
+	a.GET("/vps/nodes", h.ListVpsNodes)
+	a.POST("/vps/nodes", h.CreateVpsNode)
+	a.PUT("/vps/nodes/:id", h.UpdateVpsNode)
+	a.DELETE("/vps/nodes/:id", h.DeleteVpsNode)
+	a.POST("/vps/nodes/:id/rotate", h.RotateVpsNode)
+	a.POST("/vps/nodes/:id/check", h.CheckVpsNode)
+	a.GET("/vps/nodes/:id/snippet", h.VpsNodeSnippet)
+	a.GET("/vps/snippets", h.VpsAllSnippets)
 
 	// 当前用户视角
 	rg.GET("/devices", h.ListDevices)
