@@ -176,3 +176,57 @@ func TestFetchNodeUsageRequiresSubURL(t *testing.T) {
 		t.Error("未配置订阅地址时应报错")
 	}
 }
+
+// https 面板 + https 订阅：两处都要关证书校验，且片段自带免登录 include。
+func TestBuildVpsSnippetHTTPSUpstreams(t *testing.T) {
+	n := &model.VpsNode{
+		Code: "hk", Title: "香港", Host: "hk.sunyuanling.cn",
+		PanelScheme: "https", PanelPort: 4437, PanelPath: "/DA6s/",
+		GatewayPort: 443, AccessPath: "/p/abc/",
+		SubURL: "/sub/xyz", SubPort: 2096, SubScheme: "https",
+	}
+	got := buildVpsSnippet(n, "K")
+
+	for _, want := range []string{
+		"proxy_pass https://127.0.0.1:4437/DA6s/;",
+		"proxy_pass https://127.0.0.1:2096/sub/xyz;",
+		"include /etc/nginx/snippets/vps-panel-session.conf;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("缺少 %q\n---\n%s", want, got)
+		}
+	}
+	if c := strings.Count(got, "proxy_ssl_verify off;"); c != 2 {
+		t.Errorf("proxy_ssl_verify off 应出现 2 次（面板+订阅），实际 %d", c)
+	}
+	if c := strings.Count(got, "vps-panel-session.conf"); c != 1 {
+		t.Errorf("免登录 include 应只出现 1 次，实际 %d", c)
+	}
+}
+
+// 根路径面板（独立 server 块）也必须带 include。
+func TestBuildVpsSnippetRootModeHasInclude(t *testing.T) {
+	n := &model.VpsNode{
+		Code: "ny", Title: "纽约", Host: "ny.sunyuanling.cn",
+		PanelScheme: "http", PanelPort: 2053, PanelPath: "/",
+		GatewayPort: 443, AccessPath: "/p/abc/",
+	}
+	got := buildVpsSnippet(n, "K")
+	if !strings.Contains(got, "include /etc/nginx/snippets/vps-panel-session.conf;") {
+		t.Errorf("根模式缺少免登录 include\n---\n%s", got)
+	}
+	if strings.Contains(got, "proxy_ssl_verify off;") {
+		t.Error("http 面板不该出现 proxy_ssl_verify off")
+	}
+}
+
+func TestVpsNodeReqSubScheme(t *testing.T) {
+	cases := map[string]string{"": "http", "HTTPS": "https", "http": "http", "ftp": "http"}
+	for in, want := range cases {
+		r := vpsNodeReq{Code: "jp", Title: "t", Host: "h", SubScheme: in}
+		r.clean()
+		if r.SubScheme != want {
+			t.Errorf("SubScheme(%q) = %q, want %q", in, r.SubScheme, want)
+		}
+	}
+}

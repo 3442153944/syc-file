@@ -116,6 +116,7 @@ type vpsNodeReq struct {
 	GatewayPort int    `json:"gateway_port"`
 	SubURL      string `json:"sub_url"`
 	SubPort     int    `json:"sub_port"`
+	SubScheme   string `json:"sub_scheme"`
 	Remark      string `json:"remark"`
 	Sort        int    `json:"sort"`
 	Enabled     *bool  `json:"enabled"`
@@ -131,6 +132,10 @@ func (r *vpsNodeReq) clean() {
 	r.SubURL = strings.TrimSpace(r.SubURL)
 	if r.SubPort <= 0 || r.SubPort > 65535 {
 		r.SubPort = 2096
+	}
+	r.SubScheme = strings.ToLower(strings.TrimSpace(r.SubScheme))
+	if r.SubScheme != "https" {
+		r.SubScheme = "http"
 	}
 	r.Remark = strings.TrimSpace(r.Remark)
 	r.PanelScheme = strings.ToLower(strings.TrimSpace(r.PanelScheme))
@@ -250,31 +255,47 @@ location %s {
     return 302 %s;
 }`, n.AccessPath, key, ck, cv, n.PanelPath)
 
+	// 面板是 https 自签时必须关校验，否则 nginx 直接 502
+	panelSSL := ""
+	if n.PanelScheme == "https" {
+		panelSSL = "\n    proxy_ssl_verify off;"
+	}
+
 	panel := fmt.Sprintf(`
 location %s {
     if ($cookie_%s != "%s") { return 403; }
-    proxy_pass %s%s;
+    # 免登录：该文件由节点上的 panel-session-refresh 每小时刷新
+    include /etc/nginx/snippets/vps-panel-session.conf;
+    proxy_pass %s%s;%s
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_read_timeout 300s;
-}`, n.PanelPath, ck, cv, upstream, n.PanelPath)
+}`, n.PanelPath, ck, cv, upstream, n.PanelPath, panelSSL)
 
 	// 订阅：只在填了「面板侧相对路径」时生成，和面板共用同一个 cookie。
 	// 这样订阅端口继续只监听回环，后端凭 cookie 经网关读到 Subscription-Userinfo。
 	sub := ""
 	if strings.HasPrefix(n.SubURL, "/") {
+		subScheme := n.SubScheme
+		if subScheme != "https" {
+			subScheme = "http"
+		}
+		subSSL := ""
+		if subScheme == "https" {
+			subSSL = "\n    proxy_ssl_verify off;"
+		}
 		sub = fmt.Sprintf(`
 # 订阅入口（供后端读流量，同样按 cookie 放行）
 location %s {
     if ($cookie_%s != "%s") { return 403; }
-    proxy_pass http://127.0.0.1:%d%s;
+    proxy_pass %s://127.0.0.1:%d%s;%s
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
-}`, n.SubURL, ck, cv, n.SubPort, n.SubURL)
+}`, n.SubURL, ck, cv, subScheme, n.SubPort, n.SubURL, subSSL)
 	}
 
 	// 面板在根路径：独立端口，避免和站点根冲突。
@@ -292,7 +313,8 @@ server {
 
     location / {
         if ($cookie_%s != "%s") { return 403; }
-        proxy_pass %s/;
+        include /etc/nginx/snippets/vps-panel-session.conf;
+        proxy_pass %s/;%s
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -300,7 +322,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_read_timeout 300s;
     }
-}`, header, n.GatewayPort, n.GatewayPort, host, entry, sub, ck, cv, upstream)
+}`, header, n.GatewayPort, n.GatewayPort, host, entry, sub, ck, cv, upstream, panelSSL)
 	}
 
 	return header + entry + panel + sub
@@ -383,7 +405,7 @@ func (h *APIHandler) CreateVpsNode(c *gin.Context) {
 		PanelScheme: req.PanelScheme, PanelPort: req.PanelPort,
 		PanelPath: req.PanelPath, GatewayPort: req.GatewayPort,
 		AccessPath: vpsAccessPathPrefix + suffix + "/", AccessKeyEnc: enc,
-		SubURL: req.SubURL, SubPort: req.SubPort, Remark: req.Remark, Enabled: enabled, Sort: req.Sort,
+		SubURL: req.SubURL, SubPort: req.SubPort, SubScheme: req.SubScheme, Remark: req.Remark, Enabled: enabled, Sort: req.Sort,
 		LastStatus: "unknown",
 	}
 	if err := h.db.Create(&n).Error; err != nil {
@@ -425,7 +447,7 @@ func (h *APIHandler) UpdateVpsNode(c *gin.Context) {
 	n.Title, n.Region, n.Provider = req.Title, req.Region, req.Provider
 	n.Host, n.GatewayHost = req.Host, req.GatewayHost
 	n.PanelScheme, n.PanelPort, n.PanelPath, n.GatewayPort = req.PanelScheme, req.PanelPort, req.PanelPath, req.GatewayPort
-	n.SubURL, n.SubPort, n.Remark, n.Sort = req.SubURL, req.SubPort, req.Remark, req.Sort
+	n.SubURL, n.SubPort, n.SubScheme, n.Remark, n.Sort = req.SubURL, req.SubPort, req.SubScheme, req.Remark, req.Sort
 	if req.Enabled != nil {
 		n.Enabled = *req.Enabled
 	}

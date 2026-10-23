@@ -35,11 +35,12 @@ type VpsNode struct {
 	//   - 以 http(s):// 开头 = 完整地址，后端直接取（要求该地址对后端可达）；
 	//   - 以 / 开头 = 面板侧订阅路径（如 /sub/abc/），由同一个网关按 cookie 放行，
 	//     后端带着入口 cookie 去取，这样订阅端口可以继续只监听回环。
-	SubURL  string `gorm:"size:255" json:"sub_url"`
-	SubPort int    `gorm:"not null;default:2096" json:"sub_port"` // 面板侧订阅端口（仅在 SubURL 为相对路径时用于生成片段）
-	Remark  string `gorm:"size:255" json:"remark"`                // 备注
-	Enabled bool   `gorm:"not null;default:true" json:"enabled"`
-	Sort    int    `gorm:"not null;default:0" json:"sort"`
+	SubURL    string `gorm:"size:255" json:"sub_url"`
+	SubPort   int    `gorm:"not null;default:2096" json:"sub_port"`          // 面板侧订阅端口
+	SubScheme string `gorm:"size:8;not null;default:http" json:"sub_scheme"` // http / https（x-ui 订阅服务是否启了 TLS）
+	Remark    string `gorm:"size:255" json:"remark"`                         // 备注
+	Enabled   bool   `gorm:"not null;default:true" json:"enabled"`
+	Sort      int    `gorm:"not null;default:0" json:"sort"`
 
 	LastStatus    string     `gorm:"size:16;not null;default:unknown" json:"last_status"` // ok / fail / unknown
 	LastLatencyMs int        `json:"last_latency_ms"`

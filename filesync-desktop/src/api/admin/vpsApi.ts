@@ -23,6 +23,8 @@ export interface VpsNode {
   access_path: string
   sub_url: string
   sub_port: number
+  /** 面板侧订阅服务是否启了 TLS（x-ui 里 2096 可能是 http 也可能是 https） */
+  sub_scheme: 'http' | 'https'
   remark: string
   enabled: boolean
   sort: number
@@ -53,6 +55,7 @@ export interface VpsNodeInput {
   gateway_port?: number
   sub_url?: string
   sub_port?: number
+  sub_scheme?: 'http' | 'https'
   remark?: string
   sort?: number
   enabled?: boolean
