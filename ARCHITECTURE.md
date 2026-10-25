@@ -45,7 +45,7 @@
 
 **Windows 主机**：后端 / MySQL / Redis / nginx / frpc / ddns-go 均已停止，仅作客户端开发环境与数据备份。客户端域名端口不变，无需改配置。
 
-**组网（2026-10-19 上线）**：与 `syc-file` 同进程，`vpn.server_interface: syc0` 由 systemd 以 root 运行；服务器节点 `172.1.0.254/16`，UDP `51820`（WireGuard）+ `3478`（STUN-lite）需在防火墙放行。配置段 `vpn:`（pool / stun_port / server_address / server_pubkey / server_endpoint / server_interface），`server_endpoint` 留空时按客户端请求实际使用的 Host 推导，避免绑死某一个入口。私钥只在服务端存密文，解密密钥来自 `/etc/syc-file.env` 的 `SYC_VPN_MASTER_KEY`（systemd EnvironmentFile 注入）。
+**组网（2026-10-19 上线）**：与 `syc-file` 同进程，`vpn.server_interface: syc0` 由 systemd 以 root 运行；服务器节点 `172.1.0.254/16`，UDP `51820`（WireGuard）+ `3478`（STUN-lite）需在防火墙放行。配置段 `vpn:`（pool / stun_port / server_address / server_pubkey / server_endpoint / server_interface），`server_endpoint` 留空时按客户端请求实际使用的 Host 推导，避免绑死某一个入口。组网配置只从 `config.yaml` 读取（生产/开发各一份，不入库）；设备私钥只由服务端进程内存动态生成并托管，不落数据库、不进 Redis，服务重启后设备下次取身份自动重新签发，因此不需要主密钥配置。
 
 ---
 
@@ -307,7 +307,8 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 
 ### 9.3 密钥与身份
 
-- X25519（clamp 后）生成密钥对；私钥用 AES-256-GCM 加密入库，AAD 绑 `device_id`；主密钥只从环境变量 `SYC_VPN_MASTER_KEY` 读（见 `keys.go`）。
+- X25519（clamp 后）生成密钥对；私钥只存在服务进程内存（`hosted_keys.go`），数据库只存公钥，不落盘、不进 Redis，也没有加密主密钥。
+- 服务重启后内存清空，设备下次取身份（`identity`）会自动重新生成并下发新身份；客户端不持久化私钥，所以这是"重新签发"而不是长期故障。旧加密列 `priv_key_enc` 仅保留列、不再写入。
 - 设备入组有两条路：管理端发一次性入组码（`enroll` → `register`），或桌面端 `POST /v1/vpn/auto-enroll`（按登录 `Device-Id` 自动选组登记；管理员无组时自动落到第一个组/默认组）。
 - **身份不落盘**：`GET /v1/vpn/identity` 用当前 JWT 换回解密后的私钥，启动隧道时现取现用；私钥仍只在服务端存密文。
 - 会话有效期 `session_expires_at`：注册写入、`heartbeat`（30s）续期；`peers` / `server-peers` 只返回未过期设备。会话过期只移除 peer，设备与地址保留。

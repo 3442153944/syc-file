@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/pkg/logger"
 	"syc-file/pkg/response"
 )
 
@@ -136,10 +138,7 @@ func (a *API) Register(c *gin.Context) {
 	var err error
 	switch req.KeySource {
 	case model.VPNKeySourceServer:
-		if _, err := MasterKey(); err != nil {
-			response.Fail(c, 503, err.Error())
-			return
-		}
+		// 私钥只由本次签发写入进程内存，不落库；服务重启后设备取身份会重新签发。
 		privateKey, pubKey, err = GenerateKeypair()
 		if err != nil {
 			response.Fail(c, 500, "生成密钥失败")
@@ -158,6 +157,7 @@ func (a *API) Register(c *gin.Context) {
 	}
 
 	var out gin.H
+	var savedDeviceID uint
 	err = a.db.Transaction(func(tx *gorm.DB) error {
 		// 地址分配：同组已用地址排除
 		var usedAddrs []string
@@ -188,14 +188,6 @@ func (a *API) Register(c *gin.Context) {
 				Endpoint:  strings.TrimSpace(req.Endpoint),
 				Status:    model.VPNDeviceActive,
 			}
-			if req.KeySource == model.VPNKeySourceServer {
-				master, _ := MasterKey()
-				enc, eerr := EncryptPrivate(master, privateKey, req.DeviceID)
-				if eerr != nil {
-					return eerr
-				}
-				dev.PrivKeyEnc = enc
-			}
 			now := time.Now()
 			exp := now.Add(sessionTTL())
 			dev.LastSeen = &now
@@ -215,17 +207,9 @@ func (a *API) Register(c *gin.Context) {
 				}
 				dev.PubKey = pubKey
 				dev.KeySource = req.KeySource
-				if req.KeySource == model.VPNKeySourceServer {
-					master, _ := MasterKey()
-					enc, eerr := EncryptPrivate(master, privateKey, req.DeviceID)
-					if eerr != nil {
-						return eerr
-					}
-					dev.PrivKeyEnc = enc
-				} else {
-					dev.PrivKeyEnc = ""
-				}
 			}
+			// 旧的加密私钥列不再使用，顺手清掉（私钥现在只在进程内存）。
+			dev.PrivKeyEnc = ""
 			dev.GroupID = group.ID
 			dev.Status = model.VPNDeviceActive
 			if ep := strings.TrimSpace(req.Endpoint); ep != "" {
@@ -239,6 +223,7 @@ func (a *API) Register(c *gin.Context) {
 				return err
 			}
 		}
+		savedDeviceID = dev.ID
 
 		now := time.Now()
 		if err := tx.Model(&issued).Update("used_at", now).Error; err != nil {
@@ -251,13 +236,20 @@ func (a *API) Register(c *gin.Context) {
 			"address":     dev.Address,
 			"pubkey":      dev.PubKey,
 			"key_source":  dev.KeySource,
-			"private_key": privateKey, // 仅 key_source=server 且本次生成时有值，只出现这一次
+			"private_key": privateKey, // 仅 key_source=server；私钥只在下发时出现，不落库
 		}
 		return nil
 	})
 	if err != nil {
 		response.Fail(c, 400, err.Error())
 		return
+	}
+	if savedDeviceID != 0 {
+		if req.KeySource == model.VPNKeySourceServer && privateKey != "" {
+			storeHostedKey(savedDeviceID, privateKey)
+		} else {
+			forgetHostedKey(savedDeviceID)
+		}
 	}
 	response.OK(c, out)
 }
@@ -721,20 +713,15 @@ func (a *API) AutoEnroll(c *gin.Context) {
 			return
 		}
 	}
-	makeIdentity := func() (priv, pub, enc, source string, err error) {
+	makeIdentity := func() (priv, pub, source string, err error) {
 		if request.PubKey != "" {
-			return "", request.PubKey, "", model.VPNKeySourceClient, nil
-		}
-		master, err := MasterKey()
-		if err != nil {
-			return "", "", "", "", err
+			return "", request.PubKey, model.VPNKeySourceClient, nil
 		}
 		priv, pub, err = GenerateKeypair()
 		if err != nil {
-			return "", "", "", "", err
+			return "", "", "", err
 		}
-		enc, err = EncryptPrivate(master, priv, deviceID)
-		return priv, pub, enc, model.VPNKeySourceServer, err
+		return priv, pub, model.VPNKeySourceServer, nil
 	}
 	// 已登记：地址保持不变（IP 持久），被吊销的走重新激活
 	var existing model.VPNDevice
@@ -747,7 +734,7 @@ func (a *API) AutoEnroll(c *gin.Context) {
 			response.Fail(c, 403, "设备临时停用中，稍后再试")
 			return
 		}
-		if existing.Status == model.VPNDeviceActive && ((request.PubKey == "" && strings.TrimSpace(existing.PrivKeyEnc) != "") || (request.PubKey != "" && existing.PubKey == request.PubKey)) {
+		if existing.Status == model.VPNDeviceActive && ((request.PubKey == "" && existing.KeySource == model.VPNKeySourceServer) || (request.PubKey != "" && existing.PubKey == request.PubKey)) {
 			now := time.Now()
 			exp := now.Add(sessionTTL())
 			if err := a.db.Model(&existing).Updates(map[string]any{
@@ -763,7 +750,7 @@ func (a *API) AutoEnroll(c *gin.Context) {
 			return
 		}
 		// 被吊销过：保留原地址，重新生成密钥并激活
-		priv, pub, enc, source, err := makeIdentity()
+		priv, pub, source, err := makeIdentity()
 		if err != nil {
 			response.Fail(c, 500, "生成密钥失败")
 			return
@@ -771,12 +758,17 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		now := time.Now()
 		exp := now.Add(sessionTTL())
 		if err := a.db.Model(&existing).Updates(map[string]any{
-			"pub_key": pub, "priv_key_enc": enc, "status": model.VPNDeviceActive,
+			"pub_key": pub, "priv_key_enc": "", "status": model.VPNDeviceActive,
 			"endpoint": "", "lan_endpoints": "[]",
 			"key_source": source, "last_seen": now, "session_expires_at": exp,
 		}).Error; err != nil {
 			response.Fail(c, 500, "更新设备密钥失败")
 			return
+		}
+		if source == model.VPNKeySourceServer {
+			storeHostedKey(existing.ID, priv)
+		} else {
+			forgetHostedKey(existing.ID)
 		}
 		response.OK(c, gin.H{
 			"device_id": existing.DeviceID, "address": existing.Address, "pubkey": pub,
@@ -808,7 +800,7 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		response.Fail(c, 409, "所在组不存在")
 		return
 	}
-	priv, pub, enc, source, err := makeIdentity()
+	priv, pub, source, err := makeIdentity()
 	if err != nil {
 		response.Fail(c, 500, "生成密钥失败")
 		return
@@ -828,7 +820,7 @@ func (a *API) AutoEnroll(c *gin.Context) {
 	exp := now.Add(sessionTTL())
 	dev := model.VPNDevice{
 		UserID: u.ID, GroupID: group.ID, DeviceID: deviceID,
-		PubKey: pub, PrivKeyEnc: enc, KeySource: source,
+		PubKey: pub, KeySource: source,
 		Address: addr, Status: model.VPNDeviceActive,
 		LastSeen: &now, SessionExpiresAt: &exp,
 	}
@@ -836,15 +828,13 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		response.Fail(c, 500, "登记设备失败")
 		return
 	}
+	if source == model.VPNKeySourceServer {
+		storeHostedKey(dev.ID, priv)
+	}
 	response.OK(c, gin.H{
 		"device_id": dev.DeviceID, "address": dev.Address, "pubkey": dev.PubKey,
 		"group_id": dev.GroupID, "subnet": group.Subnet, "private_key": priv, "existing": false,
 	})
-}
-
-func mustMasterKey() []byte {
-	k, _ := MasterKey()
-	return k
 }
 
 // ensureDefaultGroup 给没有组的管理员兜底：优先用系统里第一个组；一个组都没有就建默认机构+默认组。
@@ -898,11 +888,13 @@ func (a *API) ReleaseDevice(c *gin.Context) {
 		response.Fail(c, 500, "释放失败")
 		return
 	}
+	forgetHostedKey(dev.ID)
 	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }
 
-// Identity 用当前会话换取本设备的 WireGuard 身份（私钥由服务端解密后下发）。
-// 私钥只存服务端密文，客户端不落盘；身份生命周期跟 JWT/设备记录走。
+// Identity 用当前会话换取本设备的 WireGuard 身份。
+// 私钥只由服务端进程内存动态生成/托管，不落库、不进 Redis；客户端也不持久化。
+// 服务重启后内存为空时，本接口会重新生成并下发新身份（客户端下次连接即恢复），不做旧密钥兼容。
 func (a *API) Identity(c *gin.Context) {
 	u, ok := a.currentUser(c)
 	if !ok {
@@ -914,14 +906,18 @@ func (a *API) Identity(c *gin.Context) {
 		response.Fail(c, 404, "设备未登记")
 		return
 	}
-	if strings.TrimSpace(dev.PrivKeyEnc) == "" {
+	if dev.KeySource == model.VPNKeySourceClient {
 		response.Fail(c, 409, "该设备是客户端托管私钥，服务端无法下发")
 		return
 	}
-	priv, err := DecryptPrivate(mustMasterKey(), dev.PrivKeyEnc, dev.DeviceID)
-	if err != nil {
-		response.Fail(c, 500, "私钥解密失败（主密钥是否变更？）")
-		return
+	priv, ok := loadHostedKey(dev.ID)
+	if !ok {
+		var err error
+		priv, err = a.issueHostedIdentity(&dev)
+		if err != nil {
+			response.Fail(c, 500, "生成组网身份失败")
+			return
+		}
 	}
 	var group model.VPNGroup
 	a.db.First(&group, dev.GroupID)
@@ -929,4 +925,32 @@ func (a *API) Identity(c *gin.Context) {
 		"device_id": dev.DeviceID, "address": dev.Address, "pubkey": dev.PubKey,
 		"subnet": group.Subnet, "private_key": priv,
 	})
+}
+
+// issueHostedIdentity 为设备动态生成 WireGuard 身份：数据库只更新公钥，私钥只留在进程内存。
+// 旧公钥记入历史后覆盖；服务重启后内存为空，下一次取身份会再次签发。
+func (a *API) issueHostedIdentity(dev *model.VPNDevice) (string, error) {
+	priv, pub, err := GenerateKeypair()
+	if err != nil {
+		return "", err
+	}
+	if dev.PubKey != "" && dev.PubKey != pub {
+		if err := a.db.Create(&model.VPNDeviceHistory{
+			UserID: dev.UserID, DeviceID: dev.DeviceID, PubKey: dev.PubKey, Reason: "reissue",
+		}).Error; err != nil {
+			return "", err
+		}
+	}
+	if err := a.db.Model(dev).Updates(map[string]any{
+		"pub_key": pub, "priv_key_enc": "", "key_source": model.VPNKeySourceServer,
+	}).Error; err != nil {
+		return "", err
+	}
+	storeHostedKey(dev.ID, priv)
+	dev.PubKey = pub
+	dev.PrivKeyEnc = ""
+	dev.KeySource = model.VPNKeySourceServer
+	logger.Logger.Info("已为组网设备动态生成内存托管身份",
+		zap.String("device_id", dev.DeviceID), zap.String("pubkey", pub[:8]))
+	return priv, nil
 }

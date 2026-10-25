@@ -7,9 +7,8 @@
 #
 # 做的事：
 #   1. 复制二进制与配置模板到安装目录；
-#   2. 首次安装时生成 SYC_VPN_MASTER_KEY 写入 /etc/syc-file.env（600）；
-#   3. 写 /etc/systemd/system/syc-file.service 并 enable --now；
-#   4. 已有 config.yaml 不会被覆盖（避免冲掉数据库口令）。
+#   2. 写 /etc/systemd/system/syc-file.service 并 enable --now；
+#   3. 已有 config.yaml 不会被覆盖（避免冲掉数据库口令）。
 #
 # 升级：日常升级仍用 deploy.sh（构建 → 原子替换 → 重启 → 健康检查 → 回滚），
 # 不需要重跑本脚本。
@@ -39,15 +38,6 @@ else
   NEED_EDIT=0
 fi
 
-if [ ! -f /etc/syc-file.env ]; then
-  {
-    echo "# 组网主密钥：私钥入库时的加密密钥，必须与数据库分离保存；丢失则已托管私钥无法解密"
-    echo "SYC_VPN_MASTER_KEY=$(head -c 32 /dev/urandom | base64)"
-  } > /etc/syc-file.env
-  chmod 600 /etc/syc-file.env
-  echo "已生成 /etc/syc-file.env（600）"
-fi
-
 cat > "/etc/systemd/system/$SERVICE.service" <<EOF
 [Unit]
 Description=CloudLadder FileSync Backend (syc-file)
@@ -57,6 +47,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$DEST
+# 可选：其它环境变量（如 DSH_CREDENTIALS）仍可放这里；组网身份私钥只在进程内存，不走环境变量
 EnvironmentFile=-/etc/syc-file.env
 ExecStart=$DEST/syc-file
 Restart=always

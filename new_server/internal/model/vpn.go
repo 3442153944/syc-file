@@ -14,7 +14,7 @@ const (
 	VPNRoleGroupAdmin = "group_admin"
 	VPNRoleOrgAdmin   = "org_admin"
 
-	VPNKeySourceServer = "server" // 服务端生成并托管密文私钥
+	VPNKeySourceServer = "server" // 服务端动态生成并托管私钥（私钥只在进程内存）
 	VPNKeySourceClient = "client" // 客户端生成，服务端只存公钥
 
 	VPNDeviceActive    = "active"
@@ -62,14 +62,15 @@ type VPNMember struct {
 
 func (VPNMember) TableName() string { return "vpn_member" }
 
-// VPNDevice 一台加入组网的设备。privkey_enc 为空表示私钥只在客户端。
+// VPNDevice 一台加入组网的设备。私钥只在服务进程内存（server 托管）或客户端内存（client），
+// 数据库只存公钥；privkey_enc 是历史加密托管时代的列，保留但不再写入。
 type VPNDevice struct {
 	ID           uint       `gorm:"primaryKey;autoIncrement" json:"id"`
 	UserID       uint       `gorm:"not null;index;uniqueIndex:uk_vpn_device" json:"user_id"`
 	GroupID      uint       `gorm:"not null;index" json:"group_id"`
 	DeviceID     string     `gorm:"size:100;not null;uniqueIndex:uk_vpn_device" json:"device_id"`
 	PubKey       string     `gorm:"size:64;not null;uniqueIndex" json:"pubkey"`
-	PrivKeyEnc   string     `gorm:"size:255" json:"-"`
+	PrivKeyEnc   string     `gorm:"size:255" json:"-"` // 历史字段：不再写入
 	KeySource    string     `gorm:"size:16;not null;default:client" json:"key_source"`
 	Address      string     `gorm:"size:64;not null" json:"address"`
 	Endpoint     string     `gorm:"size:128" json:"endpoint"`

@@ -640,5 +640,6 @@ func (a *API) ReleaseAdminDevice(c *gin.Context) {
 		response.Fail(c, 500, "释放失败")
 		return
 	}
+	forgetHostedKey(dev.ID)
 	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }

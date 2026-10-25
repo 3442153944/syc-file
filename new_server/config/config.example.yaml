@@ -222,12 +222,14 @@ thumbnail:
   temp_ttl_minutes: 720          # 临时缩略图保留时长（分钟），默认 12 小时
   # temp_dir: ""                 # 临时缩略图目录；默认 <盘>/<base_path>/<temp_path>/thumbs
 
-# 组网（云梯组网）：密钥只入库，下面的 pubkey/endpoint 是服务器自身 wg 接口的，
-# 由 deploy/vpn-server.sh 生成并打印。
+# 组网（云梯组网）：设备私钥只由服务端进程内存动态生成/托管，不落数据库、不进 Redis，
+# 也不需要加密主密钥配置。服务重启后内存清空，设备下次取身份会自动重新签发。
+# 组网配置只从本文件读取（开发/生产各用一份，均不入 Git），不提供环境变量入口。
 vpn:
   pool: 172.1.0.0/16
   stun_port: 3478
   server_address: 172.1.0.254
+  # 服务器自身 wg 接口公钥/公网端点（由 deploy/vpn-server.sh 生成并打印）
   server_pubkey: ""
   server_endpoint: ""
   # 服务器本机 wg 接口名；配置后后端按会话有效性自动增删 peer

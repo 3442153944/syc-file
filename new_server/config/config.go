@@ -46,7 +46,7 @@ type Config struct {
 	Vpn VpnConfig `mapstructure:"vpn"`
 }
 
-// VpnConfig 组网配置。主密钥不放这里，走环境变量 SYC_VPN_MASTER_KEY。
+// VpnConfig 组网配置：只从 config.yaml 读取（开发/生产各一份、均不入库），不提供环境变量入口。
 type VpnConfig struct {
 	// Pool 组网地址池（IPv4）。建组时未指定 subnet 就从池里自动分配一个 /24；
 	// 显式指定的 subnet 必须落在池内，避免不同环境之间地址重叠。
@@ -65,7 +65,7 @@ type VpnConfig struct {
 	// 进来的客户端都会拿到与入口一致的端点，不把组网绑死在某一个供应商。
 	ServerEndpoint string `mapstructure:"server_endpoint"`
 	// ServerLANEndpoints 服务器自身的局域网候选端点（如 192.168.31.100:51820），
-	// 让同 LAN 的客户端优先直连服务器；可用 SYC_VPN_SERVER_LAN_ENDPOINTS 以逗号分隔覆盖。
+	// 让同 LAN 的客户端优先直连服务器。
 	ServerLANEndpoints []string `mapstructure:"server_lan_endpoints"`
 	// ServerWGPort 服务器 WireGuard 监听端口（默认 51820）。
 	ServerWGPort int `mapstructure:"server_wg_port"`
@@ -278,21 +278,9 @@ func Init() error {
 	}
 	viper.AddConfigPath(cfgDir)
 
-	// 开启环境变量覆盖机制 (非常重要：用于生产环境覆盖 Secret 等敏感信息)
+	// 开启环境变量覆盖机制 (非常重要：用于生产环境覆盖 Secret 等敏感信息)。
+	// 组网配置（vpn.*）只从 config.yaml 读取，不提供环境变量入口。
 	viper.AutomaticEnv()
-	// 显式绑定可选的组网配置项：只开 AutomaticEnv 时，config.yaml 里没有出现的键
-	// 不会进入 Unmarshal 的键集合，环境变量也就无法覆盖到结构体。
-	for key, env := range map[string]string{
-		"vpn.server_pubkey":        "SYC_VPN_SERVER_PUBKEY",
-		"vpn.server_endpoint":      "SYC_VPN_SERVER_ENDPOINT",
-		"vpn.server_interface":     "SYC_VPN_SERVER_INTERFACE",
-		"vpn.server_wg_port":       "SYC_VPN_SERVER_WG_PORT",
-		"vpn.server_lan_endpoints": "SYC_VPN_SERVER_LAN_ENDPOINTS",
-	} {
-		if err := viper.BindEnv(key, env); err != nil {
-			return fmt.Errorf("绑定组网环境变量失败: %w", err)
-		}
-	}
 
 	if err := viper.ReadInConfig(); err != nil {
 		return fmt.Errorf("读取配置文件失败: %w", err)
