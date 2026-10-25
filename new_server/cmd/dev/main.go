@@ -73,7 +73,11 @@ func run() error {
 		defer os.RemoveAll(dir)
 		output = filepath.Join(dir, "syc-file"+ext)
 	}
-	cmd := exec.Command(goexe, "build", "-o", output, "./cmd")
+	linkerFlags, err := devbuild.CoreLinkerFlags(root)
+	if err != nil {
+		return fmt.Errorf("fingerprint shared core: %w", err)
+	}
+	cmd := exec.Command(goexe, "build", "-ldflags", linkerFlags, "-o", output, "./cmd")
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr

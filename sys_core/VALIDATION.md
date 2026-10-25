@@ -94,3 +94,15 @@
 - CLI补充修正：STUN公网IP加本地WG监听端口仍不等于NAT外部端点。nat --report现要求显式--observed-wg-endpoint，保留外部ip:port；--wg-port仅作诊断，避免同NAT下两设备监听同端口时误报。
 - Windows自有fs-mesh-test、精确防火墙规则、临时私钥配置与HTTP进程已清，原syc0运行。Android无filesync接口或优先rule残留，Clash tun0保持。NAT脚本finally清自有natwg并恢复fixture规则，容器与原测试基础设施保留。
 - 仍未验收：生产端并发端口预测、多设备共享NAT且步长不定的预测命中率、无root完整mesh、桌面GUI。最新Go运行期未切换的限制沿用。完整说明见 tests/mesh/NAT-ACCEPTANCE.md。
+
+
+## 2026-10-25 统一核心构建入口修正
+
+- Go cgo直接链接根sys_core/lib/libsys_core.a，头文件来自sys_core/include。新增根build.sh/build.ps1，旧new_server/sync_core/build.*只转发并生成兼容复制。
+- 开发启动器每次调用Cargo检查源码，由Cargo缓存处理未修改源码，再检查ELF/COFF目标平台；不再仅凭同架构就跳过更新。正式Go入口将静态库SHA256加入链接参数，使Rust-only更新也会重新链接。
+- Windows根构建与go test ./internal/devbuild ./pkg/synccore通过；go run ./cmd/dev -build完整编译成功，未启动服务。
+- VM使用隔离副本/tmp/filesync-unified-core-fb54b28，按仓库锁文件构建Linux库；Go构建预检、C ABI测试和完整服务编译通过。实际bash build.sh、bash deploy.sh --build-only、go run ./cmd/dev -prepare均通过。
+- 反向验证：已有正确Linux库时，在临时副本Rust源码加入compile_error，开发启动器明确失败，不能继续复用旧库；源码自动恢复。
+- 根构建脚本随Git跟踪；deploy目录的.sh/.ps1源码不再被运行配置忽略规则误伤；frpc.toml、ddns配置继续忽略。根lib与旧兼容lib不入Git，旧已跟踪静态库仅停止跟踪，磁盘文件保留。
+- .sh固定LF，避免Windows工作区复制到VM后出现CRLF语法错误。Docker源码入口已改为直接构建根sys_core，完整Docker镜像本轮未构建；Linux原生链路已实际验证。
+- 未改VM主仓库、数据库或运行服务，未替换8991/8992。日志在target/mesh-test/shared-core-*。

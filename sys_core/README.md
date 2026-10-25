@@ -1,6 +1,6 @@
 # sys_core：FileSync 共享操作内核
 
-共享文件和上传内核只在本目录维护。桌面直接链接 rlib，Android 的 JNI 包装链接同一 crate，Go 使用兼容 staticlib。不同操作系统和 CPU 需要分别编译产物；不共享同一个二进制文件。
+共享文件和上传内核只在本目录维护。桌面直接链接 rlib，Android 的 JNI 包装链接同一 crate，Go 直接链接本目录的 staticlib。不同操作系统和 CPU 需要分别编译产物；不共享同一个二进制文件。
 
 ## 模块与边界
 
@@ -24,7 +24,7 @@
 Android `Android/sync_core_jni` 依赖同一核心。`SysUpload.kt` 只泵送 HTTP/进度/会话/持久化事件，`ChunkedUploader.kt` 是平台门面和节点注册表。缺失或过旧的上传 JNI 产物会明确报错，不再回退另一份 Kotlin 上传循环。现有 `SyncCore` 的哈希 JNI 入口与其他业务中的 Java 流式哈希兼容调用仍保留。
 
 ```powershell
-# 测试共享内核（文件、C ABI、调度、执行桥及 mesh plan；最近一次 47 项通过）
+# 测试共享内核（文件、C ABI、调度、执行桥及 mesh plan；最近一次 49 项通过）
 cargo test --manifest-path sys_core/Cargo.toml --features upload --offline
 # 桌面检查，需满足当前 Tauri 依赖的工具链要求
 cargo +1.90.0 check --manifest-path filesync-desktop/src-tauri/Cargo.toml --offline
@@ -36,7 +36,9 @@ cargo ndk -t arm64-v8a -t x86_64 -o ../app/src/main/jniLibs build --release --of
 
 Android 产出每个 ABI 的 `libsync_core_jni.so`，保持现有 `System.loadLibrary("sync_core_jni")` 名称。JNI `nativeBridgeVersion=1` 检查新增上传桥入口，独立于已有 C ABI v4。最近一次双 ABI 重建：`arm64-v8a` 1,997,760 B、`x86_64` 2,129,608 B，均含 `MeshPlanner_nativePlan` 入口；尺寸、sha256 与验收环境见 `VALIDATION.md`。
 
-Go 继续使用 `new_server/sync_core/build.ps1`（Windows GNU）或 `build.sh`（Linux），生成原位置的 `lib/libsync_core.a`。该 crate 只有 `pub use sys_core::*`，没有另一套实现；旧头文件转发到本目录。也可以直接构建本 crate 产出 `libsys_core.a`。
+Go 直接使用本目录的 C ABI 产物：仓库根执行 `./sys_core/build.ps1`（Windows GNU）或 `bash sys_core/build.sh`（Linux），生成 `sys_core/lib/libsys_core.a`。`--offline` 等额外参数传递给 Cargo；脚本尊重 `CARGO_TARGET_DIR`，并显式选择本机目标。`lib/` 与 `target/` 为本机产物，不入 Git；`build.sh`、`build.ps1` 随源码跟踪。
+
+开发启动器每次调用 Cargo 检查共享源码，由 Cargo 自己复用未变缓存，再检查库的平台。Go 构建入口用库的 SHA256 作为链接参数，使 Rust-only 更新也会重新链接。旧 `new_server/sync_core/build.*` 仅转发到本目录并复制兼容名称；当前 Go、Docker、build/deploy 直接使用根 sys_core，不再依赖旧库。
 
 后端 Docker 构建仍以 `new_server/` 为上下文，额外传共享核心的命名上下文；标准 `new_server/docker/build.sh` 已自动传入：
 

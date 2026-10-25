@@ -11,7 +11,10 @@ log
 static
 config/config.yaml
 deploy/**
+!deploy/**/
 !deploy/**/*.example.*
+!deploy/**/*.sh
+!deploy/**/*.ps1
 sql/backup
 *.log
 .git

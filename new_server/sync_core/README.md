@@ -1,6 +1,6 @@
 # sync_core —— sys_core 兼容构建入口
 
-共享实现和当前接入说明见仓库根目录 [sys_core/README.md](../../sys_core/README.md)。本目录仅保留 Go 所需的旧 crate 名、构建脚本、`libsync_core.a` 和转发头文件；核心源码已迁入 `sys_core/src/`。下文保留原 C ABI 与构建经验供兼容调用参考。
+共享实现和当前接入说明见仓库根目录 [sys_core/README.md](../../sys_core/README.md)。本目录仅保留旧 crate 名、转发构建脚本和头文件。当前 Go 直接链接根 `sys_core/lib/libsys_core.a`；旧脚本只调用根脚本并生成兼容复制，复制不入 Git；核心源码已迁入 `sys_core/src/`。下文保留原 C ABI 与构建经验供兼容调用参考。
 
 `new_server` 上传服务的热路径核心库：预分配、乱序分片定位写、blake3 分片校验、
 Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libsync_core.a`）形式由 Go 经 cgo 调用。
@@ -140,9 +140,8 @@ rustup target add x86_64-pc-windows-gnu
 ./build.ps1
 ```
 
-`build.ps1` 会 `cargo build --release --target x86_64-pc-windows-gnu`，把
-`target/.../release/libsync_core.a` 拷到 `lib/libsync_core.a`，并打印 `native-static-libs`
-（cgo LDFLAGS 需覆盖的系统库）。
+`build.ps1` 转发到根 `sys_core/build.ps1`，编译共享 crate，再复制根产物为本目录的兼容名称。
+`build.sh` 同理。当前 Go 不链接该复制，而直接链接 `../../sys_core/lib/libsys_core.a`。
 
 ### 编译 Go（链接本库）
 
@@ -151,11 +150,11 @@ $env:CGO_ENABLED = "1"; $env:CC = "gcc"
 go build ./...        # 或 go test ./pkg/sync_core/
 ```
 
-cgo 指令写在 `../pkg/sync_core/sync_core.go`：
+cgo 指令写在 `../pkg/synccore/synccore.go`：
 
 ```go
-// #cgo CFLAGS: -I${SRCDIR}/../../sync_core
-// #cgo LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp
+// #cgo CFLAGS: -I${SRCDIR}/../../../sys_core/include
+// #cgo LDFLAGS: -L${SRCDIR}/../../../sys_core/lib -lsys_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp
 ```
 
 **先 `build.ps1` 生成 `.a`，再 `go build`。** 整个 `new_server` 已是 cgo 项目，

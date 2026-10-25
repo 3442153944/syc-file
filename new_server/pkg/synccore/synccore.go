@@ -1,18 +1,18 @@
 // Package synccore 是对 Rust 核心库 synccore 的 cgo 封装。
 //
-// 底层实现见仓库根目录 sys_core；new_server/sync_core 仅保留兼容构建入口。构建产物为
-// sync_core/lib/libsync_core.a，需先运行 sync_core/build.ps1 生成。
+// 底层实现与构建产物均来自仓库根目录 sys_core。
+// 构建前运行 sys_core/build.sh 或 build.ps1，生成 sys_core/lib/libsys_core.a。
 //
 // 所有哈希均为 32 字节 blake3。Go 侧只做编排（HTTP/鉴权/Redis 会话/DB），
 // 预分配、乱序定位写、分片与 Merkle 校验、整文件哈希等热路径全在 Rust。
 package synccore
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../sync_core
-#cgo windows LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
-#cgo linux LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lpthread -ldl -lm
+#cgo CFLAGS: -I${SRCDIR}/../../../sys_core/include
+#cgo windows LDFLAGS: -L${SRCDIR}/../../../sys_core/lib -lsys_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
+#cgo linux LDFLAGS: -L${SRCDIR}/../../../sys_core/lib -lsys_core -lpthread -ldl -lm
 #include <stdlib.h>
-#include "sync_core.h"
+#include "sys_core.h"
 */
 import "C"
 
@@ -21,6 +21,11 @@ import (
 	"errors"
 	"unsafe"
 )
+
+// CoreArchiveSHA256 is set by official build entry points. Including the native
+// archive fingerprint in linker flags invalidates Go's cached final link when
+// only Rust sources changed (external .a files are not Go source dependencies).
+var CoreArchiveSHA256 string
 
 // HashSize 是 blake3 哈希字节数。
 const HashSize = 32

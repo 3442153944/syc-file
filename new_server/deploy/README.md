@@ -3,9 +3,9 @@
 后端启动时会拉起几个外部进程（内网穿透 frpc × 2、动态域名 ddns-go），它们各自的配置
 文件统一收在这里，由 `config/config.yaml` 的 `supervisor` 段引用。
 
-**本目录除模板和本文件外一律不进版本库**（`frpc.toml` 里有 frps 的 `auth.token`，
+**本目录的运行配置不进版本库；模板、说明以及 `.sh` / `.ps1` 构建部署源码脚本随 Git 跟踪**（`frpc.toml` 里有 frps 的 `auth.token`，
 `ddns_go_config.yaml` 里有 Cloudflare API Key）。忽略规则在仓库根 `.gitignore`，
-写法是「整目录忽略 + 显式放行 `*.example.*`」，新增敏感文件不会漏。
+写法是「整目录忽略 + 显式放行模板、说明与源码脚本」，新增敏感文件不会漏。
 
 ## 目录
 

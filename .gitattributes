@@ -3,3 +3,4 @@
 *.ets linguist-detectable=true
 
 filesync-desktop/src-tauri/tests/fixtures/update-payload.bin -text
+*.sh text eol=lf

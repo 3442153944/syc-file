@@ -1,44 +1,9 @@
-# Build the sync_core Rust core lib and package the artifact into sync_core/lib/ for Go cgo.
-#
-# Prereqs: Rust (cargo) + x86_64-pc-windows-gnu target + mingw-w64 gcc (WinLibs MSVCRT).
-# Usage: run this from the sync_core dir:  ./build.ps1
-
-$ErrorActionPreference = "Stop"
-$root = $PSScriptRoot
-$target = "x86_64-pc-windows-gnu"
-
-# Ensure mingw gcc is on PATH (winget writes to user PATH; current shell may not have refreshed)
-$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-            [Environment]::GetEnvironmentVariable("Path", "User")
-
-Write-Host "==> cargo build --release --target $target" -ForegroundColor Cyan
-Push-Location $root
-try {
-    cargo build --release --target $target
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
-} finally {
-    Pop-Location
-}
-
-$artifact = Join-Path $root "target\$target\release\libsync_core.a"
-if (-not (Test-Path $artifact)) { throw "artifact not found: $artifact" }
-
-$libDir = Join-Path $root "lib"
-New-Item -ItemType Directory -Force -Path $libDir | Out-Null
-Copy-Item $artifact (Join-Path $libDir "libsync_core.a") -Force
-
-Write-Host "==> packaged: $(Join-Path $libDir 'libsync_core.a')" -ForegroundColor Green
-
-# Print the native system libs the Rust staticlib needs, to keep cgo LDFLAGS in sync
-Write-Host "==> native-static-libs (cgo LDFLAGS must cover these):" -ForegroundColor Cyan
-$prev = $env:RUSTFLAGS
-$env:RUSTFLAGS = "--print native-static-libs"
-Push-Location $root
-try {
-    # 经 cmd 重定向 stderr，避免 PowerShell 5.1 把 cargo 的 stderr 包装成 NativeCommandError
-    cmd /c "cargo rustc --release --target $target --lib 2>&1" |
-        Select-String "native-static-libs:" | ForEach-Object { $_.Line }
-} finally {
-    Pop-Location
-    $env:RUSTFLAGS = $prev
-}
+# Legacy entry point; current Go code links the canonical sys_core artifact.
+$ErrorActionPreference = 'Stop'
+$core = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../sys_core'))
+& (Join-Path $core 'build.ps1') @args
+if ($LASTEXITCODE -ne 0) { throw "Shared core build failed ($LASTEXITCODE)" }
+$lib = Join-Path $PSScriptRoot 'lib'
+New-Item -ItemType Directory -Force -Path $lib | Out-Null
+Copy-Item -LiteralPath (Join-Path $core 'lib/libsys_core.a') -Destination (Join-Path $lib 'libsync_core.a') -Force
+Write-Host "==> legacy compatibility copy: $(Join-Path $lib 'libsync_core.a')"

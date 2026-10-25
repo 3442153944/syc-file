@@ -20,15 +20,15 @@ COPY go.mod go.sum ./
 RUN go mod download
 # Rust 核心单独成层：只改 Go 代码时不重编 Rust
 COPY --from=sys_core . /sys_core
-COPY sync_core ./sync_core
-RUN bash sync_core/build.sh
+RUN bash /sys_core/build.sh
 # ffmpeg 归档随仓库提交并固定版本：只复制并校验，不联网下载
 COPY tools ./tools
 COPY internal/thumb/embedded/FFMPEG.lock ./internal/thumb/embedded/FFMPEG.lock
 COPY internal/thumb/embedded/linux_amd64/ffmpeg.tar.xz ./internal/thumb/embedded/linux_amd64/ffmpeg.tar.xz
 RUN bash tools/fetch-ffmpeg.sh linux
 COPY . .
-RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/syc-file ./cmd
+RUN core_sha="$(sha256sum /sys_core/lib/libsys_core.a | cut -d' ' -f1)" \
+    && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X syc-file/pkg/synccore.CoreArchiveSHA256=$core_sha" -o /out/syc-file ./cmd
 
 # ── 运行阶段 ───────────────────────────────────────────────────
 FROM ubuntu:24.04
