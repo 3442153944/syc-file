@@ -91,6 +91,7 @@ object Request {
             preferences[TOKEN_KEY] = token
         }
         Log.d(TAG, "Token 已保存")
+        com.sunyuanling.filesync.mesh.MeshController.afterAuthentication()
     }
 
     suspend fun getToken(): String? {

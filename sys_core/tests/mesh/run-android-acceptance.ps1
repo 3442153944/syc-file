@@ -2,12 +2,17 @@ param(
     [Parameter(Mandatory = $true)][string]$TestPassword,
     [switch]$Cloud,
     [switch]$WindowsPeer,
+    [switch]$Isolated,
+    [switch]$Refresh,
+    [switch]$ShowScreen,
     [string]$OutputPath = (Join-Path $PSScriptRoot '../../target/mesh-test/nat-android-result.txt')
 )
 # Authorized disposable emulator / isolated backend only. No credential is written.
 $ErrorActionPreference = 'Stop'
 $adb = 'C:/Users/sunyuanling/AppData/Local/Android/Sdk/platform-tools/adb.exe'
-$base = 'http://192.168.31.100:8992'
+$base = 'http://192.168.31.100:8991'
+$package = if ($Isolated) { 'com.sunyuanling.filesync.meshtest' } else { 'com.sunyuanling.filesync' }
+$iface = if ($Isolated) { 'filesync-test' } else { 'filesync' }
 $device = 'filesync-nat-verifier'
 $loginBody = @{username='admin';password=$TestPassword;device_id=$device} | ConvertTo-Json -Compress
 $login = Invoke-RestMethod "$base/v1/user/login" -Method Post -ContentType application/json -Body $loginBody -Headers @{'Device-Id'=$device}
@@ -23,9 +28,12 @@ $arguments = @('-s','192.168.31.182:5557','shell','am','instrument','-w','-r',
     '-e','testBase',$base,'-e','testProxy','https://8.137.77.99:12000',
     '-e','testPassword',$TestPassword,'-e','expectClash','true')
 if ($Cloud) { $arguments += @('-e','testMeshViaProxy','true') }
+if ($Refresh) { $arguments += @('-e','testEndpointRefresh','true') }
+if ($ShowScreen) { $arguments += @('-e','showMeshScreen','true','-e','holdMeshMs','60000') }
 if ($WindowsPeer) { $arguments += @('-e','testPeerUrl','http://172.1.0.4:18082/probe.txt','-e','holdMeshMs','30000') }
-$arguments += 'com.sunyuanling.filesync.test/androidx.test.runner.AndroidJUnitRunner'
-foreach ($argument in $arguments) { $info.ArgumentList.Add($argument) }
+$arguments += "$package.test/androidx.test.runner.AndroidJUnitRunner"
+# Windows PowerShell 5.1 / .NET Framework has no ProcessStartInfo.ArgumentList; build a quoted command line instead.
+$info.Arguments = ($arguments | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
 $process = [System.Diagnostics.Process]::Start($info)
 $stdout = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEndAsync()
@@ -35,15 +43,26 @@ while (!$process.HasExited) {
     if ([DateTime]::UtcNow -gt $deadline) { throw 'Device acceptance timed out; inspect owned filesync interface before retry' }
     $result = Invoke-RestMethod "$base/v1/vpn/devices/my" -Headers $headers
     if ($result.code -ne 200) { throw 'Cannot read public test peer; check device-bound authentication' }
-    $peer = $result.data | Where-Object device_id -eq '78a4307cb3ce978b' | Select-Object -First 1
+    # Windows PowerShell 5.1 turns native stderr into a terminating error under ErrorActionPreference=Stop;
+    # the polling below is expected to hit "No such device" until the test brings the interface up.
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $public = (& $adb -s 192.168.31.182:5557 shell "su -c '/data/user/0/$package/code_cache/bin/wg show $iface public-key'" 2>$null | Select-Object -First 1)
+    $ErrorActionPreference = $previousEap
+    if (!$public -or $public.Trim() -notmatch '^[A-Za-z0-9+/]{43}=$') { Start-Sleep -Seconds 1; continue }
+    $peer = $result.data | Where-Object pubkey -eq $public.Trim() | Select-Object -First 1
     if ($peer.pubkey -and $peer.pubkey -ne $previous) {
-        if ($peer.pubkey -notmatch '^[A-Za-z0-9+/]{43}=$' -or $peer.address -ne '172.1.0.3') { throw 'Unexpected test peer identity' }
-        & ssh -o BatchMode=yes vm "docker exec filesync-mesh-test-gw wg set mesh-test peer '$($peer.pubkey)' allowed-ips 172.1.0.3/32 persistent-keepalive 5"
-        if ($LASTEXITCODE -ne 0) { throw 'Cannot synchronize isolated gateway public peer' }
+        if ($peer.pubkey -notmatch '^[A-Za-z0-9+/]{43}=$' -or $peer.address -notmatch '^172\.1\.0\.\d{1,3}$') { throw 'Unexpected test peer identity' }
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & ssh -o BatchMode=yes vm "docker exec filesync-mesh-test-gw wg set mesh-test peer '$($peer.pubkey)' allowed-ips '$($peer.address)/32' persistent-keepalive 5"
+        $sshExit = $LASTEXITCODE
+        $ErrorActionPreference = $previousEap
+        if ($sshExit -ne 0) { throw 'Cannot synchronize isolated gateway public peer' }
         $previous = $peer.pubkey
         if ($WindowsPeer) {
             $peerPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../target/mesh-test/android-peer.json'))
-            [System.IO.File]::WriteAllText($peerPath + '.tmp', (@{pubkey=$peer.pubkey;address=$peer.address} | ConvertTo-Json -Compress))
+            [System.IO.File]::WriteAllText($peerPath + '.tmp', (@{pubkey=$peer.pubkey;address=$peer.address;port=$(if ($Isolated) {51823} else {51821})} | ConvertTo-Json -Compress))
             Move-Item -LiteralPath ($peerPath + '.tmp') -Destination $peerPath -Force
         }
     }

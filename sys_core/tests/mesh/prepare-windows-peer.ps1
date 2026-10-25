@@ -6,7 +6,7 @@ if (Test-Path -LiteralPath $config) { throw 'Owned test config already exists; i
 if (Get-Service 'WireGuardTunnel$fs-mesh-test' -ErrorAction SilentlyContinue) { throw 'Test service already exists' }
 $wg=[System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../../filesync-desktop/src-tauri/resources/wireguard/wg.exe'))
 $device='filesync-windows-mesh-20261025'
-$base='http://192.168.31.100:8992'
+$base='http://192.168.31.100:8991'
 $login=Invoke-RestMethod "$base/v1/user/login" -Method Post -ContentType application/json -Headers @{'Device-Id'=$device} -Body (@{username='admin';password=$TestPassword;device_id=$device}|ConvertTo-Json -Compress)
 if ($login.code -ne 200) { throw 'Test login failed' }
 $headers=@{Token=$login.data.token;'Device-Id'=$device}

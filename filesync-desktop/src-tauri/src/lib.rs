@@ -253,6 +253,7 @@ pub fn run() {
             vpn::vpn_tunnel_status,
             vpn::vpn_mesh_plan,
             vpn::vpn_peer_status,
+            vpn::vpn_interface_status,
             vpn::vpn_update_peers,
             vpn::vpn_lan_endpoints,
             vpn::vpn_up_embedded,

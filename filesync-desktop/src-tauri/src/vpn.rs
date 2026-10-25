@@ -274,6 +274,32 @@ pub struct PeerStatus {
     pub allowed_ips: Vec<String>,
 }
 
+#[derive(serde::Serialize)]
+pub struct InterfaceStatus {
+    pub pubkey: String,
+    pub listen_port: u16,
+    pub memory_backed: bool,
+}
+
+/// Public identity only. Never read `showconf`/`dump`, which contain private keys.
+#[tauri::command]
+pub fn vpn_interface_status(app: tauri::AppHandle) -> Result<InterfaceStatus, String> {
+    #[cfg(not(windows))]
+    { let _ = app; Err("内嵌隧道仅支持 Windows".into()) }
+    #[cfg(windows)]
+    {
+        let wg = find_wireguard_exe(&app)?.with_file_name("wg.exe");
+        let read = |field| -> Result<String, String> {
+            let out = command(&wg).args(["show", "syc0", field]).output().map_err(|e| e.to_string())?;
+            if !out.status.success() { return Err("无法读取 syc0 的公开身份".into()); }
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        };
+        let service = command("sc.exe").args(["qc", "WireGuardTunnel$syc0"]).output().map_err(|e| e.to_string())?;
+        let memory_backed = service.status.success() && String::from_utf8_lossy(&service.stdout).contains(r"\\.\pipe\filesync-memory-");
+        Ok(InterfaceStatus { pubkey: read("public-key")?, listen_port: read("listen-port")?.parse().map_err(|_| "无效的 WireGuard 监听端口")?, memory_backed })
+    }
+}
+
 #[tauri::command]
 pub fn vpn_peer_status(app: tauri::AppHandle) -> Result<Vec<PeerStatus>, String> {
     #[cfg(not(windows))]
@@ -332,8 +358,19 @@ pub fn vpn_update_peers(app: tauri::AppHandle, peers: Vec<VpnPeerInput>) -> Resu
             }
         }
         let path = std::env::temp_dir().join(format!("filesync-mesh-peers-{}.conf", uuid::Uuid::new_v4()));
-        std::fs::write(&path, config).map_err(|e| e.to_string())?;
-        let out = command(&wg).args(["syncconf", "syc0"]).arg(&path).output();
+        std::fs::write(&path, &config).map_err(|e| e.to_string())?;
+        // addconf preserves private key/listen port; syncconf resets omitted
+        // Interface fields to zero. Remove obsolete peers explicitly instead.
+        let existing = command(&wg).args(["show", "syc0", "peers"]).output().map_err(|e| e.to_string())?;
+        if !existing.status.success() { let _ = std::fs::remove_file(&path); return Err("无法读取组网对端".into()); }
+        let wanted: std::collections::HashSet<_> = config.lines().filter_map(|line| line.strip_prefix("PublicKey = ")).collect();
+        for pubkey in String::from_utf8_lossy(&existing.stdout).split_whitespace() {
+            if !wanted.contains(pubkey) {
+                let removed = command(&wg).args(["set", "syc0", "peer", pubkey, "remove"]).output().map_err(|e| e.to_string())?;
+                if !removed.status.success() { let _ = std::fs::remove_file(&path); return Err("移除组网对端失败".into()); }
+            }
+        }
+        let out = command(&wg).args(["addconf", "syc0"]).arg(&path).output();
         let _ = std::fs::remove_file(&path);
         let out = out.map_err(|e| e.to_string())?;
         if !out.status.success() { return Err(format!("更新隧道对端失败: {}", decode_bytes(&out.stderr))); }
@@ -432,12 +469,13 @@ pub fn vpn_lan_endpoints(cidrs: Option<bool>) -> Result<Vec<String>, String> {
 }
 
 /// 用内嵌/已安装的 WireGuard for Windows 启动隧道。
-/// 配置写到 ProgramData\syc\<iface>.conf，再调 wireguard.exe 安装为系统隧道服务。
+/// 配置经一次性受限命名管道交给系统服务；私钥不写磁盘。
 #[tauri::command]
 pub fn vpn_up_embedded(
     app: tauri::AppHandle,
     device: String,
     private_key: String,
+    public_key: String,
     address: String,
     subnet: String,
     keepalive: Option<u32>,
@@ -445,7 +483,7 @@ pub fn vpn_up_embedded(
 ) -> Result<String, String> {
     #[cfg(not(windows))]
     {
-        let _ = (app, device, private_key, address, subnet, keepalive, peers);
+        let _ = (app, device, private_key, public_key, address, subnet, keepalive, peers);
         Err("内嵌隧道仅 Windows 使用；Linux 请用 syc up".to_string())
     }
     #[cfg(windows)]
@@ -472,34 +510,18 @@ pub fn vpn_up_embedded(
             }
             conf.push_str(&format!("PersistentKeepalive = {ka}\n\n"));
         }
-        let base = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into());
-        let dir = std::path::Path::new(&base).join("syc");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let conf_path = dir.join("syc0.conf");
-        std::fs::write(&conf_path, conf).map_err(|e| e.to_string())?;
-
         let exe = find_wireguard_exe(&app)?;
-        let install = |exe: &std::path::Path| {
-            command(exe)
-                .args(["/installtunnelservice", &conf_path.to_string_lossy()])
-                .output()
-        };
-        let mut out = install(&exe).map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
-        if !out.status.success() {
-            // 常见原因：同名隧道已存在。只卸我们自己的 syc0，不影响用户其它隧道。
-            let _ = command(&exe)
-                .args(["/uninstalltunnelservice", "syc0"])
-                .output();
-            out = install(&exe).map_err(|e| format!("调用 wireguard.exe 失败: {e}"))?;
+        // Replace only our tunnel after authenticated identity retrieval.
+        let _ = command(&exe).args(["/uninstalltunnelservice", "syc0"]).output();
+        let legacy = std::path::PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into()))
+            .join("syc").join("syc0.conf");
+        match std::fs::remove_file(legacy) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err("无法清理旧版组网配置，请以管理员权限重试".into()),
         }
-        if !out.status.success() {
-            return Err(format!(
-                "安装隧道失败: {}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-        Ok(format!("隧道已启动（{}）", conf_path.display()))
+        sys_core::windows_tunnel::install_memory_tunnel(&exe, "syc0", &public_key, &conf)?;
+        Ok("隧道已启动（密钥仅驻内存）".into())
     }
 }
 

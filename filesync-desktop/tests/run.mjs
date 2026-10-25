@@ -14,7 +14,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'unit-'))
 
 // 被测的源文件 + 全部 tests/*.test.ts
-const sources = ['src/utils/merge3.ts', 'src/utils/releaseTarget.ts', 'src/utils/routeSnapshot.ts']
+const sources = ['src/utils/merge3.ts', 'src/utils/releaseTarget.ts', 'src/utils/routeSnapshot.ts', 'src/utils/meshLinkState.ts']
 const tests = fs.readdirSync(path.join(root, 'tests')).filter((f) => f.endsWith('.test.ts')).map((f) => 'tests/' + f)
 
 for (const rel of [...sources, ...tests]) {

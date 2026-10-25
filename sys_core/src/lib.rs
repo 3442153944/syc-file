@@ -6,6 +6,8 @@ pub mod mesh;
 pub mod node_selection;
 mod sys_info;
 pub mod upload_planner;
+#[cfg(windows)]
+pub mod windows_tunnel;
 pub use file_ops::*;
 #[cfg(feature = "upload")]
 pub mod upload;

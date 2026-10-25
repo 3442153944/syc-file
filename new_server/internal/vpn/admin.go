@@ -504,7 +504,7 @@ func (a *API) Overview(c *gin.Context) {
 	rows = append(rows, gin.H{
 		"id": 0, "device_id": "syc-server", "user_id": 0, "username": "服务器",
 		"group": "-", "org": "-", "address": config.Conf.Vpn.ServerAddress,
-		"status": "active", "online": true, "endpoint": "",
+		"status": "active", "online": true, "endpoint": serverEndpointFor(c, config.Conf.Vpn),
 		"role": "server", "last_seen": now,
 	})
 	for _, d := range devices {
@@ -519,11 +519,21 @@ func (a *API) Overview(c *gin.Context) {
 				online = false
 			}
 		}
+		observed := ""
+		if le, ok := live[d.PubKey]; ok {
+			observed = le.Endpoint
+		}
+		candidates := endpointCandidates(d.LANEndpoints, observed, d.Endpoint)
+		endpoint := ""
+		if len(candidates) > 0 {
+			endpoint = candidates[0]
+		}
 		rows = append(rows, gin.H{
 			"id": d.ID, "device_id": d.DeviceID, "user_id": d.UserID, "username": userName[d.UserID],
 			"group": groupName[d.GroupID], "org": orgName[groupOrg[d.GroupID]],
 			"address": d.Address, "status": d.Status, "online": online,
-			"endpoint": d.Endpoint, "last_seen": d.LastSeen, "session_expires_at": d.SessionExpiresAt,
+			"endpoint": endpoint, "candidates": candidates, "pubkey": d.PubKey,
+			"last_seen": d.LastSeen, "session_expires_at": d.SessionExpiresAt,
 		})
 	}
 	response.OK(c, gin.H{"devices": rows, "server_address": config.Conf.Vpn.ServerAddress})

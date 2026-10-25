@@ -8,8 +8,12 @@
  * 没加入任何组时后端返回 409，这里静默失败——等管理端把用户加进组后，
  * 下次登录或点「主动组网测试」会自动补上。
  */
-import {httpDelete, httpGet, httpGetFrom, httpPost, httpPostFrom} from './http'
+import {ApiError, httpDelete, httpGet, httpGetFrom, httpPost, httpPostFrom} from './http'
 import {baseUrl, meshCandidates, meshBaseUrl, pinMeshNode, refreshMeshHealth, resetMeshNode} from './net'
+import {ref} from 'vue'
+import {freshMeshHandshake, meshPeerMode, meshIdentityMatches} from '../utils/meshLinkState'
+
+export const meshMaintenanceError = ref('')
 
 export interface VpnLinkPeer {
     device_id: string
@@ -52,16 +56,17 @@ export async function fetchVpnLink(device: string): Promise<VpnLinkResult> {
     const server = link.peers.find(p => p.role === 'server' || p.device_id === 'syc-server')
     const {invoke, isTauri} = await import('@tauri-apps/api/core')
     if (!isTauri()) { link.mode = link.peers.length ? 'unknown' : 'idle'; return link }
-    const status = await invoke<{pubkey: string; handshake_ms: number; allowed_ips: string[]}[]>('vpn_peer_status').catch(() => [])
-    const fresh = (peer: typeof status[number] | undefined) => !!peer && peer.handshake_ms > 0 && Date.now() - peer.handshake_ms < 180_000
+    const status = await invoke<{pubkey: string; endpoint: string; handshake_ms: number; allowed_ips: string[]}[]>('vpn_peer_status').catch(() => [])
+    const fresh = freshMeshHandshake
     const relay = status.find(p => p.pubkey === server?.pubkey)
     for (const peer of link.peers) {
         const direct = status.find(p => p.pubkey === peer.pubkey)
-        peer.mode = fresh(direct) ? 'direct' : peer.address && fresh(relay) && relay?.allowed_ips.includes(`${peer.address}/32`) ? 'relay' : 'unknown'
+        peer.mode = meshPeerMode(peer.address, direct, relay)
+        if (peer.mode === 'direct') peer.endpoint = direct?.endpoint || peer.endpoint
     }
     const others = link.peers.filter(p => p !== server)
     link.mode = !others.length ? fresh(relay) ? 'connected' : 'unknown'
-        : others.some(p => p.mode === 'unknown') ? 'unknown' : others.some(p => p.mode === 'relay') ? 'relay' : 'direct'
+        : others.some(p => p.mode === 'direct') ? 'direct' : others.some(p => p.mode === 'relay') ? 'relay' : 'unknown'
     return link
 }
 
@@ -116,7 +121,7 @@ export interface VpnPeer {
 }
 
 export interface VpnPeersResult {
-    self: { address: string; subnet: string; keepalive: number; mtu: number }
+    self: { address: string; subnet: string; pubkey: string; keepalive: number; mtu: number }
     peers: VpnPeer[]
 }
 
@@ -126,6 +131,28 @@ interface VpnIdentity {
     subnet: string
     pubkey: string
     private_key: string
+}
+
+// Authenticated delivery only. Never persist this object in localStorage/config.
+let memoryIdentity: {token: string; base: string; device: string; value: VpnIdentity} | null = null
+let identityGeneration = 0
+
+export function clearMeshIdentity(): void { memoryIdentity = null; identityGeneration++ }
+
+export async function afterMeshAuthentication(token: string): Promise<void> {
+    const {isTauri} = await import('@tauri-apps/api/core')
+    if (!isTauri() || !token) return
+    const base = meshBaseUrl()
+    if (memoryIdentity?.token === token && memoryIdentity.base === base) return
+    clearMeshIdentity()
+    const generation = identityGeneration
+    try {
+        const enrolled = await httpPostFrom<{device_id: string}>(base, '/vpn/auto-enroll')
+        const value = await httpGetFrom<VpnIdentity>(base, '/vpn/identity', {device_id: enrolled.device_id})
+        if (generation !== identityGeneration) return
+        memoryIdentity = {token, base, device: enrolled.device_id, value}
+        localStorage.setItem('syc_vpn_device', enrolled.device_id)
+    } catch (e) { if (generation === identityGeneration) meshMaintenanceError.value = `组网身份获取失败：${String(e)}` }
 }
 
 interface VpnPeerConfig {
@@ -159,7 +186,7 @@ async function buildPeerConfigs(data: VpnPeersResult, round = 0): Promise<VpnPee
 }
 
 // 隧道运行期状态：用于隧道启动后重新拉取对端实时端点（打洞）。
-// 私钥只在内存里，停止隧道即丢弃。
+// 前端只在启动调用期间持有私钥；Windows 系统服务使用原生层写入的配置文件。
 interface ActiveTunnelState {
     device: string
     base: string
@@ -167,17 +194,64 @@ interface ActiveTunnelState {
     fingerprint: string
     round: number
     refreshing: boolean
+    pubkey: string
 }
 
 let activeTunnel: ActiveTunnelState | null = null
 let peerRefreshTimer: number | undefined
 let peerRefreshOneShot: number | undefined
+let resumingTunnel = false
+let startingTunnel: Promise<string> | null = null
+
+/** Reattach coordinator maintenance after UI reload/restart without rotating keys.
+ * A service being UP does not prove its identity belongs to the logged-in device.
+ */
+export async function resumeEmbeddedTunnel(device: string): Promise<void> {
+    if (resumingTunnel || activeTunnel?.device === device) return
+    resumingTunnel = true
+    try {
+        const {invoke} = await import('@tauri-apps/api/core')
+        const base = meshBaseUrl()
+        const [local, data, status] = await Promise.all([
+            invoke<{pubkey: string; listen_port: number; memory_backed: boolean}>('vpn_interface_status'),
+            httpGetFrom<VpnPeersResult>(base, '/vpn/peers', {device_id: device}),
+            invoke<{pubkey: string; endpoint: string}[]>('vpn_peer_status'),
+        ])
+        if (!local.memory_backed || !meshIdentityMatches(local, data.self.pubkey)) {
+            // Normal authenticated identity API owns private-key handling; no
+            // private material is read from the old native service/configuration.
+            await startEmbeddedTunnel(device)
+            return
+        }
+        activeTunnel = {device, base, pubkey: data.self.pubkey, round: 0, refreshing: false, fingerprint: '',
+            attempts: new Map(status.map(p => [p.pubkey, {endpoint: p.endpoint, since: 0}]))}
+        await sendVpnHeartbeat(device)
+        startPeerRefresh()
+        startVpnHeartbeat(device)
+        meshMaintenanceError.value = ''
+    } catch (e) {
+        meshMaintenanceError.value = `组网维护未恢复：${String(e)}`
+        throw e
+    } finally { resumingTunnel = false }
+}
 
 /**
  * Windows：用内嵌/已安装的 WireGuard 启动隧道（Linux 请用 syc up）。
- * 私钥不落盘：每次用当前 JWT 向 /vpn/identity 换取，身份跟着会话走。
+ * 每次启动用当前 JWT 向 /vpn/identity 获取身份，再交给原生层配置 Windows 系统服务。
  */
-export async function startEmbeddedTunnel(device: string): Promise<string> {
+export function startEmbeddedTunnel(device: string): Promise<string> {
+    if (startingTunnel) return startingTunnel
+    const pending = doStartEmbeddedTunnel(device)
+    startingTunnel = pending
+    void pending.finally(() => { if (startingTunnel === pending) startingTunnel = null }).catch(() => {})
+    return pending
+}
+
+async function doStartEmbeddedTunnel(device: string): Promise<string> {
+    const token = localStorage.getItem('token')
+    if (!token) throw new Error('请先登录')
+    const generation = identityGeneration
+    const stillAuthenticated = () => token === localStorage.getItem('token') && generation === identityGeneration
     // 组网协调节点按延迟重新选一次（不跟随当前文件节点），否则会拿到别的入口
     // 推导出的 WireGuard 端点，出现「隧道已启动但 172.1.0.254 全丢」。
     resetMeshNode()
@@ -189,11 +263,14 @@ export async function startEmbeddedTunnel(device: string): Promise<string> {
     let lastErr: unknown
     for (const base of meshCandidates()) {
         try {
-            const [id, peers] = await Promise.all([
-                httpGetFrom<VpnIdentity>(base, '/vpn/identity', {device_id: device}),
-                httpGetFrom<VpnPeersResult>(base, '/vpn/peers', {device_id: device}),
-            ])
+            // Read peers after authenticated identity retrieval, and reject a
+            // concurrent registration change rather than install mismatched keys.
+            const id = await httpGetFrom<VpnIdentity>(base, '/vpn/identity', {device_id: device})
+            const peers = await httpGetFrom<VpnPeersResult>(base, '/vpn/peers', {device_id: device})
+            if (!stillAuthenticated()) throw new Error('登录身份已变化，已取消组网连接')
+            if (id.pubkey !== peers.self.pubkey) throw new Error('组网身份发生变化，请重新连接')
             identity = id
+            memoryIdentity = {token: localStorage.getItem('token') || '', base, device, value: id}
             data = peers
             chosen = base
             break
@@ -211,32 +288,44 @@ export async function startEmbeddedTunnel(device: string): Promise<string> {
     const activeEp = serverPeer?.endpoint || ''
     if (activeEp) localStorage.setItem(KEY_ACTIVE_SERVER_EP, activeEp)
     const peers = await buildPeerConfigs(data)
+    if (!stillAuthenticated()) throw new Error('登录身份已变化，已取消组网连接')
     const {invoke} = await import('@tauri-apps/api/core')
     const startedAt = Math.floor(Date.now() / 1000) * 1000
     const msg = await invoke<string>('vpn_up_embedded', {
         device,
         privateKey: identity.private_key,
+        publicKey: identity.pubkey,
         address: data.self.address,
         subnet: data.self.subnet,
         keepalive: data.self.keepalive ?? 5,
         peers,
     })
+    if (!stillAuthenticated()) throw new Error('登录身份已变化，已取消组网连接')
     activeTunnel = {
         device,
+        pubkey: identity.pubkey,
         base: chosen,
         attempts: new Map(peers.map(p => [p.pubkey, {endpoint: p.endpoint || '', since: startedAt}])),
         fingerprint: JSON.stringify(peers), round: 0, refreshing: false,
     }
     startPeerRefresh()
     startVpnHeartbeat(device)
+    meshMaintenanceError.value = ''
     return msg
 }
 
 export async function stopEmbeddedTunnel(): Promise<string> {
+    clearMeshIdentity()
+    stopPeerRefresh()
+    stopVpnHeartbeat()
+    // Logout/cancel may arrive while native startup is still consuming its pipe.
+    // Wait for it, then stop, so an old login cannot leave a late tunnel running.
+    await startingTunnel?.catch(() => {})
     const {invoke} = await import('@tauri-apps/api/core')
     try {
         return await invoke<string>('vpn_down_embedded', {iface: 'syc0'})
     } finally {
+        clearMeshIdentity()
         activeTunnel = null
         stopPeerRefresh()
         stopVpnHeartbeat()
@@ -257,19 +346,33 @@ function startPeerRefresh(): void {
         if (!st || st.refreshing) return
         st.refreshing = true
         try {
-            const data = await httpGetFrom<VpnPeersResult>(st.base, '/vpn/peers', {device_id: st.device})
+            const {invoke} = await import('@tauri-apps/api/core')
+            const [data, local] = await Promise.all([
+                httpGetFrom<VpnPeersResult>(st.base, '/vpn/peers', {device_id: st.device}),
+                invoke<{pubkey: string; listen_port: number}>('vpn_interface_status'),
+            ])
             if (activeTunnel !== st) return
+            if (data.self.pubkey !== st.pubkey || !meshIdentityMatches(local, data.self.pubkey)) {
+                clearMeshIdentity()
+                await startEmbeddedTunnel(st.device)
+                return
+            }
             const peers = await buildPeerConfigs(data, ++st.round)
             const fingerprint = JSON.stringify(peers)
             if (st.fingerprint === fingerprint) return
             if (activeTunnel !== st) return
-            const {invoke} = await import('@tauri-apps/api/core')
             const since = Math.floor(Date.now() / 1000) * 1000
             await invoke('vpn_update_peers', {peers})
             st.attempts = new Map(peers.map(p => [p.pubkey, st.attempts.get(p.pubkey)?.endpoint === p.endpoint
                 ? st.attempts.get(p.pubkey)! : {endpoint: p.endpoint || '', since}]))
             st.fingerprint = fingerprint
-        } catch { /* 端点还没就绪 / 节点暂时不可用，下一轮再试 */ }
+            meshMaintenanceError.value = ''
+        } catch (e) {
+            if (activeTunnel !== st) return
+            if (e instanceof ApiError && ([401, 403].includes(e.code) || [401, 403].includes(e.status)))
+                await stopEmbeddedTunnel().catch(() => {})
+            meshMaintenanceError.value = `对端更新失败：${String(e)}`
+        }
         finally { st.refreshing = false }
     }
     peerRefreshOneShot = window.setTimeout(tick, 5_000)

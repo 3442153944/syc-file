@@ -16,8 +16,6 @@ try {
         Start-Sleep -Milliseconds 300
     }
     New-NetFirewallRule -Name 'FileSyncMeshTest20261025UDP' -DisplayName 'FileSync temporary mesh test UDP' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 51823 -RemoteAddress 192.168.31.182 -Profile Any | Out-Null
-    New-NetFirewallRule -Name 'FileSyncMeshTest20261025TCP' -DisplayName 'FileSync temporary mesh test TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 18082 -LocalAddress 172.1.0.4 -RemoteAddress 172.1.0.3 -InterfaceAlias $iface -Profile Any | Out-Null
-    New-NetRoute -DestinationPrefix '172.1.0.3/32' -InterfaceAlias $iface -NextHop '0.0.0.0' -PolicyStore ActiveStore | Out-Null
     Set-Content -LiteralPath $ready -Value 'ready'
     $lastPeer = ''
     $deadline = (Get-Date).AddMinutes(3)
@@ -26,8 +24,16 @@ try {
         if (Test-Path $path) {
             $peer = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
             if ($peer.pubkey -ne $lastPeer) {
+                if ($peer.pubkey -notmatch '^[A-Za-z0-9+/]{43}=$' -or $peer.address -notmatch '^172\.1\.0\.\d{1,3}$') { throw 'Invalid public test peer' }
+                $port = if ($peer.port) { [int]$peer.port } else { 51821 }
+                if ($port -notin @(51821,51823)) { throw 'Unexpected test peer port' }
                 if ($lastPeer) { & $wg set $iface peer $lastPeer remove }
-                & $wg set $iface peer $peer.pubkey allowed-ips '172.1.0.3/32' endpoint '192.168.31.182:51821' persistent-keepalive 5
+                Remove-NetFirewallRule -Name 'FileSyncMeshTest20261025TCP' -ErrorAction SilentlyContinue
+                New-NetFirewallRule -Name 'FileSyncMeshTest20261025TCP' -DisplayName 'FileSync temporary mesh test TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 18082 -LocalAddress 172.1.0.4 -RemoteAddress $peer.address -InterfaceAlias $iface -Profile Any | Out-Null
+                if (!(Get-NetRoute -DestinationPrefix "$($peer.address)/32" -InterfaceAlias $iface -ErrorAction SilentlyContinue)) {
+                    New-NetRoute -DestinationPrefix "$($peer.address)/32" -InterfaceAlias $iface -NextHop '0.0.0.0' -PolicyStore ActiveStore | Out-Null
+                }
+                & $wg set $iface peer $peer.pubkey allowed-ips "$($peer.address)/32" endpoint "192.168.31.182:$port" persistent-keepalive 5
                 if ($LASTEXITCODE -ne 0) { throw 'Test peer update failed' }
                 $lastPeer = $peer.pubkey
             }

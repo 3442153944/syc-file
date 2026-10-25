@@ -78,12 +78,15 @@ async function send<T>(method: string, path: string, body?: unknown, base?: stri
   }
 
   const text = await res.text()
-  console.info(`[http] ← ${res.status} ${url}`, text.slice(0, 500))
+  // These responses may carry a private key. consoleBridge persists console
+  // output, so even a truncated response would violate memory-only delivery.
+  const meshIdentityResponse = /^\/vpn\/(identity|auto-enroll|register)(?:\?|$)/.test(path)
+  console.info(`[http] ← ${res.status} ${url}`, meshIdentityResponse ? '[组网身份响应已隐藏]' : text.slice(0, 500))
   let json: ApiEnvelope<T>
   try {
     json = JSON.parse(text) as ApiEnvelope<T>
   } catch {
-    throw new ApiError(`响应解析失败 (HTTP ${res.status}): ${text.slice(0, 200)}`, -1, res.status)
+    throw new ApiError(`响应解析失败 (HTTP ${res.status}): ${meshIdentityResponse ? '组网身份响应无效' : text.slice(0, 200)}`, -1, res.status)
   }
 
   if (json.code !== 200) {

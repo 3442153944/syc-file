@@ -11,7 +11,7 @@ import MeshProxyPanel from '@/components/MeshProxyPanel.vue'
 import {meshNodeName} from '@/api/net'
 import {
   ensureVpnDevice, fetchMeshOverview, startEmbeddedTunnel, stopEmbeddedTunnel,
-  vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
+  fetchVpnLink, meshMaintenanceError, vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
 } from '@/api/vpn'
 
 interface MeshRow {
@@ -35,11 +35,14 @@ const rows = ref<MeshRow[]>([])
 const loading = ref(false)
 const serverAddress = ref('172.1.0.254')
 const target = ref('172.1.0.254')
+let overviewInitialized = false
 const pingOut = ref('')
 const pinging = ref(false)
 const tunnelUp = ref<boolean | null>(null)
 /** 本次隧道实际使用的组网协调节点（按延迟自动选，和当前文件节点无关） */
 const meshNode = ref('')
+const peerLinks = ref<Awaited<ReturnType<typeof fetchVpnLink>>['peers']>([])
+const localAddress = ref('')
 const showSuspend = ref(false)
 const suspendTarget = ref<MeshRow | null>(null)
 const suspendMinutes = ref(30)
@@ -56,7 +59,18 @@ async function fetchOverview() {
     rows.value = (data.devices || []) as MeshRow[]
     if (data.server_address) {
       serverAddress.value = data.server_address
-      target.value = data.server_address
+      // Initialize the default once. Periodic overview refresh must not overwrite
+      // a target the user is editing or currently pinging.
+      if (!overviewInitialized) target.value = data.server_address
+    }
+    overviewInitialized = true
+    const device = localStorage.getItem('syc_vpn_device')
+    if (isTauri() && device) {
+      try {
+        const link = await fetchVpnLink(device)
+        peerLinks.value = link.peers
+        localAddress.value = link.self.address
+      } catch { peerLinks.value = [] }
     }
   } catch (e) {
     message.error(String(e))
@@ -180,6 +194,17 @@ const columns: DataTableColumns<MeshRow> = [
   {title: '用户', key: 'username', width: 140},
   {title: '设备', key: 'device_id', width: 200, ellipsis: {tooltip: true}},
   {title: '地址', key: 'address', width: 130},
+  {
+    title: '本机链路', key: 'local_path', width: 160,
+    render: r => {
+      if (r.address === localAddress.value) return h(NTag, {size: 'small', bordered: false}, {default: () => '本机'})
+      const link = peerLinks.value.find(p => p.device_id === r.device_id)
+      const mode = link?.mode
+      const text = mode === 'direct' ? r.role === 'server' ? '服务器已握手' : '直连已握手'
+        : mode === 'relay' ? '经中继（待测）' : '未验证'
+      return h(NTag, {size: 'small', bordered: false, type: mode === 'direct' ? 'success' : mode === 'relay' ? 'warning' : 'default'}, {default: () => text})
+    },
+  },
   {title: '组 / 机构', key: 'group', width: 180, render: r => `${r.group || '-'} / ${r.org || '-'}`},
   {
     title: '状态', key: 'online', width: 100,
@@ -191,7 +216,7 @@ const columns: DataTableColumns<MeshRow> = [
     render: r => (r.last_seen ? new Date(r.last_seen).toLocaleString() : '-'),
   },
   {title: '端点', key: 'endpoint', ellipsis: {tooltip: true},
-    render: r => r.endpoint || '(未知)'},
+    render: r => peerLinks.value.find(p => p.device_id === r.device_id && p.mode === 'direct')?.endpoint || r.endpoint || '(无可用候选)'},
   {
     title: '操作', key: 'actions', width: 300,
     render: r => {
@@ -275,6 +300,7 @@ onBeforeUnmount(() => {
       </NSpace>
     </NSpace>
 
+    <NAlert v-if="meshMaintenanceError" type="warning" style="margin-bottom: 12px">{{ meshMaintenanceError }}</NAlert>
     <MeshProxyPanel v-if="isTauri()"/>
 
     <NCard size="small" style="margin-bottom: 12px">
