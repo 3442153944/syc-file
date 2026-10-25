@@ -1,5 +1,10 @@
 # Windows 内嵌隧道依赖
 
+`wg.exe` 随包提供握手查询与 `syncconf`，无需依赖用户系统安装目录。
+当前工具为官方签名有效的 wireguard-tools v1.0.20260223，SHA256
+`37ddc3a1a456de26c8927f25001a86518c5027dcb6eb91bb77780fcf7ca9eb17`。
+本次从本机已有的 WireGuard LLC 签名工具复制并核验；获取脚本也会从已校验的官方 MSI 解出配套 `wg.exe`。
+
 **当前固定版本：WireGuard for Windows 1.1.1**，`wireguard.exe` 已随仓库提交（9.0 MB，
 sha256 `04c71fb1…`），不需要每次打包重新下载。版本与校验值见同目录 `VERSION`。
 

@@ -9,17 +9,19 @@
  * 下次登录或点「主动组网测试」会自动补上。
  */
 import {httpDelete, httpGet, httpGetFrom, httpPost, httpPostFrom} from './http'
-import {baseUrl, meshCandidates, meshBaseUrl, netState, pinMeshNode, refreshMeshHealth, resetMeshNode} from './net'
+import {baseUrl, meshCandidates, meshBaseUrl, pinMeshNode, refreshMeshHealth, resetMeshNode} from './net'
 
 export interface VpnLinkPeer {
     device_id: string
     endpoint: string
-    mode: 'direct' | 'relay'
+    mode: 'direct' | 'relay' | 'unknown'
+    pubkey?: string
+    address?: string
     role?: string
 }
 
 export interface VpnLinkResult {
-    mode: 'direct' | 'relay' | 'idle' | 'unknown'
+    mode: 'direct' | 'relay' | 'connected' | 'idle' | 'unknown'
     self: { device_id: string; address: string }
     peers: VpnLinkPeer[]
 }
@@ -48,58 +50,23 @@ export async function ensureVpnDevice(): Promise<string> {
 export async function fetchVpnLink(device: string): Promise<VpnLinkResult> {
     const link = await httpGetFrom<VpnLinkResult>(meshBaseUrl(), '/vpn/link', {device_id: device})
     const server = link.peers.find(p => p.role === 'server' || p.device_id === 'syc-server')
-    // 以「本机隧道实际配置的服务器端点」为准，而不是后端现在广告的端点：
-    // 升级后旧隧道可能还钉在 ddns:51820，直接看 /link 会误报中继。
-    // 直连的 WG 服务端口是 51820；服务器 peer 落在别的端口（生产 ali:52000）
-    // 说明中间是 frp/中转入口，后端目前只看 endpoint 是否相等，会误报 direct。
-    const activeEp = localStorage.getItem(KEY_ACTIVE_SERVER_EP) || server?.endpoint || ''
-    const port = activeEp ? endpointPort(activeEp) : null
-    if (port && port !== DIRECT_WG_PORT) link.mode = 'relay'
+    const {invoke, isTauri} = await import('@tauri-apps/api/core')
+    if (!isTauri()) { link.mode = link.peers.length ? 'unknown' : 'idle'; return link }
+    const status = await invoke<{pubkey: string; handshake_ms: number; allowed_ips: string[]}[]>('vpn_peer_status').catch(() => [])
+    const fresh = (peer: typeof status[number] | undefined) => !!peer && peer.handshake_ms > 0 && Date.now() - peer.handshake_ms < 180_000
+    const relay = status.find(p => p.pubkey === server?.pubkey)
+    for (const peer of link.peers) {
+        const direct = status.find(p => p.pubkey === peer.pubkey)
+        peer.mode = fresh(direct) ? 'direct' : peer.address && fresh(relay) && relay?.allowed_ips.includes(`${peer.address}/32`) ? 'relay' : 'unknown'
+    }
+    const others = link.peers.filter(p => p !== server)
+    link.mode = !others.length ? fresh(relay) ? 'connected' : 'unknown'
+        : others.some(p => p.mode === 'unknown') ? 'unknown' : others.some(p => p.mode === 'relay') ? 'relay' : 'direct'
     return link
 }
 
-/** WG 默认服务端口；非该端口视为中转入口 */
-const DIRECT_WG_PORT = 51820
-
 /** 本机隧道实际配置的服务器端点（用于判断直连还是中转） */
 const KEY_ACTIVE_SERVER_EP = 'syc_vpn_server_endpoint'
-
-function endpointPort(endpoint: string): number | null {
-    try {
-        const u = new URL(`udp://${endpoint}`)
-        return u.port ? Number(u.port) : null
-    } catch {
-        return null
-    }
-}
-
-/** 是否是 RFC1918 私网 IPv4 */
-function isPrivateIPv4(host: string): boolean {
-    if (/^10\./.test(host)) return true
-    if (/^192\.168\./.test(host)) return true
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true
-    return false
-}
-
-/**
- * 同一局域网内优先直连 VM 的 WireGuard，而不是绕阿里 52000 中继。
- * 节点表里如果有私网地址（例如「内网」http://192.168.31.120/file）且探测可达，
- * 就直接用 <私网IP>:51820；外网/不可达时返回 null，仍走后端的 ali:52000。
- */
-function lanServerEndpoint(): string | null {
-    for (const node of netState.nodes) {
-        let host = ''
-        try {
-            host = new URL(node.server_url).hostname
-        } catch {
-            continue
-        }
-        if (!isPrivateIPv4(host)) continue
-        const health = netState.health.find(h => h.id === node.id)
-        if (health?.reachable) return `${host}:51820`
-    }
-    return null
-}
 
 export interface MeshDeviceRow {
     id: number
@@ -145,6 +112,7 @@ export interface VpnPeer {
     pubkey: string
     allowed_ips: string[]
     endpoint?: string
+    candidates?: string[]
 }
 
 export interface VpnPeersResult {
@@ -167,15 +135,27 @@ interface VpnPeerConfig {
 }
 
 /** 服务器 peer 用组网入口（局域网 51820 / 外网 ali:52000），其它 peer 用后端下发的实时端点 */
-function buildPeerConfigs(data: VpnPeersResult, lanEp: string | null): VpnPeerConfig[] {
-    return data.peers.map(p => {
+async function buildPeerConfigs(data: VpnPeersResult, round = 0): Promise<VpnPeerConfig[]> {
+    const {invoke} = await import('@tauri-apps/api/core')
+    const [status, localNetworks] = await Promise.all([
+        invoke<{pubkey: string; endpoint: string; handshake_ms: number}[]>('vpn_peer_status').catch(() => []),
+        invoke<string[]>('vpn_lan_endpoints', {cidrs: true}).catch(() => []),
+    ])
+    const peers = data.peers.map(p => {
         const isServer = p.role === 'server' || p.device_id === 'syc-server'
+        const attempt = activeTunnel?.attempts.get(p.pubkey)
+        const observed = status.find(s => s.pubkey === p.pubkey && s.handshake_ms > 0 && Date.now() - s.handshake_ms < 180_000
+            && (!attempt || s.handshake_ms >= attempt.since))
         return {
             pubkey: p.pubkey,
             allowed_ips: p.allowed_ips,
-            endpoint: isServer && lanEp ? lanEp : (p.endpoint || null),
+            endpoint: p.endpoint || '',
+            candidates: p.candidates || [],
+            role: isServer ? 'server' : (p.role || 'member'),
+            confirmed_endpoint: observed ? (isServer ? attempt?.endpoint || p.endpoint || observed.endpoint : observed.endpoint) : null,
         }
     })
+    return invoke<VpnPeerConfig[]>('vpn_mesh_plan', {input: {peers, round, local_networks: localNetworks}})
 }
 
 // 隧道运行期状态：用于隧道启动后重新拉取对端实时端点（打洞）。
@@ -183,12 +163,10 @@ function buildPeerConfigs(data: VpnPeersResult, lanEp: string | null): VpnPeerCo
 interface ActiveTunnelState {
     device: string
     base: string
-    privateKey: string
-    address: string
-    subnet: string
-    keepalive: number
-    lanEp: string | null
-    endpoints: Map<string, string>
+    attempts: Map<string, {endpoint: string; since: number}>
+    fingerprint: string
+    round: number
+    refreshing: boolean
 }
 
 let activeTunnel: ActiveTunnelState | null = null
@@ -228,13 +206,13 @@ export async function startEmbeddedTunnel(device: string): Promise<string> {
     }
     // 固定下来：后续 /vpn/link 读到的必须是这条隧道实际用的那个入口
     pinMeshNode(chosen)
-    // 同局域网优先直连 VM 的 51820；外网仍用后端的 ali:52000 中继
-    const lanEp = lanServerEndpoint()
+    // UDP 端点与 LAN 候选由协调服务明确下发，不从 HTTP 主机猜测 WG 位置。
     const serverPeer = data.peers.find(p => p.role === 'server' || p.device_id === 'syc-server')
-    const activeEp = lanEp || serverPeer?.endpoint || ''
+    const activeEp = serverPeer?.endpoint || ''
     if (activeEp) localStorage.setItem(KEY_ACTIVE_SERVER_EP, activeEp)
-    const peers = buildPeerConfigs(data, lanEp)
+    const peers = await buildPeerConfigs(data)
     const {invoke} = await import('@tauri-apps/api/core')
+    const startedAt = Math.floor(Date.now() / 1000) * 1000
     const msg = await invoke<string>('vpn_up_embedded', {
         device,
         privateKey: identity.private_key,
@@ -246,12 +224,8 @@ export async function startEmbeddedTunnel(device: string): Promise<string> {
     activeTunnel = {
         device,
         base: chosen,
-        privateKey: identity.private_key,
-        address: data.self.address,
-        subnet: data.self.subnet,
-        keepalive: data.self.keepalive ?? 5,
-        lanEp,
-        endpoints: new Map(peers.map(p => [p.pubkey, p.endpoint || ''])),
+        attempts: new Map(peers.map(p => [p.pubkey, {endpoint: p.endpoint || '', since: startedAt}])),
+        fingerprint: JSON.stringify(peers), round: 0, refreshing: false,
     }
     startPeerRefresh()
     startVpnHeartbeat(device)
@@ -274,37 +248,29 @@ export async function stopEmbeddedTunnel(): Promise<string> {
 
 // ── 对端端点刷新（打洞）────────────────────────────────────────────────────
 // 隧道刚启动时，服务器还没从握手看到本机的 WireGuard endpoint，/peers 里对端
-// 端点可能还是空的。启动 5s 后再拉一次，之后每 15s 对比，只有端点变化才重装隧道。
+// 端点可能还是空的。启动 5s 后再拉一次，之后每 15s 对比，以 syncconf 更新对端而不重装隧道。
 
 function startPeerRefresh(): void {
     stopPeerRefresh()
     const tick = async () => {
         const st = activeTunnel
-        if (!st) return
+        if (!st || st.refreshing) return
+        st.refreshing = true
         try {
             const data = await httpGetFrom<VpnPeersResult>(st.base, '/vpn/peers', {device_id: st.device})
             if (activeTunnel !== st) return
-            const peers = buildPeerConfigs(data, st.lanEp)
-            let changed = false
-            for (const p of peers) {
-                if ((st.endpoints.get(p.pubkey) || '') !== (p.endpoint || '')) {
-                    changed = true
-                    break
-                }
-            }
-            if (!changed) return
+            const peers = await buildPeerConfigs(data, ++st.round)
+            const fingerprint = JSON.stringify(peers)
+            if (st.fingerprint === fingerprint) return
             if (activeTunnel !== st) return
             const {invoke} = await import('@tauri-apps/api/core')
-            await invoke('vpn_up_embedded', {
-                device: st.device,
-                privateKey: st.privateKey,
-                address: st.address,
-                subnet: st.subnet,
-                keepalive: st.keepalive,
-                peers,
-            })
-            st.endpoints = new Map(peers.map(p => [p.pubkey, p.endpoint || '']))
+            const since = Math.floor(Date.now() / 1000) * 1000
+            await invoke('vpn_update_peers', {peers})
+            st.attempts = new Map(peers.map(p => [p.pubkey, st.attempts.get(p.pubkey)?.endpoint === p.endpoint
+                ? st.attempts.get(p.pubkey)! : {endpoint: p.endpoint || '', since}]))
+            st.fingerprint = fingerprint
         } catch { /* 端点还没就绪 / 节点暂时不可用，下一轮再试 */ }
+        finally { st.refreshing = false }
     }
     peerRefreshOneShot = window.setTimeout(tick, 5_000)
     peerRefreshTimer = window.setInterval(tick, 15_000)
@@ -331,7 +297,9 @@ let heartbeatDevice = ''
 let heartbeatBase = ''
 
 export async function sendVpnHeartbeat(device: string): Promise<void> {
-    const body = {device_id: device, endpoint: ''}
+    const lanEndpoints = (await import('@tauri-apps/api/core')).isTauri()
+        ? await (await import('@tauri-apps/api/core')).invoke<string[]>('vpn_lan_endpoints').catch(() => []) : []
+    const body = {device_id: device, endpoint: '', lan_endpoints: lanEndpoints}
     const bases = heartbeatBase ? [heartbeatBase] : [meshBaseUrl(), baseUrl()]
     for (const base of bases) {
         try {

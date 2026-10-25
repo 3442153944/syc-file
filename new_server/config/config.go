@@ -64,6 +64,9 @@ type VpnConfig struct {
 	// Host（含 X-Forwarded-Host）拼 <host>:ServerWGPort，这样从 LAN/DDNS/任何入口
 	// 进来的客户端都会拿到与入口一致的端点，不把组网绑死在某一个供应商。
 	ServerEndpoint string `mapstructure:"server_endpoint"`
+	// ServerLANEndpoints 服务器自身的局域网候选端点（如 192.168.31.100:51820），
+	// 让同 LAN 的客户端优先直连服务器；可用 SYC_VPN_SERVER_LAN_ENDPOINTS 以逗号分隔覆盖。
+	ServerLANEndpoints []string `mapstructure:"server_lan_endpoints"`
 	// ServerWGPort 服务器 WireGuard 监听端口（默认 51820）。
 	ServerWGPort int `mapstructure:"server_wg_port"`
 	// ServerInterface 服务器本机的 WireGuard 接口名（如 syc0）。配置后后端会自己
@@ -277,6 +280,19 @@ func Init() error {
 
 	// 开启环境变量覆盖机制 (非常重要：用于生产环境覆盖 Secret 等敏感信息)
 	viper.AutomaticEnv()
+	// 显式绑定可选的组网配置项：只开 AutomaticEnv 时，config.yaml 里没有出现的键
+	// 不会进入 Unmarshal 的键集合，环境变量也就无法覆盖到结构体。
+	for key, env := range map[string]string{
+		"vpn.server_pubkey":        "SYC_VPN_SERVER_PUBKEY",
+		"vpn.server_endpoint":      "SYC_VPN_SERVER_ENDPOINT",
+		"vpn.server_interface":     "SYC_VPN_SERVER_INTERFACE",
+		"vpn.server_wg_port":       "SYC_VPN_SERVER_WG_PORT",
+		"vpn.server_lan_endpoints": "SYC_VPN_SERVER_LAN_ENDPOINTS",
+	} {
+		if err := viper.BindEnv(key, env); err != nil {
+			return fmt.Errorf("绑定组网环境变量失败: %w", err)
+		}
+	}
 
 	if err := viper.ReadInConfig(); err != nil {
 		return fmt.Errorf("读取配置文件失败: %w", err)
@@ -284,6 +300,22 @@ func Init() error {
 
 	if err := viper.Unmarshal(Conf); err != nil {
 		return fmt.Errorf("解析配置到结构体失败: %w", err)
+	}
+
+	// 环境变量里的 LAN 端点按逗号分隔（mapstructure 不会替每个元素去空格），
+	// 这里统一去空白、去空项、去重，避免把脏候选下发给客户端。
+	if len(Conf.Vpn.ServerLANEndpoints) > 0 {
+		seen := make(map[string]bool, len(Conf.Vpn.ServerLANEndpoints))
+		normalized := make([]string, 0, len(Conf.Vpn.ServerLANEndpoints))
+		for _, raw := range Conf.Vpn.ServerLANEndpoints {
+			endpoint := strings.TrimSpace(raw)
+			if endpoint == "" || seen[endpoint] {
+				continue
+			}
+			seen[endpoint] = true
+			normalized = append(normalized, endpoint)
+		}
+		Conf.Vpn.ServerLANEndpoints = normalized
 	}
 
 	if v := strings.TrimSpace(os.Getenv("SYC_MODE")); v != "" {

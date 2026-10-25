@@ -24,6 +24,7 @@ done
 
 echo "==> docker build -> $IMAGE"
 docker build -t "$IMAGE" \
+    --build-context sys_core=../sys_core \
     --build-arg GOPROXY="$GOPROXY" \
     --build-arg GO_DL="$GO_DL" \
     .

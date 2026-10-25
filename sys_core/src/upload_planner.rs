@@ -188,7 +188,9 @@ pub enum Task {
     /// 无任务可分派（全部窗口占满）：等在途分片的结果驱动。
     Wait,
     Done,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -400,10 +402,16 @@ impl Planner {
             .filter(|n| {
                 let age = input.now_ms.checked_sub(n.measured_at_ms);
                 matches!(age, Some(0..=STATE_FRESH_MS))
-                    && n.rtt_ms.is_finite() && n.rtt_ms > 0.0 && n.rtt_ms <= 120_000.0
-                    && n.bps.is_finite() && n.bps > 0.0
+                    && n.rtt_ms.is_finite()
+                    && n.rtt_ms > 0.0
+                    && n.rtt_ms <= 120_000.0
+                    && n.bps.is_finite()
+                    && n.bps > 0.0
                     && !n.backend_node.is_empty()
-                    && input.nodes.iter().any(|cfg| cfg.id == n.id && cfg.url == n.url)
+                    && input
+                        .nodes
+                        .iter()
+                        .any(|cfg| cfg.id == n.id && cfg.url == n.url)
             })
             .map(|n| (n.id.clone(), n))
             .collect();
@@ -477,9 +485,21 @@ impl Planner {
         (self.chunk_size != 0).then_some(self.chunk_size)
     }
 
+    /// Preserve the chunk contract when resuming an existing server session.
+    pub fn set_session_chunk_size(&mut self, size: u64) -> Result<(), String> {
+        if !matches!(self.phase, Phase::Idle) || size == 0 || size > (1 << 30) {
+            return Err("invalid session chunk size or transfer already started".into());
+        }
+        self.chunk_size = size;
+        Ok(())
+    }
+
     /// 每个节点的初始窗口（调试用/日志用）。
     pub fn windows(&self) -> Vec<(String, usize)> {
-        self.nodes.iter().map(|n| (n.cfg.id.clone(), n.window)).collect()
+        self.nodes
+            .iter()
+            .map(|n| (n.cfg.id.clone(), n.window))
+            .collect()
     }
 
     /// 平台 describe/init 完成，开始传分片。此时不要求探测已完成——主节点按启动窗口先开传，
@@ -488,10 +508,7 @@ impl Planner {
         self.ensure_sized();
         self.recompute_windows();
         self.upload_id = upload_id.to_string();
-        self.pending = missing
-            .iter()
-            .map(|&i| (i, CHUNK_ATTEMPTS))
-            .collect();
+        self.pending = missing.iter().map(|&i| (i, CHUNK_ATTEMPTS)).collect();
         self.dispatch_queue = missing.iter().copied().collect();
         self.inflight.clear();
         self.phase = Phase::Transfer;
@@ -552,12 +569,15 @@ impl Planner {
             if let Some(t) = self.take_chunk_task() {
                 return Task::Chunk(t);
             }
-            if self.inflight.is_empty() && self.probing.is_empty()
+            if self.inflight.is_empty()
+                && self.probing.is_empty()
                 && self.nodes.iter().all(|n| n.window == 0)
             {
                 self.phase = Phase::Finished;
                 self.fail_reason = Some("所有上传节点均不可用，未确认分片无法重传".into());
-                return Task::Failed { reason: self.fail_reason.clone().unwrap() };
+                return Task::Failed {
+                    reason: self.fail_reason.clone().unwrap(),
+                };
             }
             return Task::Wait;
         }
@@ -605,7 +625,9 @@ impl Planner {
                 .nodes
                 .iter()
                 .filter_map(|n| {
-                    if n.probe_dead || n.transfer_dead { return None; }
+                    if n.probe_dead || n.transfer_dead {
+                        return None;
+                    }
                     let rtt = n.rtt?;
                     let bps = n.bps?;
                     Some(PersistedNodeState {
@@ -711,8 +733,8 @@ impl Planner {
     fn recompute_windows(&mut self) {
         self.ensure_sized();
         let chunk = self.chunk_size;
-        let window_cap = ((MEM_BUDGET_PER_NODE / chunk).max(1) as usize)
-            .clamp(1, MAX_PER_NODE_CONCURRENCY);
+        let window_cap =
+            ((MEM_BUDGET_PER_NODE / chunk).max(1) as usize).clamp(1, MAX_PER_NODE_CONCURRENCY);
         let main_id = self.main_id();
         let main_backend = self
             .nodes
@@ -732,8 +754,8 @@ impl Planner {
                 .map(|b| b.is_empty() || (!main_backend.is_empty() && b != main_backend))
                 .unwrap_or(false);
             // 主节点身份尚未实测时，仅让 init 锚点开传，不把其它入口加入会话。
-            let unverified = n.cfg.id != main_id
-                && (main_backend.is_empty() || n.backend_node.is_none());
+            let unverified =
+                n.cfg.id != main_id && (main_backend.is_empty() || n.backend_node.is_none());
             if dead || mismatch || unverified {
                 if dead || mismatch {
                     n.bps = None;
@@ -746,9 +768,13 @@ impl Planner {
         let measured: HashMap<String, f64> = self
             .nodes
             .iter()
-            .filter(|n| n.rtt.is_some() && !n.probe_dead && !n.transfer_dead
-                && !main_backend.is_empty()
-                && n.backend_node.as_deref() == Some(main_backend.as_str()))
+            .filter(|n| {
+                n.rtt.is_some()
+                    && !n.probe_dead
+                    && !n.transfer_dead
+                    && !main_backend.is_empty()
+                    && n.backend_node.as_deref() == Some(main_backend.as_str())
+            })
             .map(|n| (n.cfg.id.clone(), n.bps.unwrap_or(0.0)))
             .collect();
         let eff = combine_effective(&cfgs, &measured);
@@ -830,7 +856,11 @@ impl Planner {
             n.deficit += weight(n) - total_weight;
         }
         let node = &self.nodes[ni];
-        let timeout = chunk_timeout(node.rtt.unwrap_or(Duration::from_secs(1)), node.ema_bps, self.chunk_size);
+        let timeout = chunk_timeout(
+            node.rtt.unwrap_or(Duration::from_secs(1)),
+            node.ema_bps,
+            self.chunk_size,
+        );
         self.inflight.insert(
             seq,
             Inflight {
@@ -935,7 +965,9 @@ impl Planner {
     }
 
     fn on_session_gone(&mut self, seq: u64) {
-        if self.inflight.remove(&seq).is_none() { return; }
+        if self.inflight.remove(&seq).is_none() {
+            return;
+        }
         if self.phase == Phase::Transfer {
             self.phase = Phase::NeedReinit;
             self.reinit_notified = false;
@@ -963,9 +995,7 @@ impl Planner {
         if streak < STREAK_TO_INCREASE || window == 0 || window >= window_cap {
             return;
         }
-        let cooldown_ok = last_adjust
-            .map(|t| t.elapsed() >= cooldown)
-            .unwrap_or(true);
+        let cooldown_ok = last_adjust.map(|t| t.elapsed() >= cooldown).unwrap_or(true);
         if !cooldown_ok {
             return;
         }
@@ -975,7 +1005,8 @@ impl Planner {
             Some(b) if b > 0.0 => Duration::from_secs_f64(chunk as f64 / b),
             _ => Duration::ZERO,
         };
-        let budget = probe_bps.filter(|b| *b > 0.0)
+        let budget = probe_bps
+            .filter(|b| *b > 0.0)
             .map(|b| baseline + Duration::from_secs_f64(chunk as f64 / b));
         if budget.map(|b| avg <= b.mul_f64(2.0)).unwrap_or(true) {
             if let Some(n) = self.node_mut(node_id) {
@@ -1023,8 +1054,7 @@ fn probe_order(nodes: &[PlannerNodeConfig], main: &str) -> Vec<String> {
     if nodes.iter().any(|n| n.id == main) {
         order.push(main.to_string());
     }
-    let mut remaining: Vec<&PlannerNodeConfig> =
-        nodes.iter().filter(|n| n.id != main).collect();
+    let mut remaining: Vec<&PlannerNodeConfig> = nodes.iter().filter(|n| n.id != main).collect();
     // 简单拓扑：最多 n 轮，每轮放所有「父已在 order 或无父」的节点
     for _ in 0..nodes.len() {
         let mut progressed = false;
@@ -1070,7 +1100,9 @@ fn cstr(p: *const c_char) -> Result<String, i32> {
 
 fn json_string(v: &impl Serialize) -> *mut c_char {
     match serde_json::to_string(v) {
-        Ok(s) => CString::new(s).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Ok(s) => CString::new(s)
+            .map(|c| c.into_raw())
+            .unwrap_or(std::ptr::null_mut()),
         Err(_) => std::ptr::null_mut(),
     }
 }
@@ -1107,15 +1139,19 @@ pub extern "C" fn fc_planner_next(handle: *mut c_void) -> *mut c_char {
     let r = catch_unwind(AssertUnwindSafe(|| {
         let p = match planner_ref(handle) {
             Ok(p) => p,
-            Err(_) => return json_string(&Task::Failed {
-                reason: "无效句柄".into(),
-            }),
+            Err(_) => {
+                return json_string(&Task::Failed {
+                    reason: "无效句柄".into(),
+                })
+            }
         };
         json_string(&p.next_task())
     }));
-    r.unwrap_or_else(|_| json_string(&Task::Failed {
-        reason: "panic".into(),
-    }))
+    r.unwrap_or_else(|_| {
+        json_string(&Task::Failed {
+            reason: "panic".into(),
+        })
+    })
 }
 
 /// 回传结果（JSON 的 Report）。返回 0 成功，负数失败。
@@ -1179,25 +1215,49 @@ mod tests {
 
     #[test]
     fn unavailable_node_requeues_all_chunks_and_ignores_late_reports() {
-        let p = Planner::new(input(vec![node("main", None), node("hk", Some("main"))], "main", 1_000_000)).unwrap();
+        let p = Planner::new(input(
+            vec![node("main", None), node("hk", Some("main"))],
+            "main",
+            1_000_000,
+        ))
+        .unwrap();
         let mut p = run_probes(p, &[]);
         p.begin_transfer("u1", &[0, 1, 2]);
         let mut sent = Vec::new();
-        while let Task::Chunk(t) = p.next_task() { sent.push(t); }
+        while let Task::Chunk(t) = p.next_task() {
+            sent.push(t);
+        }
         let dead = &sent[0].node;
         let retired: Vec<_> = sent.iter().filter(|t| &t.node == dead).collect();
         assert!(retired.len() >= 2, "覆盖同节点多个在途分片");
-        p.report(Report::ChunkUnavailable { seq: retired[0].seq });
-        assert_eq!(p.windows().into_iter().find(|(id, _)| id == dead).unwrap().1, 0);
+        p.report(Report::ChunkUnavailable {
+            seq: retired[0].seq,
+        });
+        assert_eq!(
+            p.windows()
+                .into_iter()
+                .find(|(id, _)| id == dead)
+                .unwrap()
+                .1,
+            0
+        );
         for t in &retired {
             assert!(!p.is_chunk_inflight(t.seq));
-            p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 10 });
+            p.report(Report::ChunkOk {
+                seq: t.seq,
+                bytes: t.bytes,
+                elapsed_ms: 10,
+            });
             p.report(Report::ChunkSessionGone { seq: t.seq });
         }
         assert_eq!(p.phase_name(), "transfer");
         assert!(p.export_state().nodes.iter().all(|n| &n.id != dead));
         for t in sent.iter().filter(|t| &t.node != dead) {
-            p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+            p.report(Report::ChunkOk {
+                seq: t.seq,
+                bytes: t.bytes,
+                elapsed_ms: 100,
+            });
         }
         let mut retried = Vec::new();
         loop {
@@ -1205,7 +1265,11 @@ mod tests {
                 Task::Chunk(t) => {
                     assert_ne!(&t.node, dead);
                     retried.push(t.index);
-                    p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+                    p.report(Report::ChunkOk {
+                        seq: t.seq,
+                        bytes: t.bytes,
+                        elapsed_ms: 100,
+                    });
                 }
                 Task::Done => break,
                 task => panic!("重传不能停滞: {task:?}"),
@@ -1222,7 +1286,9 @@ mod tests {
         let p = Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap();
         let mut p = run_probes(p, &[]);
         p.begin_transfer("u1", &[0]);
-        let Task::Chunk(t) = p.next_task() else { panic!("应派发首片") };
+        let Task::Chunk(t) = p.next_task() else {
+            panic!("应派发首片")
+        };
         p.report(Report::ChunkUnavailable { seq: t.seq });
         // 重算/续传也不能把已失效的主节点 bootstrap 回调度池。
         p.resume("u2", &[0]);
@@ -1425,7 +1491,10 @@ mod tests {
                 other => panic!("意外任务: {:?}", other),
             }
         }
-        assert!(stats.get("main").copied().unwrap_or(0) >= 1, "主节点应被用到");
+        assert!(
+            stats.get("main").copied().unwrap_or(0) >= 1,
+            "主节点应被用到"
+        );
         assert!(stats.get("hk").copied().unwrap_or(0) >= 1, "hk 应被用到");
     }
 
@@ -1452,7 +1521,11 @@ mod tests {
                     pending.push(t); // 先攒着不回报，模拟在途以逼出窗口占满
                     if pending.len() >= 4 {
                         let t = pending.remove(0);
-                        p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+                        p.report(Report::ChunkOk {
+                            seq: t.seq,
+                            bytes: t.bytes,
+                            elapsed_ms: 100,
+                        });
                     }
                 }
                 Task::Probe(t) => {
@@ -1478,7 +1551,11 @@ mod tests {
                         .cloned()
                         .expect("Wait 时既无任务又无在途分片");
                     pending.remove(0);
-                    p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 100 });
+                    p.report(Report::ChunkOk {
+                        seq: t.seq,
+                        bytes: t.bytes,
+                        elapsed_ms: 100,
+                    });
                 }
             }
         }
@@ -1498,7 +1575,10 @@ mod tests {
                 match p.next_task() {
                     Task::Probe(t) => {
                         let (elapsed, bytes) = if t.kind == ProbeKind::Throughput {
-                            (if t.node == "main" { 100 } else { 4000 }, PROBE_THROUGHPUT_BYTES)
+                            (
+                                if t.node == "main" { 100 } else { 4000 },
+                                PROBE_THROUGHPUT_BYTES,
+                            )
                         } else {
                             (20, 0u64)
                         };
@@ -1523,7 +1603,11 @@ mod tests {
                 match p.next_task() {
                     Task::Chunk(t) => {
                         *counts.entry(t.node.clone()).or_default() += 1;
-                        p.report(Report::ChunkOk { seq: t.seq, bytes: t.bytes, elapsed_ms: 50 });
+                        p.report(Report::ChunkOk {
+                            seq: t.seq,
+                            bytes: t.bytes,
+                            elapsed_ms: 50,
+                        });
                     }
                     Task::Done => break,
                     Task::Failed { reason } => panic!("不应失败: {}", reason),
@@ -1634,7 +1718,11 @@ mod tests {
             assert!(guard < 50);
             match p2.next_task() {
                 Task::Probe(t) => {
-                    let backend = if t.node == "hk" { "evil-other" } else { "backend-1" };
+                    let backend = if t.node == "hk" {
+                        "evil-other"
+                    } else {
+                        "backend-1"
+                    };
                     let (elapsed, bytes) = match t.kind {
                         ProbeKind::Tiny => (20, 0u64),
                         ProbeKind::Throughput => (1600, PROBE_THROUGHPUT_BYTES),
@@ -1650,7 +1738,7 @@ mod tests {
                 Task::Wait => break,
                 other => panic!("意外: {:?}", other),
             }
-        };
+        }
         let windows = p2.windows();
         assert_eq!(windows.iter().find(|(id, _)| id == "hk").unwrap().1, 0);
         assert!(windows.iter().find(|(id, _)| id == "main").unwrap().1 >= 1);
@@ -1658,24 +1746,58 @@ mod tests {
 
     #[test]
     fn cached_identity_and_timestamp_survive_reuse() {
-        let p = run_probes(Planner::new(input(vec![node("main", None), node("other", None)], "main", 1_000_000)).unwrap(), &[]);
-        let mut i = input(vec![node("main", None), node("other", None)], "main", 1_100_000);
+        let p = run_probes(
+            Planner::new(input(
+                vec![node("main", None), node("other", None)],
+                "main",
+                1_000_000,
+            ))
+            .unwrap(),
+            &[],
+        );
+        let mut i = input(
+            vec![node("main", None), node("other", None)],
+            "main",
+            1_100_000,
+        );
         i.state = p.export_state();
-        i.state.nodes.iter_mut().find(|s| s.id == "other").unwrap().backend_node = "different".into();
+        i.state
+            .nodes
+            .iter_mut()
+            .find(|s| s.id == "other")
+            .unwrap()
+            .backend_node = "different".into();
         let mut cached = Planner::new(i).unwrap();
         cached.begin_transfer("session", &[0, 1]);
-        assert_eq!(cached.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        assert_eq!(
+            cached
+                .windows()
+                .iter()
+                .find(|(id, _)| id == "other")
+                .unwrap()
+                .1,
+            0
+        );
         let state = cached.export_state();
-        assert_eq!(state.nodes[0].measured_at_ms, 1_000_000, "复用不能刷新样本时间");
+        assert_eq!(
+            state.nodes[0].measured_at_ms, 1_000_000,
+            "复用不能刷新样本时间"
+        );
         assert_eq!(state.nodes[0].backend_node, "backend-1");
         let mut expired = input(vec![node("main", None)], "main", 1_700_001);
         expired.state = state;
-        assert!(matches!(Planner::new(expired).unwrap().next_task(), Task::Probe(_)));
+        assert!(matches!(
+            Planner::new(expired).unwrap().next_task(),
+            Task::Probe(_)
+        ));
     }
 
     #[test]
     fn cache_rejects_changed_url_future_clock_and_invalid_numbers() {
-        let p = run_probes(Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap(), &[]);
+        let p = run_probes(
+            Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap(),
+            &[],
+        );
         for case in 0..5 {
             let mut i = input(vec![node("main", None)], "main", 1_100_000);
             i.state = p.export_state();
@@ -1686,38 +1808,91 @@ mod tests {
                 3 => i.state.nodes[0].bps = -1.0,
                 _ => i.state.nodes[0].backend_node.clear(),
             }
-            assert!(matches!(Planner::new(i).unwrap().next_task(), Task::Probe(_)));
+            assert!(matches!(
+                Planner::new(i).unwrap().next_task(),
+                Task::Probe(_)
+            ));
         }
     }
 
     #[test]
     fn secondary_waits_for_main_identity_even_when_probes_finish_first() {
-        let mut p = Planner::new(input(vec![node("main", None), node("other", None)], "main", 1_000_000)).unwrap();
+        let mut p = Planner::new(input(
+            vec![node("main", None), node("other", None)],
+            "main",
+            1_000_000,
+        ))
+        .unwrap();
         let mut probes = vec![];
-        while let Task::Probe(t) = p.next_task() { probes.push(t); }
+        while let Task::Probe(t) = p.next_task() {
+            probes.push(t);
+        }
         for t in probes.iter().filter(|t| t.node == "other") {
-            p.report(Report::ProbeOk {node: t.node.clone(), kind: t.kind, bytes: t.bytes, elapsed_ms: 20, backend_node: "other-backend".into()});
+            p.report(Report::ProbeOk {
+                node: t.node.clone(),
+                kind: t.kind,
+                bytes: t.bytes,
+                elapsed_ms: 20,
+                backend_node: "other-backend".into(),
+            });
         }
         p.begin_transfer("session", &[0, 1]);
         assert_eq!(chunk_or_panic(p.next_task()).node, "main");
-        assert_eq!(p.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        assert_eq!(
+            p.windows().iter().find(|(id, _)| id == "other").unwrap().1,
+            0
+        );
         for t in probes.iter().filter(|t| t.node == "main") {
-            p.report(Report::ProbeOk {node: t.node.clone(), kind: t.kind, bytes: t.bytes, elapsed_ms: 20, backend_node: "main-backend".into()});
+            p.report(Report::ProbeOk {
+                node: t.node.clone(),
+                kind: t.kind,
+                bytes: t.bytes,
+                elapsed_ms: 20,
+                backend_node: "main-backend".into(),
+            });
         }
-        assert_eq!(p.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        assert_eq!(
+            p.windows().iter().find(|(id, _)| id == "other").unwrap().1,
+            0
+        );
     }
 
     #[test]
     fn late_throughput_cannot_revive_failed_tiny_probe() {
-        let mut p = Planner::new(input(vec![node("main", None), node("other", None)], "main", 1_000_000)).unwrap();
+        let mut p = Planner::new(input(
+            vec![node("main", None), node("other", None)],
+            "main",
+            1_000_000,
+        ))
+        .unwrap();
         let mut probes = vec![];
-        while let Task::Probe(t) = p.next_task() { probes.push(t); }
-        for t in probes.iter().filter(|t| t.node == "main") {
-            p.report(Report::ProbeOk {node: t.node.clone(), kind: t.kind, bytes: t.bytes, elapsed_ms: 20, backend_node: "backend-1".into()});
+        while let Task::Probe(t) = p.next_task() {
+            probes.push(t);
         }
-        p.report(Report::ProbeFailed {node: "other".into(), kind: ProbeKind::Tiny});
-        p.report(Report::ProbeOk {node: "other".into(), kind: ProbeKind::Throughput, bytes: PROBE_THROUGHPUT_BYTES, elapsed_ms: 20, backend_node: "backend-1".into()});
-        assert_eq!(p.windows().iter().find(|(id, _)| id == "other").unwrap().1, 0);
+        for t in probes.iter().filter(|t| t.node == "main") {
+            p.report(Report::ProbeOk {
+                node: t.node.clone(),
+                kind: t.kind,
+                bytes: t.bytes,
+                elapsed_ms: 20,
+                backend_node: "backend-1".into(),
+            });
+        }
+        p.report(Report::ProbeFailed {
+            node: "other".into(),
+            kind: ProbeKind::Tiny,
+        });
+        p.report(Report::ProbeOk {
+            node: "other".into(),
+            kind: ProbeKind::Throughput,
+            bytes: PROBE_THROUGHPUT_BYTES,
+            elapsed_ms: 20,
+            backend_node: "backend-1".into(),
+        });
+        assert_eq!(
+            p.windows().iter().find(|(id, _)| id == "other").unwrap().1,
+            0
+        );
         assert!(!p.export_state().nodes.iter().any(|s| s.id == "other"));
     }
 
@@ -1728,23 +1903,37 @@ mod tests {
         assert!(matches!(p.next_task(), Task::Probe(_)));
         assert!(matches!(p.next_task(), Task::Probe(_)));
         let old = chunk_or_panic(p.next_task());
-        p.report(Report::ChunkSessionGone {seq: old.seq});
+        p.report(Report::ChunkSessionGone { seq: old.seq });
         p.resume("new", &[0]);
-        p.report(Report::ChunkOk {seq: old.seq, bytes: old.bytes, elapsed_ms: 10});
+        p.report(Report::ChunkOk {
+            seq: old.seq,
+            bytes: old.bytes,
+            elapsed_ms: 10,
+        });
         assert!(matches!(p.next_task(), Task::Probe(_)));
         assert!(p.pending.contains_key(&0));
     }
 
     #[test]
     fn healthy_wan_can_increase_window_when_chunk_time_exceeds_rtt() {
-        let mut p = run_probes(Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap(), &[]);
+        let mut p = run_probes(
+            Planner::new(input(vec![node("main", None)], "main", 1_000_000)).unwrap(),
+            &[],
+        );
         p.begin_transfer("session", &[0, 1, 2, 3, 4]);
         let before = p.windows()[0].1;
         for _ in 0..STREAK_TO_INCREASE {
             let t = chunk_or_panic(p.next_task());
-            p.report(Report::ChunkOk {seq: t.seq, bytes: t.bytes, elapsed_ms: 3200});
+            p.report(Report::ChunkOk {
+                seq: t.seq,
+                bytes: t.bytes,
+                elapsed_ms: 3200,
+            });
         }
-        assert!(p.windows()[0].1 > before, "健康大分片不能因耗时超过 RTT 被永久锁在初始窗口");
+        assert!(
+            p.windows()[0].1 > before,
+            "健康大分片不能因耗时超过 RTT 被永久锁在初始窗口"
+        );
     }
 
     #[test]

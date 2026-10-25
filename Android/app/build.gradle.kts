@@ -104,6 +104,7 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
 
     // Network
+    implementation("com.wireguard.android:tunnel:1.0.20260102")
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
 

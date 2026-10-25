@@ -13,7 +13,7 @@ MSI_SHA256=7bfed60ad61b785c914b38b61555a975488e1d3ec472dbfb2fcdf498fca75242
 EXE_SHA256=04c71fb1a555a6ace40d3ae9113c90c4829d7ca1d6c903fd20a8d41a0e2bef94
 OUT=src-tauri/resources/wireguard/wireguard.exe
 
-[ -f "$OUT" ] && [ "${1:-}" != "--force" ] && {
+[ -f "$OUT" ] && [ -f "${OUT%/*}/wg.exe" ] && [ "${1:-}" != "--force" ] && {
   echo "已存在 $OUT（核对 sha256）"
   sha256sum -c <<<"$EXE_SHA256  $OUT" && exit 0 || echo "校验不符，重新下载" >&2
 }
@@ -30,5 +30,9 @@ EXE=$(find "$TMP/out" -iname 'wireguard.exe' | head -1)
 [ -n "$EXE" ] || { echo "MSI 里没找到 wireguard.exe" >&2; exit 1; }
 mkdir -p src-tauri/resources/wireguard
 cp "$EXE" "$OUT"
+WG=$(find "$TMP/out" -iname 'wg.exe' | head -1)
+[ -n "$WG" ] || { echo "MSI 里没找到 wg.exe" >&2; exit 1; }
+# The complete MSI was checked above; distribute its CLI with the tunnel service.
+cp "$WG" "${OUT%/*}/wg.exe"
 echo "$EXE_SHA256  $OUT" | sha256sum -c -
 echo "==> 已放入 $OUT（WireGuard for Windows $VERSION）"

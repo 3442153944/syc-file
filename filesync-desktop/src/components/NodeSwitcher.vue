@@ -39,6 +39,7 @@ const label = computed(() => netState.activeName || '未选择节点')
 /** 组网链路环境：直连 / 中继 / 未启用，显示在节点指示器左边 */
 const vpnLabel = computed(() => {
   switch (netState.vpnMode) {
+    case 'connected': return '服务器已握手'
     case 'direct': return '直连'
     case 'relay': return '中继'
     case 'idle': return '无对端'

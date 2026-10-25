@@ -64,16 +64,17 @@ func (VPNMember) TableName() string { return "vpn_member" }
 
 // VPNDevice 一台加入组网的设备。privkey_enc 为空表示私钥只在客户端。
 type VPNDevice struct {
-	ID         uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID     uint       `gorm:"not null;index;uniqueIndex:uk_vpn_device" json:"user_id"`
-	GroupID    uint       `gorm:"not null;index" json:"group_id"`
-	DeviceID   string     `gorm:"size:100;not null;uniqueIndex:uk_vpn_device" json:"device_id"`
-	PubKey     string     `gorm:"size:64;not null;uniqueIndex" json:"pubkey"`
-	PrivKeyEnc string     `gorm:"size:255" json:"-"`
-	KeySource  string     `gorm:"size:16;not null;default:client" json:"key_source"`
-	Address    string     `gorm:"size:64;not null" json:"address"`
-	Endpoint   string     `gorm:"size:128" json:"endpoint"`
-	LastSeen   *time.Time `json:"last_seen"`
+	ID           uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID       uint       `gorm:"not null;index;uniqueIndex:uk_vpn_device" json:"user_id"`
+	GroupID      uint       `gorm:"not null;index" json:"group_id"`
+	DeviceID     string     `gorm:"size:100;not null;uniqueIndex:uk_vpn_device" json:"device_id"`
+	PubKey       string     `gorm:"size:64;not null;uniqueIndex" json:"pubkey"`
+	PrivKeyEnc   string     `gorm:"size:255" json:"-"`
+	KeySource    string     `gorm:"size:16;not null;default:client" json:"key_source"`
+	Address      string     `gorm:"size:64;not null" json:"address"`
+	Endpoint     string     `gorm:"size:128" json:"endpoint"`
+	LANEndpoints string     `gorm:"type:text" json:"-"`
+	LastSeen     *time.Time `json:"last_seen"`
 	// SessionExpiresAt 用户会话的最后有效期：由登录/心跳续期，过期后服务器会移除该 peer。
 	SessionExpiresAt *time.Time `gorm:"index" json:"session_expires_at"`
 	// SuspendedUntil 临时停用到期时间：到点后 reconciler 自动恢复为 active。

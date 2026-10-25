@@ -1272,7 +1272,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "sync_core",
+ "sys_core",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -4678,21 +4678,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sync_core"
-version = "0.2.0"
-dependencies = [
- "blake3",
- "libc",
- "memmap2",
- "netstat2",
- "rayon",
- "serde",
- "serde_json",
- "sysinfo",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4710,6 +4695,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "sys_core"
+version = "0.2.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "libc",
+ "memmap2",
+ "netstat2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

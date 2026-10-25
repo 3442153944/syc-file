@@ -39,9 +39,12 @@ fn run_syc(args: &[&str]) -> Result<String, String> {
 }
 
 /// 探测公网端点并通过 heartbeat 上报（打洞前必须做一次，之后客户端每 5s 保活）。
+///
+/// 必须带 `--wg-port`：STUN 诊断 socket 用的是内核随机端口，它的 NAT 映射不能当
+/// WG 端点上报；内嵌隧道在 `vpn_up_embedded` 里固定 `ListenPort = 51821`。
 #[tauri::command]
 pub fn vpn_nat(device: String) -> Result<String, String> {
-    run_syc(&["nat", "--device", &device, "--report"])
+    run_syc(&["nat", "--device", &device, "--report", "--wg-port", "51821"])
 }
 
 /// 当前链路上报：直连 / 中继，以及每个对端的端点。
@@ -258,6 +261,176 @@ pub struct VpnPeerInput {
     pub endpoint: Option<String>,
 }
 
+#[tauri::command]
+pub fn vpn_mesh_plan(input: sys_core::mesh::Input) -> Vec<sys_core::mesh::Route> {
+    sys_core::mesh::plan(&input)
+}
+
+#[derive(Default, serde::Serialize)]
+pub struct PeerStatus {
+    pub pubkey: String,
+    pub endpoint: String,
+    pub handshake_ms: u64,
+    pub allowed_ips: Vec<String>,
+}
+
+#[tauri::command]
+pub fn vpn_peer_status(app: tauri::AppHandle) -> Result<Vec<PeerStatus>, String> {
+    #[cfg(not(windows))]
+    { let _ = app; Err("内嵌隧道仅支持 Windows".into()) }
+    #[cfg(windows)]
+    {
+        let wg = find_wireguard_exe(&app)?.with_file_name("wg.exe");
+        let read = |field| -> Result<String, String> {
+            let out = command(&wg).args(["show", "syc0", field]).output().map_err(|e| e.to_string())?;
+            if !out.status.success() { return Err("无法读取本软件 syc0 隧道状态".into()); }
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let endpoints: std::collections::HashMap<String, String> = read("endpoints")?.lines()
+            .filter_map(|line| line.split_once('\t').map(|(k,v)| (k.to_owned(),v.to_owned()))).collect();
+        let allowed: std::collections::HashMap<String, Vec<String>> = read("allowed-ips")?.lines()
+            .filter_map(|line| line.split_once('\t').map(|(k,v)| (k.to_owned(),v.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()).map(str::to_owned).collect()))).collect();
+        Ok(read("latest-handshakes")?.lines().filter_map(|line| {
+            let (key, time) = line.split_once('\t')?;
+            Some(PeerStatus { pubkey: key.into(), endpoint: endpoints.get(key).cloned().unwrap_or_default(),
+                allowed_ips: allowed.get(key).cloned().unwrap_or_default(),
+                handshake_ms: time.parse::<u64>().unwrap_or(0).saturating_mul(1000) })
+        }).collect())
+    }
+}
+
+/// Update endpoints/ownership without restarting the service or discarding its UDP mapping.
+#[tauri::command]
+pub fn vpn_update_peers(app: tauri::AppHandle, peers: Vec<VpnPeerInput>) -> Result<(), String> {
+    #[cfg(not(windows))]
+    { let _ = (app, peers); Err("内嵌隧道仅支持 Windows".into()) }
+    #[cfg(windows)]
+    {
+        let wg = find_wireguard_exe(&app)?.with_file_name("wg.exe");
+        let mut config = String::from("[Interface]\n");
+        let mut prefixes = Vec::new();
+        for peer in peers {
+            if peer.pubkey.len() != 44 || !peer.pubkey.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b)) {
+                return Err("无效的 WireGuard 公钥".into());
+            }
+            for prefix in &peer.allowed_ips {
+                let (address, bits) = prefix.split_once('/').ok_or("无效的组网路由")?;
+                let address: std::net::Ipv4Addr = address.parse().map_err(|_| "无效的组网地址")?;
+                let bits: u8 = bits.parse().map_err(|_| "无效的组网路由前缀")?;
+                if address.octets()[..2] != [172, 1] || !(16..=32).contains(&bits) {
+                    return Err("路由不在本软件的 172.1.0.0/16 组网范围内".into());
+                }
+                prefixes.push(prefix.clone());
+            }
+            config.push_str(&format!("\n[Peer]\nPublicKey = {}\nPersistentKeepalive = 5\n", peer.pubkey));
+            if !peer.allowed_ips.is_empty() {
+                config.push_str(&format!("AllowedIPs = {}\n", peer.allowed_ips.join(", ")));
+            }
+            if let Some(endpoint) = peer.endpoint.filter(|e| !e.is_empty()) {
+                if endpoint.chars().any(char::is_whitespace) { return Err("无效的组网端点".into()); }
+                config.push_str(&format!("Endpoint = {endpoint}\n"));
+            }
+        }
+        let path = std::env::temp_dir().join(format!("filesync-mesh-peers-{}.conf", uuid::Uuid::new_v4()));
+        std::fs::write(&path, config).map_err(|e| e.to_string())?;
+        let out = command(&wg).args(["syncconf", "syc0"]).arg(&path).output();
+        let _ = std::fs::remove_file(&path);
+        let out = out.map_err(|e| e.to_string())?;
+        if !out.status.success() { return Err(format!("更新隧道对端失败: {}", decode_bytes(&out.stderr))); }
+        // active 路由随 syc0 一起消失；netsh 在路由已存在时会失败（例如服务器 172.1.0.0/16
+        // 已由隧道服务装好），这属于正常情况。其余失败会让该网段的直连流量没有路由，
+        // 必须记录并让调用方下一轮重试，不能像以前那样用 `let _ =` 静默吞掉。
+        let mut route_errors: Vec<String> = Vec::new();
+        for prefix in prefixes {
+            if let Err(e) = add_active_route(&prefix) {
+                crate::logger::warn(
+                    "vpn",
+                    format!("组网路由 {prefix} 添加失败（该网段直连可能不通）: {e}"),
+                );
+                route_errors.push(format!("{prefix}: {e}"));
+            }
+        }
+        if !route_errors.is_empty() {
+            return Err(format!(
+                "隧道对端已更新，但组网路由添加失败: {}",
+                route_errors.join("; ")
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 给 syc0 添加一条「隧道关闭即消失」的 active 路由。
+///
+/// 返回 Err 只表示真正没加上；「路由已存在」是正常情况（重复同步、服务器 /16 路由），
+/// 视为成功。区分这两种情况很重要：前者意味着该网段的直连流量绕不过路由表。
+#[cfg(windows)]
+fn add_active_route(prefix: &str) -> Result<(), String> {
+    let out = command("netsh")
+        .args([
+            "interface",
+            "ipv4",
+            "add",
+            "route",
+            &format!("prefix={prefix}"),
+            "interface=syc0",
+            "store=active",
+        ])
+        .output()
+        .map_err(|e| format!("执行 netsh 失败: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // netsh 的错误输出跟随系统语言：英文 "The object already exists."、中文「对象已存在。」
+    let detail = format!("{}{}", decode_bytes(&out.stdout), decode_bytes(&out.stderr));
+    let detail = detail.trim();
+    if detail.to_ascii_lowercase().contains("already exists") || detail.contains("已存在") {
+        return Ok(());
+    }
+    Err(if detail.is_empty() {
+        format!("netsh 退出码 {:?}", out.status.code())
+    } else {
+        detail.to_string()
+    })
+}
+
+#[tauri::command]
+pub fn vpn_lan_endpoints(cidrs: Option<bool>) -> Result<Vec<String>, String> {
+    #[cfg(not(windows))]
+    { let _ = cidrs; Ok(Vec::new()) }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH};
+        use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+        let mut size = 16 * 1024;
+        let mut buffer = vec![0u8; size as usize];
+        let mut result = unsafe { GetAdaptersAddresses(AF_INET as u32, 0, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size) };
+        if result == windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW {
+            buffer.resize(size as usize, 0);
+            result = unsafe { GetAdaptersAddresses(AF_INET as u32, 0, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size) };
+        }
+        if result != 0 { return Err(format!("GetAdaptersAddresses: {result}")); }
+        let mut addresses = Vec::new();
+        let mut adapter = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        while !adapter.is_null() {
+            if unsafe { (*adapter).OperStatus } != 1 { adapter = unsafe { (*adapter).Next }; continue; }
+            let mut entry = unsafe { (*adapter).FirstUnicastAddress };
+            while !entry.is_null() {
+                let socket = unsafe { (*entry).Address.lpSockaddr };
+                if !socket.is_null() && unsafe { (*socket).sa_family } == AF_INET as u16 {
+                    let raw = unsafe { (*(socket as *const SOCKADDR_IN)).sin_addr.S_un.S_addr };
+                    let ip = std::net::Ipv4Addr::from(raw.to_ne_bytes());
+                    if ip.is_private() { addresses.push(if cidrs.unwrap_or(false) { format!("{ip}/{}", unsafe { (*entry).OnLinkPrefixLength }) } else { format!("{ip}:51821") }); }
+                }
+                entry = unsafe { (*entry).Next };
+            }
+            adapter = unsafe { (*adapter).Next };
+        }
+        addresses.sort(); addresses.dedup(); addresses.truncate(8);
+        Ok(addresses)
+    }
+}
+
 /// 用内嵌/已安装的 WireGuard for Windows 启动隧道。
 /// 配置写到 ProgramData\syc\<iface>.conf，再调 wireguard.exe 安装为系统隧道服务。
 #[tauri::command]
@@ -291,7 +464,9 @@ pub fn vpn_up_embedded(
         for p in peers {
             conf.push_str("[Peer]\n");
             conf.push_str(&format!("PublicKey = {}\n", p.pubkey));
-            conf.push_str(&format!("AllowedIPs = {}\n", p.allowed_ips.join(", ")));
+            if !p.allowed_ips.is_empty() {
+                conf.push_str(&format!("AllowedIPs = {}\n", p.allowed_ips.join(", ")));
+            }
             if let Some(ep) = p.endpoint.filter(|e| !e.trim().is_empty()) {
                 conf.push_str(&format!("Endpoint = {ep}\n"));
             }

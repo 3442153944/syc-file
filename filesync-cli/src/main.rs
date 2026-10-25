@@ -444,15 +444,30 @@ fn main() -> Result<()> {
             device,
             stun_port,
             report,
+            wg_port,
+            observed_wg_endpoint,
         } => {
             let s = load_session()?;
             let host = server_host(&s.server)?;
-            let endpoint = stun_probe(&host, stun_port)?;
-            println!("公网端点：{endpoint}");
+            // STUN 返回的是诊断 socket（内核随机本地端口）的 NAT 映射，只能用来判断公网 IP；
+            // 它的端口和 WG 监听端口不是同一个映射，绝不能当成 WG 端点上报。
+            let observed = stun_probe(&host, stun_port)?;
+            println!("公网端点（STUN 诊断 socket，端口仅用于诊断）：{observed}");
+            if let Some(port) = wg_port {
+                println!("本机 WireGuard ListenPort：{port}（不代表 NAT 外部端口）");
+            }
             if report {
                 let dev = device
                     .or_else(|| env::var("SYC_DEVICE").ok())
                     .ok_or_else(|| anyhow!("上报需要 --device（本机登记时的设备名）"))?;
+                let endpoint = observed_wg_endpoint.ok_or_else(|| {
+                    anyhow!(
+                        "无法推导 WG 外部端点：NAT 可能改变监听端口，同一 NAT 下多台设备也可能竞争端口。\
+                         请用 --observed-wg-endpoint 指定服务端从真实 WG 流量观察到的 ip:port；\
+                         诊断 STUN socket 的端点及 --wg-port 都不能替代该观测"
+                    )
+                })?;
+                let endpoint = validated_wg_endpoint(&endpoint)?;
                 let v = request(
                     "POST",
                     &format!("{}/v1/vpn/heartbeat", s.server),
@@ -461,7 +476,9 @@ fn main() -> Result<()> {
                     None,
                 )?;
                 ensure_ok(&v)?;
-                println!("已上报端点，对端可用它直连");
+                println!(
+                    "已上报显式提供的 WG 外部端点 {endpoint}（未使用 STUN 诊断端口或本地 ListenPort 推导）"
+                );
             }
         }
 
@@ -738,6 +755,23 @@ fn stun_probe(host: &str, port: u16) -> Result<String> {
     Ok(reply.strip_prefix("SYC1 ").unwrap_or(&reply).to_string())
 }
 
+/// Validate an explicitly observed WG external endpoint without rewriting its port.
+/// A diagnostic socket's mapping and a WG local ListenPort are different facts.
+fn validated_wg_endpoint(reply: &str) -> Result<String> {
+    let observed: std::net::SocketAddr = reply
+        .trim()
+        .parse()
+        .with_context(|| format!("无法解析 WG 外部端点: {reply:?}"))?;
+    if observed.port() == 0 || observed.ip().is_loopback() || observed.ip().is_unspecified() {
+        bail!(
+            "WG 外部端点 {} 是回环/未指定地址或端口为 0，拒绝上报",
+            observed
+        );
+    }
+    // SocketAddr 的 Display 会给 IPv6 自动加方括号，正好是 ip:port 端点格式。
+    Ok(observed.to_string())
+}
+
 /// 从 server URL 取主机名（http(s)://host:port/... → host）。
 fn server_host(server: &str) -> Result<String> {
     let rest = server.split("://").nth(1).unwrap_or(server);
@@ -768,4 +802,44 @@ fn print_table(v: Value) -> Result<()> {
         other => println!("{}", serde_json::to_string_pretty(&other)?),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_wg_endpoint;
+
+    #[test]
+    fn shared_nat_devices_keep_distinct_external_ports() {
+        // Android 与 Windows 都可能监听 51821，但外部映射不同，必须保留实测端口。
+        assert_eq!(
+            validated_wg_endpoint("203.0.113.5:45678").unwrap(),
+            "203.0.113.5:45678"
+        );
+        assert_eq!(
+            validated_wg_endpoint(" 203.0.113.5:45683 ").unwrap(),
+            "203.0.113.5:45683"
+        );
+        // 端口恰好保持时也不改写。
+        assert_eq!(
+            validated_wg_endpoint("203.0.113.5:51821").unwrap(),
+            "203.0.113.5:51821"
+        );
+    }
+
+    #[test]
+    fn report_endpoint_keeps_ipv6_brackets() {
+        assert_eq!(
+            validated_wg_endpoint("[2001:db8::1]:45678").unwrap(),
+            "[2001:db8::1]:45678"
+        );
+    }
+
+    #[test]
+    fn report_endpoint_rejects_bad_input() {
+        assert!(validated_wg_endpoint("203.0.113.5").is_err());
+        assert!(validated_wg_endpoint("not-an-endpoint").is_err());
+        assert!(validated_wg_endpoint("203.0.113.5:0").is_err());
+        assert!(validated_wg_endpoint("127.0.0.1:45678").is_err());
+        assert!(validated_wg_endpoint("0.0.0.0:45678").is_err());
+    }
 }

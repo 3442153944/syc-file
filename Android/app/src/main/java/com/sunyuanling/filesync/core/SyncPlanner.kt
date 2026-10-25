@@ -1,14 +1,14 @@
 // core/SyncPlanner.kt
 // upload_planner（多路径自适应上传决策核心）的 Kotlin 门面（JNI）。
 //
-// 对应 Rust 侧 Android/sync_core_jni/src/lib.rs 的 nativePlanner* 一族：核心只做决策
-// 不发 HTTP，平台（ChunkedUploader）循环 next → 执行 → report 直到 Done/Failed；
+// 对应 Rust 侧 Android/sync_core_jni/src/lib.rs 的 nativePlanner* 兼容入口。
+// 上传主线已经使用 SysUpload 驱动 sys_core::upload，不再在 Kotlin 维护执行循环；
 // Task/Report/PersistedState 一律 JSON 字符串跨边界（与 sync_core C ABI 同构），
 // 句柄是原生 Box 指针存 Long。
 //
 // 可用性复用 SyncCore 的加载结果（System.loadLibrary 幂等，同一份 .so）：
 // .so 缺失/过旧（无 planner 符号）时 available=false 或调用抛 UnsatisfiedLinkError，
-// 均被 runCatching 兜住，ChunkedUploader 自动回退固定分片单路径上传。
+// 均被 runCatching 兜住；新上传主线单独检查上传桥版本，缺失时明确报错。
 package com.sunyuanling.filesync.core
 
 import android.content.Context

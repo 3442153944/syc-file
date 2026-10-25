@@ -61,7 +61,7 @@ export interface NetStatus {
     offline: boolean
     epoch: number
     /** 组网链路状态：direct=直连 / relay=中继 / idle=没有对端 / off=未启用 */
-    vpnMode: 'off' | 'direct' | 'relay' | 'idle' | 'unknown'
+    vpnMode: 'off' | 'direct' | 'relay' | 'connected' | 'idle' | 'unknown'
 }
 
 /** ping 接口返回的简要信息 */
@@ -163,12 +163,9 @@ export async function refreshVpnMode(): Promise<void> {
         return
     }
     try {
-        // Tauri 模式直接问本地 CLI（它会按当前选中的节点拼服务器端点）；
-        // Web 模式没有 CLI，退化为后端 /v1/vpn/link。
         if (isTauri()) {
-            const {invoke} = await import('@tauri-apps/api/core')
-            const out = await invoke<string>('vpn_link', {device})
-            netState.vpnMode = out.includes('中继') ? 'relay' : out.includes('直连') ? 'direct' : 'idle'
+            const {fetchVpnLink} = await import('./vpn')
+            netState.vpnMode = (await fetchVpnLink(device)).mode
             return
         }
         // 直接用 fetch 而不是 http.ts：http.ts 反过来依赖 net.ts（registerAbort），
@@ -178,7 +175,7 @@ export async function refreshVpnMode(): Promise<void> {
             {headers: {Token: localStorage.getItem('token') || '', 'Device-Id': getDeviceId()}},
         )
         const body = await res.json()
-        netState.vpnMode = (body?.data?.mode as NetStatus['vpnMode']) ?? 'unknown'
+        netState.vpnMode = body?.data?.peers?.length ? 'unknown' : 'idle'
     } catch {
         netState.vpnMode = 'unknown'
     }

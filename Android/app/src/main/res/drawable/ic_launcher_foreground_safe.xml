@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Keep the complete logo inside the adaptive icon's 66dp safe circle.
+     The source PNG fills about 90dp of a 108dp canvas, so it needs its own inset. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@mipmap/ic_launcher_foreground"
+    android:insetLeft="19%"
+    android:insetTop="19%"
+    android:insetRight="19%"
+    android:insetBottom="19%" />

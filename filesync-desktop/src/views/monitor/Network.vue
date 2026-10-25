@@ -62,8 +62,8 @@ async function netcheck() {
       endpoint = await invoke<string>('vpn_stun', {host: serverHost(), port: 3478}).catch(e => `失败: ${e}`)
     }
     const link = await fetchVpnLink(device)
-    const modeText = link.mode === 'direct' ? '直连' : link.mode === 'relay' ? '中继' : link.mode === 'idle' ? '暂无对端' : '未知'
-    const peers = link.peers.map(p => `  ${p.device_id}  ${p.mode === 'relay' ? '中继' : '直连'}  ${p.endpoint || '(端点未知)'}`).join('\n')
+    const modeText = link.mode === 'direct' ? '直连' : link.mode === 'relay' ? '中继' : link.mode === 'idle' ? '暂无对端' : link.mode === 'connected' ? '服务器已握手' : '未知'
+    const peers = link.peers.map(p => `  ${p.device_id}  ${p.mode === 'relay' ? '中继' : p.mode === 'direct' ? '直连' : '未验证'}  ${p.endpoint || '(端点未知)'}`).join('\n')
     vpnResult.value = `设备 ${device}（${link.self.address}）\n公网端点：${endpoint}\n网络环境：${modeText}\n对端 ${link.peers.length} 个\n${peers}`
   } catch (e) {
     vpnResult.value = String(e)
@@ -98,8 +98,8 @@ async function testVpn() {
     // 没登记过就自动入组（选用户第一个已加入的组）
     const device = await ensureVpnDevice()
     const link = await fetchVpnLink(device)
-    const modeText = link.mode === 'direct' ? '直连' : link.mode === 'relay' ? '中继' : link.mode === 'idle' ? '暂无对端' : '未知'
-    const peers = link.peers.map(p => `  ${p.device_id}  ${p.mode === 'relay' ? '中继' : '直连'}  ${p.endpoint || '(端点未知)'}`).join('\n')
+    const modeText = link.mode === 'direct' ? '直连' : link.mode === 'relay' ? '中继' : link.mode === 'idle' ? '暂无对端' : link.mode === 'connected' ? '服务器已握手' : '未知'
+    const peers = link.peers.map(p => `  ${p.device_id}  ${p.mode === 'relay' ? '中继' : p.mode === 'direct' ? '直连' : '未验证'}  ${p.endpoint || '(端点未知)'}`).join('\n')
     vpnResult.value = `设备 ${device}（${link.self.address}）\n网络环境：${modeText}\n对端 ${link.peers.length} 个\n${peers}`
   } catch (e) {
     vpnResult.value = String(e)

@@ -1,6 +1,6 @@
 // Package synccore 是对 Rust 核心库 synccore 的 cgo 封装。
 //
-// 底层实现见 new_server/sync_core（Rust，staticlib）。构建产物为
+// 底层实现见仓库根目录 sys_core；new_server/sync_core 仅保留兼容构建入口。构建产物为
 // sync_core/lib/libsync_core.a，需先运行 sync_core/build.ps1 生成。
 //
 // 所有哈希均为 32 字节 blake3。Go 侧只做编排（HTTP/鉴权/Redis 会话/DB），
@@ -164,7 +164,7 @@ func Evict(path string) error {
 }
 
 // ProcessInfo 一个进程的资源占用快照。Score 是排序用的加权综合分
-//（cpu*2 + mem*1.5 + 连接数*1，各自在本轮进程集合内归一化，见 sys_info.rs），
+// （cpu*2 + mem*1.5 + 连接数*1，各自在本轮进程集合内归一化，见 sys_info.rs），
 // 网络维度缺跨平台可靠的进程级字节数接口，用连接数代理。
 type ProcessInfo struct {
 	PID            uint32  `json:"pid"`

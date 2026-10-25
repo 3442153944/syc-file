@@ -20,6 +20,9 @@ import com.sunyuanling.filesync.router.TransferSettingsDestination
 
 
 fun NavGraphBuilder.settingsGraph(navController: NavHostController) {
+    composable<com.sunyuanling.filesync.router.MeshDestination> {
+        com.sunyuanling.filesync.mesh.MeshScreen(navController)
+    }
     composable<SettingsDestination> {
         SettingsScreen(navController = navController)
     }

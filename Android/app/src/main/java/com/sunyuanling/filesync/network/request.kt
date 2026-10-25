@@ -100,6 +100,7 @@ object Request {
     }
 
     suspend fun clearToken() {
+        com.sunyuanling.filesync.mesh.MeshController.disconnect()
         com.sunyuanling.filesync.share.QuickShareController.cancelAll()
         appContext?.dataStore?.edit { preferences ->
             preferences.remove(TOKEN_KEY)

@@ -30,6 +30,12 @@ fun FailoverSettings() {
                 }.onFailure { error = it.message.orEmpty() }
             }) { Text("保存并检查入口") }
             Text("当前入口：${state.active}\n${state.message}", style = MaterialTheme.typography.bodySmall)
+            state.nodes.forEach { node ->
+                OutlinedButton(enabled = !state.checking && node.reachable && node.id != state.active,
+                    onClick = { scope.launch { NodeFailover.selectNow(node.id) } }, modifier = Modifier.fillMaxWidth()) {
+                    Text("${if (node.id == state.active) "当前" else "切换到"}：${node.id}\n${if (node.reachable) "${node.latency_ms} ms" else "不可达"}")
+                }
+            }
             if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error)
         }
     }

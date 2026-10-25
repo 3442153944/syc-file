@@ -2,7 +2,7 @@
 # 云梯后端一体镜像：Go 后端 + MySQL 8.0 + Redis，一个容器跑完。
 # ffmpeg/ffprobe 用仓库内固定版本的归档嵌入 Go 后端，运行阶段不再依赖系统 ffmpeg。
 # 构建统一用脚本：  bash docker/build.sh   （VS Code 运行配置「构建: 后端 Docker 镜像」）
-# 手动构建时上下文是 new_server/，国内需要 --build-arg GOPROXY=... --build-arg GO_DL=...，参数见脚本。
+# 手动构建时上下文是 new_server/，另传 --build-context sys_core=../sys_core，参数见脚本。
 # 运行：  docker run -d --name filesync -p 9999:9999 -v filesync-data:/data filesync-server
 
 # ── 构建阶段：Rust 编译 libsync_core.a → Go(cgo) 链接 ────────────────
@@ -19,6 +19,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 # Rust 核心单独成层：只改 Go 代码时不重编 Rust
+COPY --from=sys_core . /sys_core
 COPY sync_core ./sync_core
 RUN bash sync_core/build.sh
 # ffmpeg 归档随仓库提交并固定版本：只复制并校验，不联网下载

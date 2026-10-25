@@ -6,7 +6,7 @@
 // 且 mmap+rayon 多核并行，大文件描述计算远快于纯 Java blake3。
 //
 // 可用性：.so 缺失（未跑 NDK 构建/不支持的 ABI）或加载失败时 available=false，
-// 调用方（ChunkedUploader/SyncEngine）自动回退 Blake3Util 纯 Java 路径，仅性能差。
+// 新上传主线缺少原生库时明确报错；其他历史哈希调用按各自兼容策略处理。
 package com.sunyuanling.filesync.core
 
 import android.util.Log
@@ -47,7 +47,7 @@ object SyncCore {
     /**
      * 一趟算出文件的上传描述（叶子/树根/整文件哈希），mmap+rayon 原生并行。
      * 返回 null 表示原生不可用或计算失败（含描述与当前文件大小不自洽——文件正被写入），
-     * 调用方回退 [ChunkedUploader] 的纯 Java 单趟流式实现。
+     * 调用方处理失败；[ChunkedUploader] 不再维护另一份 Java 描述算法。
      */
     fun describe(file: File, chunkSize: Int): ChunkedUploader.Description? {
         if (!available || chunkSize <= 0) return null

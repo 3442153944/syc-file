@@ -12,6 +12,7 @@
 //! 构建：`./build.ps1`（cargo-ndk，产物进 app/src/main/jniLibs/<abi>/libsync_core_jni.so）。
 
 use std::ffi::CString;
+mod upload;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use jni::objects::{JByteArray, JObject, JString};
@@ -20,6 +21,18 @@ use jni::JNIEnv;
 
 const HASH_SIZE: usize = 32;
 
+#[no_mangle]
+pub extern "system" fn Java_com_sunyuanling_filesync_core_MeshPlanner_nativePlan(
+    mut env: JNIEnv, _this: JObject, input: JString,
+) -> jni::sys::jstring {
+    catch_unwind(AssertUnwindSafe(|| {
+        let text: String = env.get_string(&input).ok()?.into();
+        let input = serde_json::from_str::<sys_core::mesh::Input>(&text).ok()?;
+        let json = serde_json::to_string(&sys_core::mesh::plan(&input)).ok()?;
+        Some(jstring_of(&mut env, &json))
+    })).ok().flatten().unwrap_or(std::ptr::null_mut())
+}
+
 /// 节点选择与桌面共用同一决策函数，JNI 只转换 JSON，不包含平台网络操作。
 #[no_mangle]
 pub extern "system" fn Java_com_sunyuanling_filesync_core_NodeSelector_nativeSelect(
@@ -27,8 +40,8 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_NodeSelector_nativeSel
 ) -> jni::sys::jstring {
     catch_unwind(AssertUnwindSafe(|| {
         let text: String = env.get_string(&input).ok()?.into();
-        let input = serde_json::from_str::<sync_core::node_selection::SelectionInput>(&text).ok()?;
-        let selected = sync_core::node_selection::select(&input);
+        let input = serde_json::from_str::<sys_core::node_selection::SelectionInput>(&text).ok()?;
+        let selected = sys_core::node_selection::select(&input);
         let json = serde_json::to_string(&selected).ok()?;
         Some(jstring_of(&mut env, &json))
     })).ok().flatten().unwrap_or(std::ptr::null_mut())
@@ -43,7 +56,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeAbiVers
     _env: JNIEnv,
     _this: JObject,
 ) -> jint {
-    catch_unwind(|| sync_core::fc_abi_version()).unwrap_or(-1)
+    catch_unwind(|| sys_core::fc_abi_version()).unwrap_or(-1)
 }
 
 /// 计算一段数据的 blake3（32 字节）。失败返回 null。
@@ -59,7 +72,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeHashChu
             Err(_) => return jnull(),
         };
         let mut out = [0u8; HASH_SIZE];
-        if sync_core::fc_hash_chunk(bytes.as_ptr(), bytes.len(), out.as_mut_ptr()) != sync_core::FC_OK
+        if sys_core::fc_hash_chunk(bytes.as_ptr(), bytes.len(), out.as_mut_ptr()) != sys_core::FC_OK
         {
             return jnull();
         }
@@ -92,7 +105,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeMerkleR
         } else {
             bytes.as_ptr()
         };
-        if sync_core::fc_merkle_root(ptr, count, out.as_mut_ptr()) != sync_core::FC_OK {
+        if sys_core::fc_merkle_root(ptr, count, out.as_mut_ptr()) != sys_core::FC_OK {
             return jnull();
         }
         env.byte_array_from_slice(&out)
@@ -134,7 +147,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeDescrib
             let mut leaves = vec![0u8; cap * HASH_SIZE];
             let mut root = [0u8; HASH_SIZE];
             let mut file_hash = [0u8; HASH_SIZE];
-            let n = sync_core::fc_describe(
+            let n = sys_core::fc_describe(
                 c_path.as_ptr(),
                 cs,
                 leaves.as_mut_ptr(),
@@ -142,7 +155,7 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeDescrib
                 root.as_mut_ptr(),
                 file_hash.as_mut_ptr(),
             );
-            if n == sync_core::FC_ERR_ARG as i64 {
+            if n == sys_core::FC_ERR_ARG as i64 {
                 cap *= 2; // 文件比 stat 时更大：扩容重试
                 continue;
             }
@@ -166,12 +179,12 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncCore_nativeDescrib
 
 // ---------------------------------------------------------------- upload_planner JNI
 //
-// 多路径自适应上传决策核心（sync_core::upload_planner）的 JNI 包装，Kotlin 侧对应
+// 多路径自适应上传决策核心（sys_core::upload_planner）的 JNI 包装，Kotlin 侧对应
 // com.sunyuanling.filesync.core.SyncPlanner。核心只做决策不发 HTTP：平台循环
 // next → 执行 → report 直到 Done/Failed；Task/Report/PersistedState 一律 JSON 字符串
 // 跨边界（与 fc_planner_* 的 C ABI 同构），句柄是 Box 指针存 jlong。
 
-use sync_core::upload_planner as planner_core;
+use sys_core::upload_planner as planner_core;
 
 fn planner_ref(handle: jlong) -> Option<&'static mut planner_core::Planner> {
     if handle == 0 {

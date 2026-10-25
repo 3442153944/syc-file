@@ -15,9 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use netstat2::{
-    get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
-};
+use netstat2::{get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState};
 use serde::Serialize;
 use sysinfo::System;
 
@@ -152,7 +150,11 @@ fn build_snapshot(top_n: usize) -> Snapshot {
         })
         .collect();
 
-    processes.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    processes.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     processes.truncate(top_n);
 
     Snapshot {
@@ -167,7 +169,9 @@ type ConnByPid = HashMap<u32, u32>;
 
 /// 扫一遍 TCP/UDP 套接字：监听中的端口列表、按端口聚合的连接数、按 pid 聚合的
 /// 连接数（喂给上面的综合评分）。一次扫描三份都要的数据一起产出，不重复扫。
-fn scan_sockets(names: &HashMap<u32, String>) -> (Vec<ListeningPort>, Vec<PortConnCount>, ConnByPid) {
+fn scan_sockets(
+    names: &HashMap<u32, String>,
+) -> (Vec<ListeningPort>, Vec<PortConnCount>, ConnByPid) {
     let af = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
     let proto = ProtocolFlags::TCP | ProtocolFlags::UDP;
     let sockets = get_sockets_info(af, proto).unwrap_or_default();

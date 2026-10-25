@@ -1,4 +1,6 @@
-# sync_core —— 分片上传 Rust 核心库
+# sync_core —— sys_core 兼容构建入口
+
+共享实现和当前接入说明见仓库根目录 [sys_core/README.md](../../sys_core/README.md)。本目录仅保留 Go 所需的旧 crate 名、构建脚本、`libsync_core.a` 和转发头文件；核心源码已迁入 `sys_core/src/`。下文保留原 C ABI 与构建经验供兼容调用参考。
 
 `new_server` 上传服务的热路径核心库：预分配、乱序分片定位写、blake3 分片校验、
 Merkle 树根校验、整文件哈希。以 C ABI 静态库（`libsync_core.a`）形式由 Go 经 cgo 调用。

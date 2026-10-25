@@ -1,13 +1,29 @@
-# Android 组网接入准备（2026-10-19）
+# Android 组网接入（2026-10-19 方案；2026-10-25 实现状态更新）
 
-本轮只准备方案，不修改 Android 运行代码、依赖或权限。
+> 2026-10-19 本文件只准备方案，当时未修改 Android 运行代码、依赖或权限。2026-10-25 已进入实现并有部分设备验收，当前状态见下节；原方案内容保留作设计依据。
+
+## 实现状态（2026-10-25）
+
+以下代码已落地；构建与设备实测证据见 `sys_core/VALIDATION.md`，交接背景见 `HANDOFF-20261025-MESH.md`。实际文件与下方“建议实现拆分”表不完全对应：`MeshApi`/`MeshTunnelBackend`/`MeshHeartbeat` 已并入 `MeshController.kt`，页面为 `mesh/MeshScreen.kt`。
+
+- `network/NodeFailover.kt`：节点串行检测、手动切换、网络变化回调，活动期间每 30 s 检测一次。
+- `mesh/MeshController.kt`：有 root 用内核 WireGuard 独立接口（`WgQuickBackend`），无 root 回退 `GoBackend`（系统 VPN）；含 Clash 共存的临时 ip rule 与断开清理。
+- Mesh HTTP 调用：enqueue 可取消；瞬时错误保留隧道并按 2→4→8→16→30 s 退避；401/403/404 按致命错误停止；`AtomicLong` 代际号防止旧回调覆盖新会话。
+- `mesh/MeshScreen.kt`：busy 时提供取消，页面支持滚动。
+- `MeshDeviceTest.kt` 参数：`testBase`、`testPassword`、`testProxy`，可选 `testMeshViaProxy`、`expectClash`、`testPeerUrl`、`diagRoute`、`holdMeshMs`。
+
+当前限制：
+
+- 无 root 全 mesh 与“防抢占”行为尚未验收。
+- Clash SOCKS 配置卡片仅支持 TCP。
+- Clash 系统 HTTP 代理会截获 plain HTTP，组网网段请求需 `NO_PROXY` 客户端。
 
 ## 当前代码与可复用机制
 
 - `network/request.kt` 已提供 OkHttp、Token、Device-Id 和节点地址管理；组网协调 API 应复用该入口，不另建账号体系。
 - `network/Authmanager.kt` 有认证失效事件，可作为关闭组网会话和隧道的入口。
 - `service/DownloadService.kt` 已有前台服务与通知模式，但负责下载任务，不适合直接承担 VPN 生命周期。
-- 当前 Manifest 未声明 `VpnService`，Gradle 未引入 WireGuard Android tunnel 库，也没有组网专属 API/UI。
+- 2026-10-19 时 Manifest 未声明 `VpnService`、Gradle 未引入 WireGuard tunnel 库；现已引入 `com.wireguard.android:tunnel:1.0.20260102`，app 清单仍无自有 `VpnService`（无 root 路径由库自带服务承担，root 路径用内核接口），并已有 `mesh/` 包（MeshController、MeshScreen、ClashProxyCard）与 `network/NodeFailover.kt`。
 - 服务端已有 `/v1/vpn/auto-enroll`、`identity`、`peers`、`heartbeat`、`link`、`devices/my`；普通用户接入优先用这些接口，避免依赖管理员 overview。
 
 ## 两条使用路径
@@ -15,7 +31,7 @@
 1. **使用桌面代理**：手机和电脑处于可达的局域网，在支持代理配置的应用内填入电脑地址、混合端口和认证。无需在 Android 建 VPN；覆盖范围取决于该应用的 HTTP/SOCKS5 支持，不承诺系统所有 App 自动进入组网。
 2. **Android 自身组网**：采用 WireGuard 官方 Android tunnel 库的用户态后端。Android 使用 `VpnService`，首次连接由系统向用户申请 VPN 授权。只路由服务端下发的组网目标，不接管公网默认路由或系统 DNS。
 
-Android 同一用户/工作资料仅允许一个活动 VPN；运行 FileSync VPN 会影响同一资料内正在使用的其他 VPN。需要在连接前明确展示系统行为，不能默认假设能与 Clash VPN 同时运行。
+Android 同一用户/工作资料仅允许一个活动 VPN；无 root 路径运行 FileSync VPN 会影响同一资料内正在使用的其他 VPN，需要在连接前明确展示系统行为。2026-10-25 已在 root 模拟器验证 FileSync 内核独立接口与 Clash 同时运行（证据见 `sys_core/VALIDATION.md`）；无 root 路径仍不能默认与 Clash 共存。
 
 ## 建议实现拆分
 
@@ -41,7 +57,7 @@ Android 同一用户/工作资料仅允许一个活动 VPN；运行 FileSync VPN
 
 - 服务端 IPv4-only 入口到服务器节点的限制仍需独立验证；Android 页面不能用“已连上 VPN”掩盖服务器不可达。
 - 桌面代理当前只支持 TCP，不能据此宣称 Android UDP、游戏或 ICMP 已支持。
-- 引入官方库前需核对固定版本、ABI、最小 SDK、许可证与 Gradle 兼容性；本轮未增加依赖，也未执行 Android 编译/安装。
+- 官方库已引入并完成 Android 构建与模拟器安装/验收（证据见 `sys_core/VALIDATION.md`）；依赖升级时仍需复核版本、ABI、最小 SDK 与许可。
 - 现有服务端设备撤销是否立即终止已经建立的直连数据面，必须用真实连接验证，不能仅检查协调接口状态。
 
 ## 官方依据

@@ -9,7 +9,7 @@
 
 | 端 | 技术 | 同步角色 |
 |---|---|---|
-| 后端 `new_server/` | Go 1.25 + Gin + GORM；Rust 静态库 `sync_core`（cgo） | 编排：接收上报 → 冲突检测 → 派发任务 |
+| 后端 `new_server/` | Go 1.25 + Gin + GORM；Rust 内核 `sys_core`，兼容静态库 `sync_core`（cgo） | 编排：接收上报 → 冲突检测 → 派发任务 |
 | 桌面端 `filesync-desktop/` | Tauri 2 + Vue 3 + Naive UI + Rust；Windows 为主，Linux（deb）可构建 | 双向（notify watcher） |
 | Android `Android/` | Kotlin + Compose；Rust JNI（`sync_core_jni`） | 双向（inotify 递归 watcher） |
 | 鸿蒙 `harmony/` | ArkTS + ArkUI；Rust NAPI（`libfilecore.so`） | 仅下行 download_only（无 root、无监听） |
@@ -235,7 +235,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
   - 追赶（每次 WS Connected）：Phase1 上传离线变更 + Phase2 `scan`；stat 缓存避免重算；上传 / 下载各 Semaphore(2)；`syncOnWifiOnly` 门控；
   - 冲突：本地副本隔离 `.syncpending/<conflictId>/content`，相对路径单独保存；`keep_local` 按原子目录恢复，以 server_hash 为 base 回放重传；上传或上报失败保留隔离副本。旧格式缺少路径时保留供手动恢复。自写路径 10s 抑制回环。
 - **保活**：`SyncKeepAliveService`（dataSync 前台服务，30s 守护重连，`forceKeepAliveEnabled`）；root 设备进程级守护（LSPosed 看门狗）在 app 外部维护；持久化续传（`persistentDownloadEnabled`）仅 root 可见。
-- **Rust 内核**：`sync_core_jni`（cdylib，需 NDK + cargo-ndk）→ `core/SyncCore`（`describe` / `hashChunk` / `merkleRoot`）；普通上传和快传的多路径决策均走 `core/SyncPlanner` → 共享 `sync_core::upload_planner`。入口健康选择走 `core/NodeSelector` → 共享 `sync_core::node_selection`，Windows 灾备也调用同一函数；Kotlin 执行探测、HTTP、持久化和界面，不重新实现选路。缺 .so 时普通上传回退 Java 固定分片，自动选路不做 Kotlin 替代。
+- **Rust 内核**：共享实现位于仓库根目录 `sys_core/`。桌面直接链接 rlib，Android 的 `sync_core_jni` 链接同一实现；`core/SysUpload` 只适配 HTTP、取消、进度和持久化，上传执行、会话重建、分片读取、重试、快传收尾统一由 `sys_core::upload` 维护。`api/file/ChunkedUploader` 平台门面不再维护 Kotlin 上传循环，上传 JNI 缺失或过旧时明确报错。Go 的 `new_server/sync_core` 仅为旧 C ABI/构建产物的兼容壳；预分配、定位写、哈希、Merkle、节点选择和系统采集只有一份 Rust 核心实现。窗口、watcher、WS 和各端同步业务编排仍在宿主。详见 `sys_core/README.md`。
 - **快传 / 灾备**：首页“快传与分享管理”提供暂存队列、暂停恢复、取消、自动复制和服务端分享历史；`QuickShareService` 提供半透明图标投递窗与前台通知，拖入才展开，`QuickShareActivity` 接系统分享和文件 URI 授权。快传完成在同后端入口间重试，复制前校验真实 Range 下载。服务器设置可编辑备用入口与灾备开关。当前进度、验证和边界见 `Android/PROGRESS.md`。
 - **其它能力**：文件在线预览（`previewUtil/` + `ui/screen/preview/`：图 / 视频 / 音频 / PDF / 文本 / Office，Office 经 POI，**需真机验证**）；应用更新（`update/UpdateController`：check + WS 推送 + 复用下载 + FileProvider 安装 + 强制更新）；设备监控（`DevicesList`，admin 多一个「所有在线设备」分区）；同步列表分页（每页 10 条）。
 - 底部四标签：Home / Files / Monitor / Personal；导航为 Navigation-Compose 类型安全路由（`router/AppRoute.kt` 为死代码）。

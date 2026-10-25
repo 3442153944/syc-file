@@ -166,7 +166,7 @@ pub struct FileConfig {
     pub health_interval_minutes: u64,
     #[serde(default)]
     pub local_paths: BTreeMap<u64, String>,
-    /// upload_planner 持久化的测速样本，原样读写（结构见 sync_core::upload_planner::PersistedState）
+    /// upload_planner 持久化的测速样本，原样读写（结构见 sys_core::upload_planner::PersistedState）
     #[serde(default)]
     pub upload_planner_state: Option<serde_json::Value>,
 }
