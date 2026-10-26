@@ -60,8 +60,8 @@ export interface NetStatus {
     health: NodeHealth[]
     offline: boolean
     epoch: number
-    /** 组网链路状态：direct=直连 / relay=中继 / idle=没有对端 / off=未启用 */
-    vpnMode: 'off' | 'direct' | 'relay' | 'connected' | 'idle' | 'unknown'
+    /** 组网链路状态：direct=物理直连 / vpn=经系统VPN（等价中继）/ relay=中继 / idle=没有对端 / off=未启用 */
+    vpnMode: 'off' | 'direct' | 'vpn' | 'relay' | 'connected' | 'idle' | 'unknown'
 }
 
 /** ping 接口返回的简要信息 */

@@ -14,6 +14,7 @@ mod hotkey_codec;
 mod logger;
 mod net;
 mod vpn;
+mod vpn_win;
 mod mesh_proxy_commands;
 mod speedtest;
 mod sync_engine;
@@ -254,6 +255,9 @@ pub fn run() {
             vpn::vpn_mesh_plan,
             vpn::vpn_peer_status,
             vpn::vpn_interface_status,
+            vpn::vpn_underlay_status,
+            vpn_win::vpn_physical_interfaces,
+            vpn_win::vpn_egress_set,
             vpn::vpn_update_peers,
             vpn::vpn_lan_endpoints,
             vpn::vpn_up_embedded,

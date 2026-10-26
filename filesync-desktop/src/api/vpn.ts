@@ -18,14 +18,14 @@ export const meshMaintenanceError = ref('')
 export interface VpnLinkPeer {
     device_id: string
     endpoint: string
-    mode: 'direct' | 'relay' | 'unknown'
+    mode: 'direct' | 'vpn' | 'relay' | 'unknown'
     pubkey?: string
     address?: string
     role?: string
 }
 
 export interface VpnLinkResult {
-    mode: 'direct' | 'relay' | 'connected' | 'idle' | 'unknown'
+    mode: 'direct' | 'vpn' | 'relay' | 'connected' | 'idle' | 'unknown'
     self: { device_id: string; address: string }
     peers: VpnLinkPeer[]
 }
@@ -59,15 +59,62 @@ export async function fetchVpnLink(device: string): Promise<VpnLinkResult> {
     const status = await invoke<{pubkey: string; endpoint: string; handshake_ms: number; allowed_ips: string[]}[]>('vpn_peer_status').catch(() => [])
     const fresh = freshMeshHandshake
     const relay = status.find(p => p.pubkey === server?.pubkey)
+    // 查外层实际出口：只有物理网卡才可信；系统 VPN/隧道承载时内层握手再新也只能算中继。
+    const endpoints = status.filter(p => fresh(p) && p.endpoint && p.endpoint !== '(none)').map(p => p.endpoint)
+    const underlays = endpoints.length
+        ? await invoke<{endpoint: string; kind: 'physical' | 'tunnel' | 'own' | 'unknown'}[]>('vpn_underlay_status', {endpoints}).catch(() => [])
+        : []
+    const underlayOf = (endpoint?: string) => endpoint ? underlays.find(u => u.endpoint === endpoint)?.kind : undefined
     for (const peer of link.peers) {
         const direct = status.find(p => p.pubkey === peer.pubkey)
-        peer.mode = meshPeerMode(peer.address, direct, relay)
-        if (peer.mode === 'direct') peer.endpoint = direct?.endpoint || peer.endpoint
+        peer.mode = meshPeerMode(peer.address, direct, relay, Date.now(), direct ? underlayOf(direct.endpoint) : undefined)
+        if (peer.mode === 'direct' || peer.mode === 'vpn') peer.endpoint = direct?.endpoint || peer.endpoint
     }
     const others = link.peers.filter(p => p !== server)
     link.mode = !others.length ? fresh(relay) ? 'connected' : 'unknown'
-        : others.some(p => p.mode === 'direct') ? 'direct' : others.some(p => p.mode === 'relay') ? 'relay' : 'unknown'
+        : others.some(p => p.mode === 'direct') ? 'direct'
+            : others.some(p => p.mode === 'vpn') ? 'vpn'
+                : others.some(p => p.mode === 'relay') ? 'relay' : 'unknown'
     return link
+}
+
+/** 组网外层出口网卡选择（Windows）：只有直出物理网卡的握手才算可信直连。 */
+export const MESH_EGRESS_KEY = 'syc_vpn_egress'
+
+export interface PhysicalInterface {
+    name: string
+    description: string
+    if_index: number
+    addresses: string[]
+    gateways: string[]
+}
+
+export function storedEgress(): number | null {
+    const raw = localStorage.getItem(MESH_EGRESS_KEY)
+    if (raw === null || raw === '') return null
+    const value = Number(raw)
+    return Number.isFinite(value) ? value : null
+}
+
+export async function fetchPhysicalInterfaces(): Promise<PhysicalInterface[]> {
+    const {invoke, isTauri} = await import('@tauri-apps/api/core')
+    if (!isTauri()) return []
+    return invoke<PhysicalInterface[]>('vpn_physical_interfaces').catch(() => [])
+}
+
+export async function setMeshEgress(ifIndex: number | null): Promise<void> {
+    if (ifIndex === null) localStorage.removeItem(MESH_EGRESS_KEY)
+    else localStorage.setItem(MESH_EGRESS_KEY, String(ifIndex))
+    const {invoke, isTauri} = await import('@tauri-apps/api/core')
+    if (isTauri()) await invoke('vpn_egress_set', {ifIndex})
+}
+
+/** 隧道就绪后把已保存的出口网卡选择应用下去（路由只对当前隧道端点生效）。 */
+export async function applyStoredEgress(): Promise<void> {
+    if (localStorage.getItem(MESH_EGRESS_KEY) === null) return
+    const {invoke, isTauri} = await import('@tauri-apps/api/core')
+    if (!isTauri()) return
+    await invoke('vpn_egress_set', {ifIndex: storedEgress()}).catch(() => {})
 }
 
 /** 本机隧道实际配置的服务器端点（用于判断直连还是中转） */
@@ -301,6 +348,8 @@ async function doStartEmbeddedTunnel(device: string): Promise<string> {
         peers,
     })
     if (!stillAuthenticated()) throw new Error('登录身份已变化，已取消组网连接')
+    // 已保存的出口网卡选择在隧道就绪后立即应用（只对当前隧道端点生效）。
+    await applyStoredEgress()
     activeTunnel = {
         device,
         pubkey: identity.pubkey,

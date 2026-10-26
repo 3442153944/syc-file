@@ -8,6 +8,7 @@ import {
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
 import MeshProxyPanel from '@/components/MeshProxyPanel.vue'
+import MeshEgressSelect from '@/components/MeshEgressSelect.vue'
 import {meshNodeName} from '@/api/net'
 import {
   ensureVpnDevice, fetchMeshOverview, startEmbeddedTunnel, stopEmbeddedTunnel,
@@ -201,8 +202,9 @@ const columns: DataTableColumns<MeshRow> = [
       const link = peerLinks.value.find(p => p.device_id === r.device_id)
       const mode = link?.mode
       const text = mode === 'direct' ? r.role === 'server' ? '服务器已握手' : '直连已握手'
+        : mode === 'vpn' ? '经系统VPN（中继）'
         : mode === 'relay' ? '经中继（待测）' : '未验证'
-      return h(NTag, {size: 'small', bordered: false, type: mode === 'direct' ? 'success' : mode === 'relay' ? 'warning' : 'default'}, {default: () => text})
+      return h(NTag, {size: 'small', bordered: false, type: mode === 'direct' ? 'success' : mode === 'vpn' || mode === 'relay' ? 'warning' : 'default'}, {default: () => text})
     },
   },
   {title: '组 / 机构', key: 'group', width: 180, render: r => `${r.group || '-'} / ${r.org || '-'}`},
@@ -216,7 +218,7 @@ const columns: DataTableColumns<MeshRow> = [
     render: r => (r.last_seen ? new Date(r.last_seen).toLocaleString() : '-'),
   },
   {title: '端点', key: 'endpoint', ellipsis: {tooltip: true},
-    render: r => peerLinks.value.find(p => p.device_id === r.device_id && p.mode === 'direct')?.endpoint || r.endpoint || '(无可用候选)'},
+    render: r => peerLinks.value.find(p => p.device_id === r.device_id && (p.mode === 'direct' || p.mode === 'vpn'))?.endpoint || r.endpoint || '(无可用候选)'},
   {
     title: '操作', key: 'actions', width: 300,
     render: r => {
@@ -302,6 +304,9 @@ onBeforeUnmount(() => {
 
     <NAlert v-if="meshMaintenanceError" type="warning" style="margin-bottom: 12px">{{ meshMaintenanceError }}</NAlert>
     <MeshProxyPanel v-if="isTauri()"/>
+    <div v-if="isTauri()" style="margin-bottom: 12px">
+      <MeshEgressSelect/>
+    </div>
 
     <NCard size="small" style="margin-bottom: 12px">
       <NSpace align="center">

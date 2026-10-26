@@ -120,17 +120,7 @@ fn run_ping(target: String, count: Option<u8>, iface: Option<String>) -> Result<
         cmd.arg(&target);
     }
     let out = cmd.output().map_err(|e| format!("执行 ping 失败: {e}"))?;
-    let decode = |b: &[u8]| -> String {
-        #[cfg(windows)]
-        {
-            let (text, _, _) = encoding_rs::GBK.decode(b);
-            text.into_owned()
-        }
-        #[cfg(not(windows))]
-        {
-            String::from_utf8_lossy(b).into_owned()
-        }
-    };
+    let decode = decode_bytes;
     let stdout = decode(&out.stdout);
     if out.status.success() {
         Ok(stdout)
@@ -161,6 +151,12 @@ fn build_ping(target: &str, count: u8, iface: Option<&str>) -> Command {
 fn decode_bytes(b: &[u8]) -> String {
     #[cfg(windows)]
     {
+        // Windows 命令输出的代码页跟随控制台：UTF-8 控制台就是 UTF-8（Windows
+        // Terminal / chcp 65001），传统控制台是 GBK。先按 UTF-8 严格校验，失败再
+        // 按 GBK 解码，否则会把「对象已存在」这类本地化提示解成乱码而误判成未知错误。
+        if let Ok(text) = std::str::from_utf8(b) {
+            return text.to_owned();
+        }
         let (text, _, _) = encoding_rs::GBK.decode(b);
         text.into_owned()
     }
@@ -325,6 +321,141 @@ pub fn vpn_peer_status(app: tauri::AppHandle) -> Result<Vec<PeerStatus>, String>
     }
 }
 
+#[derive(serde::Serialize)]
+pub struct UnderlayStatus {
+    pub endpoint: String,
+    pub interface: String,
+    pub if_type: u32,
+    pub kind: String,
+}
+
+/// 判定组网对端外层实际走哪块网卡：`physical` 才是真正直连；
+/// `tunnel` 表示被系统里其它 VPN/虚拟网卡承载（例如阿里云 WireGuard、Clash、Tailscale），
+/// 此时内层握手成功也只算中继，不能标成直连。
+#[tauri::command]
+pub fn vpn_underlay_status(endpoints: Vec<String>) -> Result<Vec<UnderlayStatus>, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = endpoints;
+        Ok(Vec::new())
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::NetworkManagement::IpHelper::{
+            ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex, GetBestRoute, GetIfEntry2,
+            MIB_IF_ROW2, MIB_IPFORWARDROW,
+        };
+        use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+        let own_index = {
+            let alias: Vec<u16> = "syc0".encode_utf16().chain(std::iter::once(0)).collect();
+            let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+            let status = unsafe { ConvertInterfaceAliasToLuid(alias.as_ptr(), &mut luid) };
+            if status == 0 {
+                let mut index: u32 = 0;
+                if unsafe { ConvertInterfaceLuidToIndex(&luid, &mut index) } == 0 {
+                    Some(index)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        let mut result = Vec::new();
+        for endpoint in endpoints {
+            let Some(address) = endpoint_ipv4(&endpoint) else { continue };
+            let mut status = UnderlayStatus {
+                endpoint: endpoint.clone(),
+                interface: String::new(),
+                if_type: 0,
+                kind: "unknown".into(),
+            };
+            let mut route: MIB_IPFORWARDROW = unsafe { std::mem::zeroed() };
+            // dwDestAddr 为网络字节序；from_ne_bytes 保证内存字节与 IP 字节顺序一致。
+            let best = unsafe { GetBestRoute(u32::from_ne_bytes(address.octets()), 0, &mut route) };
+            if best == 0 {
+                let index = route.dwForwardIfIndex;
+                let mut entry: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
+                entry.InterfaceIndex = index;
+                if unsafe { GetIfEntry2(&mut entry) } == 0 {
+                    let alias = wide_string(&entry.Alias);
+                    let description = wide_string(&entry.Description);
+                    status.interface = alias.clone();
+                    status.if_type = entry.Type;
+                    status.kind =
+                        classify_underlay(own_index == Some(index), entry.Type, &alias, &description)
+                            .to_string();
+                }
+            }
+            result.push(status);
+        }
+        Ok(result)
+    }
+}
+
+/// 纯函数便于单测：只有物理网卡才返回 `physical`。
+#[cfg(windows)]
+fn classify_underlay(own: bool, if_type: u32, alias: &str, description: &str) -> &'static str {
+    // IANA ifType：6=ethernet、71=ieee80211、53=propVirtual、131=tunnel。
+    // WireGuard/Tailscale/Mihomo 的虚拟网卡在 Windows 上报告 53，TAP 报告 6，
+    // 所以还要结合名字关键词，避免把 TAP/虚拟网卡当成物理网卡。
+    const IF_TYPE_ETHERNET_CSMACD: u32 = 6;
+    const IF_TYPE_IEEE80211: u32 = 71;
+    const IF_TYPE_TUNNEL: u32 = 131;
+    const IF_TYPE_PROP_VIRTUAL: u32 = 53;
+    if own {
+        return "own";
+    }
+    let text = format!("{alias} {description}").to_ascii_lowercase();
+    let virtual_keyword = [
+        "wireguard",
+        "wintun",
+        "tunnel",
+        "tap",
+        "tun",
+        "vpn",
+        "tailscale",
+        "zerotier",
+        "mihomo",
+        "clash",
+        "virtual",
+        "vmware",
+        "hyper-v",
+        "vethernet",
+        "loopback",
+        "meta",
+    ]
+    .iter()
+    .any(|keyword| text.contains(keyword));
+    if if_type == IF_TYPE_TUNNEL || if_type == IF_TYPE_PROP_VIRTUAL || virtual_keyword {
+        return "tunnel";
+    }
+    if if_type == IF_TYPE_ETHERNET_CSMACD || if_type == IF_TYPE_IEEE80211 {
+        return "physical";
+    }
+    "unknown"
+}
+
+#[cfg(windows)]
+fn endpoint_ipv4(endpoint: &str) -> Option<std::net::Ipv4Addr> {
+    let value = endpoint.trim();
+    if let Ok(address) = value.parse() {
+        return Some(address);
+    }
+    let host = if let Some(rest) = value.strip_prefix('[') {
+        rest.split(']').next()?
+    } else {
+        value.rsplit_once(':').map(|(host, _)| host).unwrap_or(value)
+    };
+    host.parse().ok()
+}
+
+#[cfg(windows)]
+fn wide_string(buffer: &[u16]) -> String {
+    let end = buffer.iter().position(|unit| *unit == 0).unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..end])
+}
+
 /// Update endpoints/ownership without restarting the service or discarding its UDP mapping.
 #[tauri::command]
 pub fn vpn_update_peers(app: tauri::AppHandle, peers: Vec<VpnPeerInput>) -> Result<(), String> {
@@ -393,6 +524,10 @@ pub fn vpn_update_peers(app: tauri::AppHandle, peers: Vec<VpnPeerInput>) -> Resu
                 route_errors.join("; ")
             ));
         }
+        // 用户指定了出口网卡时，把当前所有隧道端点的 /32 路由固定到该物理网卡，
+        // 让打洞流量真正直出物理网卡，而不是被系统 VPN 抢走。
+        crate::vpn_win::apply_routes_from_wg(&wg)
+            .map_err(|error| format!("隧道对端已更新，但出口网卡路由下发失败: {error}"))?;
         Ok(())
     }
 }
@@ -403,31 +538,43 @@ pub fn vpn_update_peers(app: tauri::AppHandle, peers: Vec<VpnPeerInput>) -> Resu
 /// 视为成功。区分这两种情况很重要：前者意味着该网段的直连流量绕不过路由表。
 #[cfg(windows)]
 fn add_active_route(prefix: &str) -> Result<(), String> {
-    let out = command("netsh")
-        .args([
-            "interface",
-            "ipv4",
-            "add",
-            "route",
-            &format!("prefix={prefix}"),
-            "interface=syc0",
-            "store=active",
-        ])
-        .output()
-        .map_err(|e| format!("执行 netsh 失败: {e}"))?;
+    let run = |operation: &str| -> Result<std::process::Output, String> {
+        command("netsh")
+            .args([
+                "interface",
+                "ipv4",
+                operation,
+                "route",
+                &format!("prefix={prefix}"),
+                "interface=syc0",
+                "store=active",
+            ])
+            .output()
+            .map_err(|e| format!("执行 netsh 失败: {e}"))
+    };
+    let out = run("add")?;
     if out.status.success() {
         return Ok(());
     }
-    // netsh 的错误输出跟随系统语言：英文 "The object already exists."、中文「对象已存在。」
+    // netsh 的错误输出跟随系统语言/代码页，不能只靠字符串判断。「路由已存在」
+    // 是正常情况（WireGuard AllowedIPs 已自动建路由、重复同步、服务器 /16 路由），
+    // 先按本地化提示快速放行，再做一次「删除后重加」保证任意语言下都幂等收敛。
     let detail = format!("{}{}", decode_bytes(&out.stdout), decode_bytes(&out.stderr));
     let detail = detail.trim();
     if detail.to_ascii_lowercase().contains("already exists") || detail.contains("已存在") {
         return Ok(());
     }
-    Err(if detail.is_empty() {
-        format!("netsh 退出码 {:?}", out.status.code())
+    let _ = run("delete");
+    let retry = run("add")?;
+    if retry.status.success() {
+        return Ok(());
+    }
+    let retry_detail = format!("{}{}", decode_bytes(&retry.stdout), decode_bytes(&retry.stderr));
+    let retry_detail = retry_detail.trim();
+    Err(if retry_detail.is_empty() {
+        format!("netsh 退出码 {:?}", retry.status.code())
     } else {
-        detail.to_string()
+        retry_detail.to_string()
     })
 }
 
@@ -439,6 +586,15 @@ pub fn vpn_lan_endpoints(cidrs: Option<bool>) -> Result<Vec<String>, String> {
     {
         use windows_sys::Win32::NetworkManagement::IpHelper::{GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH};
         use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
+        // 只广播本机物理网卡的地址：系统 VPN/隧道网卡（外部 WireGuard 的 10.x、
+        // Clash/Tailscale/TAP 等）绝不能作为 LAN 候选，否则对端会拿它打洞——握手能过
+        // 也只是一路绕经系统 VPN 的中继。
+        fn pwstr(value: *const u16) -> String {
+            if value.is_null() { return String::new(); }
+            let mut len = 0usize;
+            unsafe { while *value.add(len) != 0 { len += 1; } }
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(value, len) })
+        }
         let mut size = 16 * 1024;
         let mut buffer = vec![0u8; size as usize];
         let mut result = unsafe { GetAdaptersAddresses(AF_INET as u32, 0, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size) };
@@ -451,6 +607,13 @@ pub fn vpn_lan_endpoints(cidrs: Option<bool>) -> Result<Vec<String>, String> {
         let mut adapter = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
         while !adapter.is_null() {
             if unsafe { (*adapter).OperStatus } != 1 { adapter = unsafe { (*adapter).Next }; continue; }
+            let alias = pwstr(unsafe { (*adapter).FriendlyName });
+            let description = pwstr(unsafe { (*adapter).Description });
+            let if_type = unsafe { (*adapter).IfType };
+            if classify_underlay(false, if_type, &alias, &description) != "physical" {
+                adapter = unsafe { (*adapter).Next };
+                continue;
+            }
             let mut entry = unsafe { (*adapter).FirstUnicastAddress };
             while !entry.is_null() {
                 let socket = unsafe { (*entry).Address.lpSockaddr };
@@ -552,7 +715,7 @@ fn wireguard_candidates(
 }
 
 #[cfg(windows)]
-fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn find_wireguard_exe(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     // 只使用自依赖：安装后用随包分发的副本，开发模式用仓库内那份。
     // 刻意不回退到 Program Files，避免和用户自己安装/运行的 WireGuard 混用。
     let resource_dir = app.path().resource_dir().ok();
@@ -597,6 +760,8 @@ pub async fn vpn_down_embedded(
     #[cfg(windows)]
     {
         let _ = iface;
+        // 隧道停止后撤掉本次为"出口网卡"添加的 /32 主机路由，恢复系统路由。
+        crate::vpn_win::clear_egress_routes();
         let exe = find_wireguard_exe(&app)?;
         let out = tauri::async_runtime::spawn_blocking(move || {
             command(exe)
@@ -661,5 +826,18 @@ mod tests {
         let candidates = wireguard_candidates(Some(&install), Some(&install), None);
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0], install.join("resources").join("wireguard").join("wireguard.exe"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decodes_utf8_and_gbk_console_output() {
+        use super::decode_bytes;
+        // UTF-8 控制台（Windows Terminal / chcp 65001）直接透传。
+        assert_eq!(decode_bytes("对象已存在。".as_bytes()), "对象已存在。");
+        // 传统中文控制台输出的 GBK 字节仍应可读，避免再把「已存在」误判成未知错误。
+        let gbk = [
+            0xB6u8, 0xD4, 0xCF, 0xF3, 0xD2, 0xD1, 0xB4, 0xE6, 0xD4, 0xDA, 0xA1, 0xA3,
+        ];
+        assert_eq!(decode_bytes(&gbk), "对象已存在。");
     }
 }

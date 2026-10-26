@@ -36,11 +36,12 @@ const dotClass = computed(() => {
 
 const label = computed(() => netState.activeName || '未选择节点')
 
-/** 组网链路环境：直连 / 中继 / 未启用，显示在节点指示器左边 */
+/** 组网链路环境：直连 / 经系统VPN（等价中继）/ 中继 / 未启用，显示在节点指示器左边 */
 const vpnLabel = computed(() => {
   switch (netState.vpnMode) {
     case 'connected': return '服务器已握手'
     case 'direct': return '直连'
+    case 'vpn': return '经系统VPN'
     case 'relay': return '中继'
     case 'idle': return '无对端'
     case 'off': return '未组网'
@@ -51,6 +52,7 @@ const vpnLabel = computed(() => {
 const vpnType = computed(() => {
   switch (netState.vpnMode) {
     case 'direct': return 'success'
+    case 'vpn': return 'warning'
     case 'relay': return 'warning'
     case 'idle': return 'default'
     default: return 'default'

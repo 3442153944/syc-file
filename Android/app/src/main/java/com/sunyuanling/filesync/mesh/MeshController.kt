@@ -467,13 +467,21 @@ object MeshController {
         }
     }
 
+    /**
+     * 外部 VPN/Clash/Tailscale 等隧道网卡上的地址不能当作 LAN 候选或本地网段：
+     * 否则对端会拿这些地址打洞，握手成功也只是绕经系统 VPN 的中继，不是真直连。
+     */
+    private fun usableUnderlay(iface: NetworkInterface): Boolean =
+        iface.isUp && !iface.isLoopback && !iface.isVirtual && !iface.isPointToPoint &&
+            listOf("tun", "tap", "wg", "ppp", "clash", "mihomo", "tailscale", "zt").none { iface.name.startsWith(it) }
+
     private fun lanEndpoints(): List<String> = NetworkInterface.getNetworkInterfaces().toList()
-        .filter { it.isUp && !it.isLoopback && !it.name.startsWith("tun") }
+        .filter { usableUnderlay(it) }
         .flatMap { it.inetAddresses.toList() }.filter { it.isSiteLocalAddress && !it.isLoopbackAddress }
         .map { if (it is java.net.Inet6Address) "[${it.hostAddress}]:$listenPort" else "${it.hostAddress}:$listenPort" }.distinct().take(8)
 
     private fun localNetworks(): List<String> = NetworkInterface.getNetworkInterfaces().toList()
-        .filter { it.isUp && !it.isLoopback }.flatMap { it.interfaceAddresses }
+        .filter { usableUnderlay(it) }.flatMap { it.interfaceAddresses }
         .filter { it.address is java.net.Inet4Address && it.address.isSiteLocalAddress }
         .map { "${it.address.hostAddress}/${it.networkPrefixLength}" }
 
