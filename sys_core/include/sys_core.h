@@ -89,13 +89,17 @@ void fc_free_string(char *s);
 
 /* -------------------------------------------------------------------------
  * v5 新增：服务端分片接收器（VM 单 Go 进程、单实例部署设计，进程内状态）。
- * Go 侧只做 HTTP/鉴权/会话元数据，分片缓存、接收位图、abandoned 判断、
- * 批量定位写、最终校验全部在 Rust 内完成；热路径不访问 Redis。
+ * Go 侧只做 HTTP/鉴权/会话元数据，分片落盘、接收位图、abandoned 判断、
+ * 最终校验全部在 Rust 内完成；热路径不访问 Redis。
+ *
+ * write-through（用户定架构）：**没有应用层内存池**。accept 直接把 Go 传入的
+ * &[u8] 定位写到临时文件对应 offset，写成功才置 accepted+persisted；写失败返回
+ * FC_ERR_IO 且不置位（客户端重试本片）。大文件无缓落盘，坏片走罕见全量兜底。
  *
  * 增量校验（消除 complete 的整文件 BLAKE3 峰值）：accept 时单线程算每片叶子，
- * flush 落盘成功时按文件序增量喂整文件 blake3；正常 complete 的 finalize 只做
- * O(片数) 比对，不重读/重算整文件。只有重启/快传恢复（open 带 persisted 位图）、
- * 乱序暂存超限、叶子失配等异常场景才回退全量 fc_finalize。ABI 签名不变。
+ * 收片过程中按文件序增量喂整文件 blake3（乱序片从页缓存回读补齐）；正常 complete
+ * 的 finalize 只做 O(片数) 比对，不重读/重算整文件。只有重启/快传恢复（open 带
+ * persisted 位图）、chunk 数过大、叶子失配等异常才回退全量 fc_finalize。ABI 签名不变。
  *
  * 所有字符串要求 UTF-8，负数为 FC_ERR_*；全部入口 catch_unwind。
  * ------------------------------------------------------------------------- */
@@ -112,7 +116,8 @@ typedef struct fc_accept_result {
 /* 打开/注册会话接收器。
  * 返回 1 = 本次新建；0 = 已存在（参数一致，未覆盖）；负 = FC_ERR_*。
  * persisted_bitmap 可为 NULL/len=0（首次上传）；为 Redis 中持久化位图（重启恢复用）。
- * 只用该位图初始化 accepted+persisted；内存里仅 accepted（未 flush）的片永不进快照。
+ * 只用该位图初始化 accepted+persisted；write-through 下写成功即置位，快照位图滞后部分
+ * 由客户端重传覆盖（覆盖写安全）。
  * 传入非空 persisted 位图（重启恢复/快传秒传）时没有增量校验状态，该会话 finalize
  * 自动走全量 fc_finalize 路径。
  * ttl_secs = 0 时用 24h 默认。 */
@@ -124,18 +129,19 @@ int32_t fc_receiver_open(const char *upload_id, const char *path,
 /* 1 = 存在；0 = 不存在 */
 int32_t fc_receiver_exists(const char *upload_id);
 
-/* 接收一个分片（数据由 Rust 拷贝进 pending，调用方保留所有权）。
+/* 接收一个分片（write-through：直接把调用方数据定位写到临时文件 offset，不拷贝/不缓存；
+ * 调用方保留所有权，返回后即可复用缓冲区）。
  * 校验顺序：receiver 存在 → index 边界 → 长度符合（末片=total-index*chunk）→
  *           attempt 是否 abandoned（attempt_id 可 NULL/空=不校验）→ 是否 duplicate。
- * 同时单线程算该片 blake3 叶子供 complete 增量比对（重复片跳过）。
+ * 写盘成功才置 accepted+persisted、received++、dirty，并单线程算该片 blake3 叶子供
+ * complete 增量比对（重复片跳过）；写失败返回 FC_ERR_IO 且不置位。
  * 成功时填充 out（不可为 NULL）。duplicate=1 时 received/complete 照常填。 */
 int32_t fc_receiver_accept(const char *upload_id, uint32_t index,
                            const uint8_t *data, size_t len,
                            const char *attempt_id, fc_accept_result *out);
 
-/* 把 pending 按 index 排序、合并相邻片后批量定位写（不传 expected_leaf，不做提前 BLAKE3）。
- * 每组写成功后才置 persisted、移出 pending、扣 pending_bytes，并把该组按文件序喂给
- * 增量整文件 blake3（乱序组暂存至前序补齐，暂存超 64MiB 则回退全量校验）。out 可为 NULL。 */
+/* write-through 没有 pending 批量 IO：只把增量 hasher 尽量推进到已落盘的连续前缀
+ *（乱序补齐的分片从页缓存回读），并刷新活动时间。Go 在 complete 前调用。out 可为 NULL。 */
 int32_t fc_receiver_flush(const char *upload_id, fc_accept_result *out);
 
 /* 导出位图到调用方缓冲区（cap 必须 >= ceil(chunk_count/8)，否则 FC_ERR_ARG）。
@@ -146,9 +152,9 @@ int64_t fc_receiver_bitmap_persisted(const char *upload_id, uint8_t *out, size_t
 /* Go 成功 PersistBitmap 后调用：清 dirty。receiver 不存在返回 FC_ERR_NOT_FOUND。 */
 int32_t fc_receiver_snapshot_ack(const char *upload_id);
 
-/* flush 全部 pending 后校验并移除 receiver（Go 随后 fc_move）。
- * 正常路径为增量校验的 O(片数) 比对：叶子在 accept 时算好、整文件哈希在 flush 时
- * 增量喂完，complete 不重读/重算整文件（毫秒级）；只有重启/快传恢复、乱序暂存超限、
+/* 校验并移除 receiver（Go 随后 fc_move）；write-through 下没有待刷数据。
+ * 正常路径为增量校验的 O(片数) 比对：叶子在 accept 时算好、整文件哈希在收片过程中
+ * 已按序喂完，complete 不重读/重算整文件（毫秒级）；只有重启/快传恢复、chunk 数过大、
  * 叶子失配后等异常才回退全量 fc_finalize（语义与之前完全一致）。
  * - FC_OK：receiver 已移除；out_file_hash32 写整文件哈希。
  * - FC_ERR_LEAF_MISMATCH：*out_bad_index=首个坏块，清该位，保留 receiver。

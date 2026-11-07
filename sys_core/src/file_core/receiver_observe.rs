@@ -1,7 +1,7 @@
 //! 接收器的可观测性与调优参数。
 //!
 //! 独立成文件便于控制单文件规模；这里只有纯内存状态，不做 IO。
-//! - `Tuning`：open 的可注入参数（生产用 Default，测试注入小 pending/hash_wait 上限）。
+//! - `Tuning`：open 的可注入参数（生产用 Default；write-through 无内存池，只剩 TTL/节流）。
 //! - `FinalizeStats`：每次 finalize 走的是增量快路径还是全量 `fc_finalize`、重读多少字节。
 //!   测试用它断言「正常 complete 没有整文件重算」，运维也可用来确认回退发生率。
 
@@ -10,29 +10,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
-use super::receiver::{DEFAULT_TTL, PENDING_CAP, SNAPSHOT_INTERVAL};
-use super::receiver_incremental::HASH_WAIT_CAP;
+use super::receiver::{DEFAULT_TTL, SNAPSHOT_INTERVAL};
 
-/// open 的可调参数。生产路径 [`Default`] 即生产配置；测试注入小值验证边界。
+/// open 的可调参数。生产路径 [`Default`] 即生产配置。
 #[derive(Debug, Clone, Copy)]
 pub struct Tuning {
-    /// 单会话 pending 内存上限。
-    pub pending_cap: usize,
     /// 快照信号节流间隔。
     pub snapshot_interval: Duration,
     /// 会话空闲 TTL。
     pub ttl: Duration,
-    /// 增量校验 `hash_wait` 暂存上限。
-    pub hash_wait_cap: usize,
 }
 
 impl Default for Tuning {
     fn default() -> Self {
         Self {
-            pending_cap: PENDING_CAP,
             snapshot_interval: SNAPSHOT_INTERVAL,
             ttl: DEFAULT_TTL,
-            hash_wait_cap: HASH_WAIT_CAP,
         }
     }
 }

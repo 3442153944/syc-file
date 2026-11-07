@@ -38,8 +38,8 @@ func chunkedLeaves(t *testing.T, data []byte, chunkSize int) (leaves []byte, roo
 	return leaves, root, chunks
 }
 
-// TestReceiverAcceptFlushFinalize 覆盖：open/exists、乱序 accept、duplicate、未落盘位图、
-// flush 后 persisted 位图、snapshot ack、abandoned 优先级、finalize 成功移除 receiver。
+// TestReceiverAcceptFlushFinalize 覆盖：open/exists、乱序 accept、duplicate、write-through 落盘位图、
+// flush 收尾（全量回退时才真正需要它）、snapshot ack、abandoned 优先级、finalize 成功移除 receiver。
 func TestReceiverAcceptFlushFinalize(t *testing.T) {
 	const chunkSize = 1024
 	const total = 3*chunkSize + 100 // 4 片，末片短
@@ -96,7 +96,7 @@ func TestReceiverAcceptFlushFinalize(t *testing.T) {
 		t.Fatalf("重复 accept: %+v err=%v", res, err)
 	}
 
-	// 未 flush：persisted 位图应全 0；accepted 位图已有 0、2
+	// write-through：accept 成功即已定位写盘，persisted 位图应与 accepted 一致，不依赖 flush。
 	accepted, err := ReceiverBitmapAccepted(id, 4)
 	if err != nil || len(accepted) != 1 {
 		t.Fatalf("ReceiverBitmapAccepted: len=%d err=%v", len(accepted), err)
@@ -105,9 +105,11 @@ func TestReceiverAcceptFlushFinalize(t *testing.T) {
 		t.Fatalf("accepted 位图 = %08b, 期望 10100000", accepted[0])
 	}
 	persisted, err := ReceiverBitmapPersisted(id, 4)
-	if err != nil || len(persisted) != 1 || persisted[0] != 0 {
-		t.Fatalf("flush 前 persisted 位图应全 0: %v err=%v", persisted, err)
+	if err != nil || len(persisted) != 1 || persisted[0] != 0b1010_0000 {
+		t.Fatalf("accept 后 persisted 位图 = %08b, 期望 10100000（write-through 应立即落盘）: err=%v",
+			persisted, err)
 	}
+	// flush 在 write-through 下退化为整文件哈希收尾/全量回退时的兜底，幂等且不改变位图。
 	if _, err := ReceiverFlush(id); err != nil {
 		t.Fatalf("ReceiverFlush: %v", err)
 	}

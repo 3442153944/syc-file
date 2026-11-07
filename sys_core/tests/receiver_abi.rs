@@ -1,4 +1,4 @@
-﻿//! 服务端分片接收器的 C ABI 测试（从 receiver_contract.rs 拆出以控制单文件规模）。
+//! 服务端分片接收器的 C ABI 测试（从 receiver_contract.rs 拆出以控制单文件规模）。
 //!
 //! 覆盖：fc_accept_result 填充、位图导出 MSB-first、错误码映射、finalize 坏块/成功路径。
 use std::ffi::CString;
@@ -236,7 +236,7 @@ fn c_abi_accept_result_bitmap_and_error_codes() {
         FC_ERR_ARG
     );
 
-    // 位图导出（MSB-first：收 0 和 3 → 1001_0000）
+    // 位图导出（MSB-first）：write-through 收到即落盘，accepted 与 persisted 同步
     assert_eq!(
         sys_core::fc_receiver_flush(id.as_ptr(), std::ptr::null_mut()),
         FC_OK
@@ -256,7 +256,32 @@ fn c_abi_accept_result_bitmap_and_error_codes() {
         ),
         1
     );
-    assert_eq!(persisted, [0b1001_0000]);
+    assert_eq!(persisted, [0b1001_0000], "write-through：收到即落盘");
+    // 补齐 1,2 → 四片全部落盘
+    for index in [1u32, 2] {
+        let part = chunk_of(&data, index, chunk);
+        let mut out = FcAcceptResult::default();
+        assert_eq!(
+            sys_core::fc_receiver_accept(
+                id.as_ptr(),
+                index,
+                part.as_ptr(),
+                part.len(),
+                std::ptr::null(),
+                &mut out,
+            ),
+            FC_OK
+        );
+    }
+    assert_eq!(
+        sys_core::fc_receiver_bitmap_persisted(
+            id.as_ptr(),
+            persisted.as_mut_ptr(),
+            persisted.len()
+        ),
+        1
+    );
+    assert_eq!(persisted, [0b1111_0000]);
     // cap 不足 → ARG
     assert_eq!(
         sys_core::fc_receiver_bitmap_accepted(id.as_ptr(), bits.as_mut_ptr(), 0),

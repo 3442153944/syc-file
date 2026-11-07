@@ -181,8 +181,9 @@ fn write_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
 }
 
 /// 批量/单次定位写 helper：走进程内写句柄缓存 + 平台定位写，不做叶子校验。
-/// 服务端分片接收器（receiver.rs）把相邻片合并后用它一次写入；
-/// `fc_chunk_write` 的落盘路径也复用它，保证两条路径的句柄缓存/失败逐出行为一致。
+/// 服务端分片接收器（receiver.rs）在 accept 时用它把每个分片 write-through 直接写到
+/// 临时文件 offset；`fc_chunk_write` 的落盘路径也复用它，保证两条路径的句柄缓存/
+/// 失败逐出行为一致。
 ///
 /// 调用方负责保证 `offset + data.len()` 在文件范围内（receiver 在 accept 时已按
 /// total_size/chunk_size 校验）。失败时逐出该路径句柄，让下次重开（文件可能已变）。

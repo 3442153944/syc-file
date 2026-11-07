@@ -163,36 +163,29 @@ fn out_of_order_and_duplicate_accept_then_finalize_ok() {
     assert_eq!(dup.received, 4);
     assert!(dup.complete);
 
-    // accepted 位图 MSB-first：4 片全收 → 0b1111_0000
+    // write-through：accepted 与 persisted 同步置位（MSB-first：4 片全收 → 0b1111_0000）
     assert_eq!(
         bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
         "11110000"
     );
-    // 未 flush 前 persisted 必须为空（不变式 1）
-    assert_eq!(
-        bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
-        "00000000"
-    );
-
-    let flushed = flush_ok(session.id());
-    assert_eq!(flushed.received, 4);
-    assert!(flushed.complete);
-    // 4 个连续片合并成一次写
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.write_calls, 1);
-    assert_eq!(stats.written_bytes, 14);
     assert_eq!(
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
         "11110000"
     );
 
-    // 增量校验状态：叶子齐全、整文件已按序喂完。
-    // finalize 的增量快路径只做 O(片数) 比对，不重读/重算整文件。
-    let inc = receiver::flush_stats(session.id()).unwrap();
-    assert!(inc.incremental);
-    assert_eq!(inc.hashed_bytes, 14);
-    assert_eq!(inc.leaf_digests_ready, 4);
-    assert_eq!(inc.hash_wait_bytes, 0);
+    // flush 只推进增量 hasher（顺序上传时已推进完），没有批量 IO
+    let flushed = flush_ok(session.id());
+    assert_eq!(flushed.received, 4);
+    assert!(flushed.complete);
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.write_calls, 4, "每片一次定位写");
+    assert_eq!(stats.written_bytes, 14);
+    assert_eq!(stats.max_write_bytes, 4);
+    assert_eq!(stats.hashed_bytes, 14);
+    assert_eq!(stats.readback_bytes, 6, "乱序补齐回读 chunk1/chunk3");
+    assert_eq!(stats.persisted, 4);
+    assert_eq!(stats.leaf_digests_ready, 4);
+    assert!(stats.incremental);
 
     let leaves = leaves_of(&data, chunk);
     let hash = receiver::finalize(
@@ -281,66 +274,70 @@ fn accept_ok_err(id: &str, index: u32, data: &[u8]) -> ReceiverError {
 }
 
 // ---------------------------------------------------------------------------
-// pending 上限 / 相邻合并 / 写失败
+// write-through 直写 / 重复 / 写失败
 // ---------------------------------------------------------------------------
-
 #[test]
-fn pending_cap_triggers_flush_and_adjacent_chunks_merge_into_one_write() {
+fn write_through_writes_each_chunk_immediately_and_duplicate_no_rewrite() {
     let temp = Temp::new();
     let session = Session::new();
     let data = pattern(16);
     let (chunk, total) = (4usize, 16u64);
     prealloc(temp.path(), total);
-    // 注入 10B pending 上限：第 3 片（8+4>10）前触发 flush
-    assert!(receiver::open_with_tuning(
+    assert!(open_default(
         session.id(),
         temp.path(),
         total,
         chunk as u64,
-        4,
-        None,
-        Tuning {
-            pending_cap: 10,
-            ..Tuning::default()
-        },
-    )
-    .unwrap());
+        4
+    ));
 
-    assert!(!accept_ok(session.id(), 0, chunk_of(&data, 0, chunk)).snapshot_ready);
-    assert!(!accept_ok(session.id(), 1, chunk_of(&data, 1, chunk)).snapshot_ready);
-    // 第 3 片触发：先 flush 0,1（合并成一次写），再收 2
-    let out = accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
-    assert_eq!(out.received, 3);
+    let expected_persisted = ["10000000", "11000000", "11100000", "11110000"];
+    // 逐片 write-through：accept 返回后文件对应 offset 就是该片内容（无内存池）
+    for (n, index) in (0u32..4).enumerate() {
+        let out = accept_ok(session.id(), index, chunk_of(&data, index, chunk));
+        assert_eq!(out.received, n as i64 + 1);
+        assert!(!out.duplicate);
+        assert_eq!(out.complete, n == 3);
+        let on_disk = std::fs::read(temp.path()).unwrap();
+        let start = index as usize * chunk;
+        assert_eq!(
+            &on_disk[start..start + chunk],
+            chunk_of(&data, index, chunk),
+            "accept 后数据必须已在盘上"
+        );
+        assert_eq!(
+            bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
+            expected_persisted[n]
+        );
+        assert_eq!(
+            bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
+            expected_persisted[n]
+        );
+    }
+    // 每片一次物理写，最大单写等于单片；顺序上传无回读
     let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.write_calls, 1, "0,1 必须合并成一次写");
-    assert_eq!(stats.written_bytes, 8);
-    assert_eq!(
-        bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
-        "11000000"
-    );
+    assert_eq!(stats.write_calls, 4);
+    assert_eq!(stats.written_bytes, 16);
+    assert_eq!(stats.max_write_bytes, 4);
+    assert_eq!(stats.readback_bytes, 0);
+    assert_eq!(stats.hashed_bytes, 16);
+    assert_eq!(stats.accepted, 4);
+    assert_eq!(stats.persisted, 4);
 
-    assert!(accept_ok(session.id(), 3, chunk_of(&data, 3, chunk)).complete);
-    assert_eq!(
-        receiver::flush_stats(session.id()).unwrap().write_calls,
-        1,
-        "未超上限不应触发 flush"
-    );
+    // 重复片不重复写、不重复计数
+    let dup = accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
+    assert!(dup.duplicate);
+    assert_eq!(dup.received, 4);
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.write_calls, 4, "重复片不应重复写盘");
+    assert_eq!(stats.written_bytes, 16);
+
+    // complete 前的 flush 无批量 IO：只确认 hasher 已推进
     let out = flush_ok(session.id());
     assert!(out.complete);
-    // 2,3 合并成第二次写
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.write_calls, 2);
-    assert_eq!(stats.written_bytes, 16);
-    assert_eq!(
-        bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
-        "11110000"
-    );
+    assert_eq!(receiver::flush_stats(session.id()).unwrap().write_calls, 4);
     assert_eq!(std::fs::read(temp.path()).unwrap(), data);
 
-    // 增量路径同样给出正确整文件哈希
-    let inc = receiver::flush_stats(session.id()).unwrap();
-    assert!(inc.incremental);
-    assert_eq!(inc.hashed_bytes, 16);
     let leaves = leaves_of(&data, chunk);
     let hash = receiver::finalize(
         session.id(),
@@ -353,12 +350,12 @@ fn pending_cap_triggers_flush_and_adjacent_chunks_merge_into_one_write() {
 }
 
 #[test]
-fn flush_failure_keeps_pending_and_persisted_unset() {
+fn write_failure_on_accept_leaves_bits_unset_then_retry_succeeds() {
     let temp = Temp::new();
     let session = Session::new();
     let data = pattern(8);
     let (chunk, total) = (4usize, 8u64);
-    // 故意不预分配：写盘必然失败
+    // 故意不预分配：write-through 首次写盘失败
     assert!(open_default(
         session.id(),
         temp.path(),
@@ -366,54 +363,40 @@ fn flush_failure_keeps_pending_and_persisted_unset() {
         chunk as u64,
         2
     ));
-    assert!(!accept_ok(session.id(), 0, chunk_of(&data, 0, chunk)).duplicate);
-    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
 
     assert_eq!(
-        receiver::flush(session.id()).unwrap_err(),
+        receiver::accept(session.id(), 0, chunk_of(&data, 0, chunk), None).unwrap_err(),
         ReceiverError::Io
     );
-    // 写失败：pending 保留、accepted 不变、persisted 不置位（不变式 4）
+    // 写失败：不置位、不计数（write-through 严格“写成功才算收到”）
     assert_eq!(
         bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
-        "11000000"
+        "00000000"
     );
     assert_eq!(
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
         "00000000"
     );
     let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.write_calls, 1);
+    assert_eq!(stats.write_calls, 0);
     assert_eq!(stats.written_bytes, 0);
-    // 写失败的组不得进入增量 hasher / 叶子完成状态
     assert_eq!(stats.hashed_bytes, 0);
+    assert_eq!(stats.accepted, 0);
+    assert_eq!(stats.persisted, 0);
 
-    // 补上文件后重试：pending 还在，一次合并写成功
+    // 补上文件后重试本片：成功写盘并置位
     prealloc(temp.path(), total);
-    assert!(flush_ok(session.id()).complete);
+    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
     let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.write_calls, 2);
-    assert_eq!(stats.written_bytes, 8);
-    assert_eq!(stats.hashed_bytes, 8);
-    assert_eq!(stats.leaf_digests_ready, 2);
+    assert_eq!(stats.write_calls, 1);
+    assert_eq!(stats.written_bytes, 4);
+    assert_eq!(stats.hashed_bytes, 4);
+    assert_eq!(stats.accepted, 1);
+    assert_eq!(stats.persisted, 1);
     assert_eq!(
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
-        "11000000"
+        "10000000"
     );
-
-    let leaves = leaves_of(&data, chunk);
-    let hash = receiver::finalize(
-        session.id(),
-        Some(&leaves_flat(&leaves)),
-        Some(&merkle_root(&leaves)),
-    )
-    .unwrap();
-    assert_eq!(hash, file_hash(&data));
-    // 写失败重试成功后走增量快路径，complete 不重读整文件
-    let fin = last_finalize_stats(session.id()).unwrap();
-    assert!(fin.incremental);
-    assert_eq!(fin.file_read_bytes, 0);
-    assert_eq!(fin.hashed_bytes, 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -535,7 +518,7 @@ fn open_is_idempotent_and_never_overwrites_existing_state() {
     );
     assert_eq!(
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
-        "00000000"
+        "10000000"
     );
     assert!(accept_ok(session.id(), 0, chunk_of(&data, 0, 4)).duplicate);
 
@@ -576,15 +559,12 @@ fn crash_recovery_restores_only_persisted_chunks() {
 
     accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
     accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
-    flush_ok(session.id());
-    // 第 3 片只进内存 pending，不得进 persisted（不变式 2）
-    accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
-    assert_eq!(
-        bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
-        "11100000"
-    );
+    // write-through：收到即落盘，persisted 快照包含 0,1（Go 侧低频快照可能滞后）
     let persisted_snapshot = receiver::bitmap_persisted(session.id()).unwrap();
     assert_eq!(bitmap(&persisted_snapshot), "11000000");
+    let before = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(before.persisted, 2);
+    assert_eq!(before.hashed_bytes, 8);
 
     // 模拟进程重启：丢掉 receiver，用 Redis persisted 位图恢复
     receiver::close(session.id()).unwrap();
@@ -599,7 +579,7 @@ fn crash_recovery_restores_only_persisted_chunks() {
         0
     )
     .unwrap());
-    // accepted 只含 persisted 片，内存里仅 accepted 的片不得被恢复
+    // 只恢复 persisted 片；内存里没有其它状态
     assert_eq!(
         bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
         "11000000"
@@ -610,7 +590,7 @@ fn crash_recovery_restores_only_persisted_chunks() {
     );
     // 有 persisted 位图 = 崩溃恢复，没有增量状态 → finalize 必须走全量路径
     assert!(!receiver::flush_stats(session.id()).unwrap().incremental);
-    // 补传第 3 片 → received 从 2 变 3
+    // 补传第 3 片（write-through 直接写盘）→ received 从 2 变 3
     let out = accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
     assert_eq!(out.received, 3);
     assert!(out.complete);
@@ -797,18 +777,15 @@ fn snapshot_ready_is_throttled_by_interval_and_ack_clears_dirty() {
     )
     .unwrap());
 
-    // accept 本身只改 accepted → 不置 dirty、不发信号
-    assert!(!accept_ok(session.id(), 0, chunk_of(&data, 0, chunk)).snapshot_ready);
-    // 首次 flush 产生 persisted 变化 → 立即发信号
-    let out = flush_ok(session.id());
-    assert!(out.snapshot_ready);
+    // write-through 每次写盘都置 dirty：首次 accept 立即发快照信号
+    assert!(accept_ok(session.id(), 0, chunk_of(&data, 0, chunk)).snapshot_ready);
     receiver::snapshot_ack(session.id()).unwrap();
 
-    // ack 后 dirty 清空：再 flush 同一批（无新写）也不发信号
+    // ack 后 dirty 清空：没有新写时 flush 不发信号
     assert!(!flush_ok(session.id()).snapshot_ready);
 
-    // 节流窗口内：新写产生了 dirty 但不发信号
-    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
+    // 节流窗口内：新写产生 dirty 但不发信号
+    assert!(!accept_ok(session.id(), 1, chunk_of(&data, 1, chunk)).snapshot_ready);
     assert!(!flush_ok(session.id()).snapshot_ready);
     // 等过窗口后信号恢复（dirty 仍未被 ack）
     std::thread::sleep(interval + Duration::from_millis(40));

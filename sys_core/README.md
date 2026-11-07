@@ -8,7 +8,7 @@
 
 - `src/file_core/file_ops.rs`：文件预分配、句柄缓存、定位写、blake3/Merkle 校验、描述计算及稳定 `fc_*` C ABI。
 - `src/file_core/file.rs`：Rust 类型化文件描述、整文件哈希、范围校验和完整分片读取；与 C ABI 共用计算实现。
-- `src/file_core/receiver*.rs`：服务端分片接收器（VM 单 Go 进程内状态）：有界 pending 缓存、accepted/persisted 双位图、abandoned 判定与 open 前缓冲、相邻片合并的批量定位写、**增量校验**（accept 逐片算叶子、flush 随落盘按文件序增量算整文件 blake3，complete 只做 O(片数) 比对，不重读整文件）、finalize 坏块清理与异常回退全量 `fc_finalize`；Go 只做 HTTP/鉴权/会话元数据与低频 Redis 快照。按职责拆分：`receiver.rs`（状态与热路径）、`receiver_incremental.rs`（增量校验状态机）、`receiver_finalize.rs`（complete 快/慢路径）、`receiver_bitset.rs`、`receiver_observe.rs`（调优与统计）、`receiver_ffi.rs`（C ABI）。
+- `src/file_core/receiver*.rs`：服务端分片接收器（VM 单 Go 进程内状态）：**write-through 逐片直写**（accept 直接把调用方数据定位写到临时文件 offset，无应用层内存池/不缓存；写成功才置位，失败返回 IO 由客户端重试）、accepted/persisted 双位图、abandoned 判定与 open 前缓冲、**增量校验**（accept 逐片算叶子、收片过程中按文件序增量算整文件 blake3，乱序片从页缓存回读；complete 只做 O(片数) 比对，不重读整文件）、finalize 坏块清理与异常回退全量 `fc_finalize`；Go 只做 HTTP/鉴权/会话元数据与低频 Redis 快照。按职责拆分：`receiver.rs`（状态与热路径）、`receiver_incremental.rs`（增量校验状态机）、`receiver_finalize.rs`（complete 快/慢路径）、`receiver_bitset.rs`、`receiver_observe.rs`（调优与统计）、`receiver_ffi.rs`（C ABI）。
 - `src/net_core/upload_planner/`：测速决策、父链瓶颈、同后端校验、选片、AIMD、超时、重试预算和全链路恢复；公开 DTO、状态机、C ABI 与测试分文件维护。
 - `src/net_core/upload/`（`upload` feature）：固定/自适应上传执行循环、秒传、会话重建、取消、旧尝试放弃、普通/快传收尾和入口下载检查。
 - `src/net_core/upload/host.rs`：宿主 HTTP、节点切换取消、日志和状态持久化接口，不读取登录凭证或全局配置。
@@ -20,9 +20,11 @@
 
 自适应上传在所有入口暂时断开时返回 `recover` 任务并周期性重新探测，不进入终态；宿主等待 `after_ms` 后继续取任务。恢复期间保留缺失分片和会话，取消语义不变。数据校验失败、重试耗尽和后端不一致不属于可恢复断网。
 
-服务端收片（VM）由 `file_core/receiver` 承担：Go 收到 HTTP 分片后整块交给进程内 receiver，分片缓存、接收/落盘位图、abandoned 判定和批量定位写都在 Rust；普通收片热路径不访问 Redis，Go 只在 `snapshot_ready` 信号下低频回写【已落盘】位图快照（约 1s 节流，实际由 flush 触发；complete 前无条件快照一次）用于崩溃恢复。因此服务端接收器按单 Go 进程/单实例部署设计，多实例需实例亲和。
+服务端收片（VM）由 `file_core/receiver` 承担：Go 收到 HTTP 分片后整块交给进程内 receiver，**write-through 逐片定位直写**、接收/落盘位图、abandoned 判定都在 Rust（没有应用层分片内存池，不缓存分片数据）；普通收片热路径不访问 Redis，Go 只在 `snapshot_ready` 信号下低频回写【已落盘】位图快照（约 1s 节流；complete 前无条件快照一次）用于崩溃恢复。write-through 下位图快照最多滞后约 1s，滞后部分客户端重传覆盖写安全。因此服务端接收器按单 Go 进程/单实例部署设计，多实例需实例亲和。
 
-complete 不再对整文件做一次并行 BLAKE3（465MB 约 0.66 CPU 秒 × 多核的峰值）：叶子哈希摊到 accept、整文件哈希摊到 flush（单线程、随传输期分散），finalize 正常路径只做 O(片数) 比对；只有重启/快传恢复（open 带 persisted 位图，没有增量状态）、乱序暂存超 64MiB、叶子失配后等异常才回退全量 `fc_finalize`。观测统计（增量/全量 finalize 次数与读盘字节）见 `receiver_observe.rs`，仅供测试与运维，不影响 ABI。
+complete 不再对整文件做一次并行 BLAKE3（465MB 约 0.66 CPU 秒 × 多核的峰值）：叶子哈希摊到 accept、整文件哈希摊到收片过程（单线程、随传输期分散；乱序片从页缓存回读补齐），finalize 正常路径只做 O(片数) 比对；只有重启/快传恢复（open 带 persisted 位图，没有增量状态）、chunk 数超过 262144、叶子失配后等异常才回退全量 `fc_finalize`。观测统计（逐片写次数/最大单写/回读字节/增量与全量 finalize、读盘字节）见 `receiver_observe.rs`，仅供测试与运维，不影响 ABI。
+
+write-through 让 accept 的返回即代表“数据已落盘”：写失败直接返回 IO 且不置位（客户端重试本片），不会出现应用层攒批/批量 flush 的长停顿；坏片属于小概率事件，finalize 发现后清位并回退一次全量校验，不需要为它常驻内存。
 
 宿主保留 HTTP 连接/平台证书、登录身份、权限、界面、进度显示、配置落点和应用生命周期。服务端保留 HTTP 鉴权、Redis 会话、数据库及同步业务编排。桌面 `sync_engine`、watcher、WS、剪贴板和窗口等应用模块不属于上传/文件内核。
 

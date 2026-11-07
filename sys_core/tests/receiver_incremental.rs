@@ -1,10 +1,12 @@
-//! 增量校验专项测试（方向 A：消除 complete 的 finalize 全核哈希爆发）。
+//! write-through 收片与增量校验专项测试（task-11）。
 //!
 //! 从 `receiver_contract.rs` 拆出以控制单文件规模；覆盖：
-//! - 乱序 accept + 乱序 flush 组 → 增量整文件 hash 仍正确，并与 blake3/describe/fc_finalize 对拍；
-//! - 正常顺序下跨 64MiB pending 上限的多组 flush，complete 走增量快路径；
-//! - `hash_wait` 暂存超限 → 回退全量 finalize，结果仍正确；
-//! - 统计计数器断言快路径确实没有整文件重读/重算。
+//! - accept 后立即定位写盘（读回 offset 内容一致）、无内存池、重复片不重复写；
+//! - 顺序多片写穿时 hasher 顺序推进、readback_bytes==0、complete 走增量快路径；
+//! - 乱序 accept 时 hasher 通过页缓存回读推进，hash 仍正确；
+//! - 回读失败/坏片 → 单向 fallback，finalize 走全量；补传后成功；
+//! - open(persisted) 与 chunk 数过大 → incremental=false，finalize 全量；
+//! - 统计断言逐片直写、无批量。
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +21,7 @@ struct Temp(PathBuf);
 
 impl Temp {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("sys-core-incr-{}", uuid::Uuid::new_v4())))
+        Self(std::env::temp_dir().join(format!("sys-core-wt-{}", uuid::Uuid::new_v4())))
     }
 
     fn path(&self) -> &Path {
@@ -115,46 +117,59 @@ fn bitmap(bits: &[u8]) -> String {
         .join(" ")
 }
 
+/// 确定性分片内容（不保留整文件，测试侧只维护顺序 blake3 作对照）。
+fn generated_chunk(index: usize, len: usize) -> Vec<u8> {
+    (0..len).map(|i| ((index * 131 + i) % 251) as u8).collect()
+}
+
 // ---------------------------------------------------------------------------
-// 乱序 accept + 乱序 flush 组
+// accept 即定位写盘（无内存池）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn out_of_order_flush_groups_keep_incremental_hash_correct() {
+fn accept_writes_through_immediately_and_reports_stats() {
     let temp = Temp::new();
     let session = Session::new();
-    let data = pattern(14); // 末片 2B，覆盖非整除边界
-    let (chunk, total) = (4usize, 14u64);
+    let data = pattern(16);
+    let (chunk, total) = (4usize, 16u64);
     prealloc(temp.path(), total);
     open_default(session.id(), temp.path(), total, chunk as u64, 4);
 
-    // 先落盘末片：偏移 12 > hashed 0 → 进 hash_wait 暂存
-    accept_ok(session.id(), 3, chunk_of(&data, 3, chunk));
-    flush_ok(session.id());
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.hashed_bytes, 0);
-    assert_eq!(stats.hash_wait_bytes, 2);
-    assert!(stats.incremental);
-
-    // 再落盘 0,1：hashed 0→8，末片仍在前方等 8..12 的洞
     accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
-    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
-    flush_ok(session.id());
+    // accept 返回后数据已在盘上：直接读 offset 内容一致
+    assert_eq!(
+        &std::fs::read(temp.path()).unwrap()[..4],
+        chunk_of(&data, 0, chunk)
+    );
     let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.hashed_bytes, 8);
-    assert_eq!(stats.hash_wait_bytes, 2);
-
-    // 补上 2：hashed 8→12 后按序 drain 末片 → 整文件喂完
-    accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
-    flush_ok(session.id());
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.hashed_bytes, 14);
-    assert_eq!(stats.hash_wait_bytes, 0);
-    assert_eq!(stats.leaf_digests_ready, 4);
+    assert_eq!(stats.write_calls, 1, "每片一次物理写");
+    assert_eq!(stats.max_write_bytes, 4);
+    assert_eq!(stats.written_bytes, 4);
+    assert_eq!(stats.hashed_bytes, 4);
+    assert_eq!(stats.readback_bytes, 0);
+    assert_eq!(stats.accepted, 1);
+    assert_eq!(stats.persisted, 1);
+    assert!(stats.incremental);
+    // accepted 与 persisted 同步置位（write-through）
     assert_eq!(
         bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
-        "11110000"
+        "10000000"
     );
+    assert_eq!(
+        bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
+        "10000000"
+    );
+
+    // 顺序收完 → 无回读、增量状态就绪，complete 走快路径
+    for index in 1..4 {
+        accept_ok(session.id(), index, chunk_of(&data, index, chunk));
+    }
+    flush_ok(session.id());
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.write_calls, 4);
+    assert_eq!(stats.readback_bytes, 0);
+    assert_eq!(stats.hashed_bytes, 16);
+    assert_eq!(stats.persisted, 4);
 
     let leaves = leaves_of(&data, chunk);
     let hash = receiver::finalize(
@@ -163,54 +178,46 @@ fn out_of_order_flush_groups_keep_incremental_hash_correct() {
         Some(&merkle_root(&leaves)),
     )
     .unwrap();
-    // 与独立计算的 blake3 / describe / fc_finalize 三方对拍
     assert_eq!(hash, file_hash(&data));
-    assert_eq!(
-        sys_core::file::describe(temp.path(), chunk)
-            .unwrap()
-            .file_hash_hex,
-        hex::encode(hash)
-    );
-    let c_path = cstr(temp.path().to_str().unwrap());
-    let (mut final_hash, mut bad) = ([0u8; 32], -2i64);
-    assert_eq!(
-        sys_core::fc_finalize(
-            c_path.as_ptr(),
-            chunk as u64,
-            total,
-            std::ptr::null(),
-            0,
-            std::ptr::null(),
-            final_hash.as_mut_ptr(),
-            &mut bad,
-        ),
-        FC_OK
-    );
-    assert_eq!(final_hash, hash);
-    // 快路径统计：整文件已增量喂完，complete 零读盘
+    assert_eq!(std::fs::read(temp.path()).unwrap(), data);
     let fin = last_finalize_stats(session.id()).unwrap();
     assert!(fin.incremental);
     assert_eq!(fin.file_read_bytes, 0);
-    assert_eq!(fin.hashed_bytes, 14);
-}
-
-// ---------------------------------------------------------------------------
-// 跨 64MiB pending 上限的多组 flush
-// ---------------------------------------------------------------------------
-
-/// 确定性分片内容（不保留整文件，测试侧只维护顺序 blake3 作对照）。
-fn generated_chunk(index: usize, len: usize) -> Vec<u8> {
-    (0..len).map(|i| ((index * 131 + i) % 251) as u8).collect()
+    assert_eq!(fin.hashed_bytes, 16);
 }
 
 #[test]
-fn multi_group_over_64mib_uses_incremental_fast_path() {
+fn duplicate_accept_does_not_write_or_count_again() {
+    let temp = Temp::new();
+    let session = Session::new();
+    let data = pattern(8);
+    let (chunk, total) = (4usize, 8u64);
+    prealloc(temp.path(), total);
+    open_default(session.id(), temp.path(), total, chunk as u64, 2);
+
+    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
+    let dup = receiver::accept(session.id(), 0, chunk_of(&data, 0, chunk), None).unwrap();
+    assert!(dup.duplicate);
+    assert_eq!(dup.received, 1);
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.write_calls, 1, "重复片不应重复写盘");
+    assert_eq!(stats.written_bytes, 4);
+    assert_eq!(stats.hashed_bytes, 4);
+    assert_eq!(stats.accepted, 1);
+}
+
+// ---------------------------------------------------------------------------
+// 顺序 17 片：逐片直写、无回读、增量 complete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sequential_17_chunks_has_no_readback_and_fast_finalize() {
     let temp = Temp::new();
     let session = Session::new();
     let chunk = 4 << 20; // 4 MiB
-    let total = 66u64 << 20; // 66 MiB，必然跨过 64MiB pending 上限触发多组 flush
+    let total = 66u64 << 20; // 66 MiB，17 片（末片 2MiB）
     let count = total.div_ceil(chunk as u64);
-    assert_eq!(count, 17); // 16×4 + 1×2
+    assert_eq!(count, 17);
     prealloc(temp.path(), total);
     open_default(session.id(), temp.path(), total, chunk as u64, count);
 
@@ -220,15 +227,17 @@ fn multi_group_over_64mib_uses_incremental_fast_path() {
         let data = generated_chunk(index as usize, len);
         reference.update(&data);
         accept_ok(session.id(), index as u32, &data);
+        let stats = receiver::flush_stats(session.id()).unwrap();
+        assert_eq!(stats.write_calls, index + 1, "每片立即写盘");
+        assert_eq!(stats.readback_bytes, 0, "顺序上传不应回读");
+        assert!(stats.max_write_bytes <= chunk);
     }
-    // 第 16 片触发过 pending 上限 flush；最后一片仍需显式 flush
-    flush_ok(session.id());
     let stats = receiver::flush_stats(session.id()).unwrap();
-    assert!(stats.incremental);
+    assert_eq!(stats.accepted, 17);
+    assert_eq!(stats.persisted, 17);
     assert_eq!(stats.hashed_bytes, total);
-    assert_eq!(stats.hash_wait_bytes, 0);
-    assert_eq!(stats.write_calls, 2, "64MiB 一组 + 剩余一组");
-    assert_eq!(stats.leaf_digests_ready, count as usize);
+    assert_eq!(stats.readback_bytes, 0);
+    assert_eq!(stats.max_write_bytes, chunk);
 
     let before = finalize_counters();
     let hash = receiver::finalize(session.id(), None, None).unwrap();
@@ -237,17 +246,241 @@ fn multi_group_over_64mib_uses_incremental_fast_path() {
     assert!(fin.incremental);
     assert_eq!(fin.file_read_bytes, 0);
     assert_eq!(fin.hashed_bytes, total);
-    // 进程级计数器：快路径 +1（其它测试并发只会增加，不会减少）
     assert!(finalize_counters().0 > before.0);
     assert!(!receiver::exists(session.id()));
 }
 
 // ---------------------------------------------------------------------------
-// hash_wait 超限回退
+// 乱序 accept：hasher 靠回读推进，hash 仍正确
 // ---------------------------------------------------------------------------
 
 #[test]
-fn hash_wait_overflow_falls_back_to_full_finalize() {
+fn out_of_order_accept_reads_back_but_hash_is_correct() {
+    let temp = Temp::new();
+    let session = Session::new();
+    let data = pattern(16);
+    let (chunk, total) = (4usize, 16u64);
+    prealloc(temp.path(), total);
+    open_default(session.id(), temp.path(), total, chunk as u64, 4);
+
+    // 3 → 0：0 到齐后 hasher 推进到 1（1 还缺）；2、1 到齐后回读 2,3
+    accept_ok(session.id(), 3, chunk_of(&data, 3, chunk));
+    assert_eq!(receiver::flush_stats(session.id()).unwrap().hashed_bytes, 0);
+    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
+    assert_eq!(receiver::flush_stats(session.id()).unwrap().hashed_bytes, 4);
+    accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
+    assert_eq!(receiver::flush_stats(session.id()).unwrap().hashed_bytes, 4);
+    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
+
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.readback_bytes, 8, "乱序补齐需回读 2,3 两片");
+    assert_eq!(stats.hashed_bytes, 16);
+    assert_eq!(stats.write_calls, 4);
+    assert_eq!(stats.persisted, 4);
+    // 每片只写一次、内容正确
+    assert_eq!(std::fs::read(temp.path()).unwrap(), data);
+
+    let leaves = leaves_of(&data, chunk);
+    let hash = receiver::finalize(
+        session.id(),
+        Some(&leaves_flat(&leaves)),
+        Some(&merkle_root(&leaves)),
+    )
+    .unwrap();
+    assert_eq!(hash, file_hash(&data));
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
+}
+
+// ---------------------------------------------------------------------------
+// 写失败：不置位、不计数，重试成功
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_failure_leaves_bits_unset_then_retry_succeeds() {
+    let temp = Temp::new();
+    let session = Session::new();
+    let data = pattern(8);
+    let (chunk, total) = (4usize, 8u64);
+    // 故意不预分配：write-through 首次写盘失败
+    open_default(session.id(), temp.path(), total, chunk as u64, 2);
+
+    assert_eq!(
+        receiver::accept(session.id(), 0, chunk_of(&data, 0, chunk), None).unwrap_err(),
+        receiver::ReceiverError::Io
+    );
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.write_calls, 0);
+    assert_eq!(stats.written_bytes, 0);
+    assert_eq!(stats.hashed_bytes, 0);
+    assert_eq!(stats.accepted, 0);
+    assert_eq!(stats.persisted, 0);
+    assert_eq!(
+        bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
+        "00000000"
+    );
+
+    // 补上文件后重试本片：成功写盘并置位
+    prealloc(temp.path(), total);
+    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert_eq!(stats.write_calls, 1);
+    assert_eq!(stats.hashed_bytes, 4);
+    assert_eq!(stats.accepted, 1);
+    assert_eq!(stats.persisted, 1);
+    assert_eq!(
+        bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
+        "10000000"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 回读失败：单向 fallback，finalize 走全量
+// ---------------------------------------------------------------------------
+
+#[test]
+fn readback_failure_falls_back_to_full_finalize() {
+    let temp = Temp::new();
+    let session = Session::new();
+    let data = pattern(16);
+    let (chunk, total) = (4usize, 16u64);
+    // 文件先长度不足 total：写穿会按需扩展；缺口补齐时 read_chunk 的尺寸校验会失败
+    prealloc(temp.path(), 8);
+    open_default(session.id(), temp.path(), total, chunk as u64, 4);
+
+    accept_ok(session.id(), 2, chunk_of(&data, 2, chunk)); // 文件扩到 12
+    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
+    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
+    // 补 1 后 hasher 需要回读 2，但此时文件长度 12 < total 16 → 回读失败 → fallback
+    let stats = receiver::flush_stats(session.id()).unwrap();
+    assert!(!stats.incremental, "回读失败必须回退全量");
+    assert_eq!(stats.readback_bytes, 0);
+    assert_eq!(stats.hashed_bytes, 8);
+
+    // 收尾片后文件满长，finalize 走全量 fc_finalize 仍正确
+    accept_ok(session.id(), 3, chunk_of(&data, 3, chunk));
+    let leaves = leaves_of(&data, chunk);
+    let hash = receiver::finalize(
+        session.id(),
+        Some(&leaves_flat(&leaves)),
+        Some(&merkle_root(&leaves)),
+    )
+    .unwrap();
+    assert_eq!(hash, file_hash(&data));
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(!fin.incremental);
+    assert_eq!(fin.file_read_bytes, total);
+}
+
+// ---------------------------------------------------------------------------
+// 坏片：fast 路径发现 → 清位 + fallback，补传后全量成功
+// ---------------------------------------------------------------------------
+
+#[test]
+fn leaf_mismatch_clears_bad_chunk_and_falls_back_then_resend_succeeds() {
+    let temp = Temp::new();
+    let session = Session::new();
+    let data = pattern(12);
+    let (chunk, total) = (4usize, 12u64);
+    prealloc(temp.path(), total);
+    open_default(session.id(), temp.path(), total, chunk as u64, 3);
+
+    let mut corrupt = chunk_of(&data, 2, chunk).to_vec();
+    corrupt[0] ^= 0xFF;
+    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
+    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
+    accept_ok(session.id(), 2, &corrupt);
+
+    let leaves = leaves_of(&data, chunk);
+    let flat = leaves_flat(&leaves);
+    let root = merkle_root(&leaves);
+    assert_eq!(
+        receiver::finalize(session.id(), Some(&flat), Some(&root)).unwrap_err(),
+        receiver::ReceiverError::LeafMismatch { bad_index: 2 }
+    );
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
+    assert!(fin.fallback_after, "hasher 无法回滚 → 后续走全量");
+    assert!(receiver::exists(session.id()));
+    // 坏块位清零（accepted/persisted 同步），received--
+    assert_eq!(
+        bitmap(&receiver::bitmap_accepted(session.id()).unwrap()),
+        "11000000"
+    );
+    assert_eq!(
+        bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
+        "11000000"
+    );
+    assert_eq!(receiver::flush_stats(session.id()).unwrap().accepted, 2);
+    assert!(!receiver::flush_stats(session.id()).unwrap().incremental);
+
+    // 补传正确片后走全量路径成功
+    accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
+    let fin_hash = receiver::finalize(session.id(), Some(&flat), Some(&root)).unwrap();
+    assert_eq!(fin_hash, file_hash(&data));
+    assert_eq!(std::fs::read(temp.path()).unwrap(), data);
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(!fin.incremental);
+    assert_eq!(fin.file_read_bytes, total);
+}
+
+// ---------------------------------------------------------------------------
+// open(persisted) / chunk 数过大 → 全量
+// ---------------------------------------------------------------------------
+
+#[test]
+fn persisted_open_and_excessive_chunk_count_disable_incremental() {
+    let temp = Temp::new();
+    let session = Session::new();
+    let data = pattern(8);
+    let (chunk, total) = (4usize, 8u64);
+    prealloc(temp.path(), total);
+    // 先用一个 receiver 正常写穿两份数据
+    let writer = Session::new();
+    open_default(writer.id(), temp.path(), total, chunk as u64, 2);
+    accept_ok(writer.id(), 0, chunk_of(&data, 0, chunk));
+    accept_ok(writer.id(), 1, chunk_of(&data, 1, chunk));
+    receiver::close(writer.id()).unwrap();
+
+    // 模拟 Go 重启：带 Redis persisted 位图 open → 没有增量状态
+    assert!(receiver::open(
+        session.id(),
+        temp.path(),
+        total,
+        chunk as u64,
+        2,
+        Some(&[0b1100_0000]),
+        0
+    )
+    .unwrap());
+    assert!(!receiver::flush_stats(session.id()).unwrap().incremental);
+    let leaves = leaves_of(&data, chunk);
+    let hash = receiver::finalize(
+        session.id(),
+        Some(&leaves_flat(&leaves)),
+        Some(&merkle_root(&leaves)),
+    )
+    .unwrap();
+    assert_eq!(hash, file_hash(&data));
+    assert!(!last_finalize_stats(session.id()).unwrap().incremental);
+
+    // chunk 数 > 262144 时禁用增量（只为内存上限；仍可正常 open）
+    let big = Temp::new();
+    let many = 262_145u64;
+    prealloc(big.path(), many);
+    let big_session = Session::new();
+    assert!(receiver::open(big_session.id(), big.path(), many, 1, many, None, 0).unwrap());
+    assert!(!receiver::flush_stats(big_session.id()).unwrap().incremental);
+}
+
+// ---------------------------------------------------------------------------
+// Tuning 仍可注入快照间隔（write-through 无内存池参数）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn snapshot_interval_tuning_still_works() {
     let temp = Temp::new();
     let session = Session::new();
     let data = pattern(8);
@@ -261,86 +494,22 @@ fn hash_wait_overflow_falls_back_to_full_finalize() {
         2,
         None,
         Tuning {
-            hash_wait_cap: 2, // 注入 2B 暂存上限：乱序首组 4B 必然超限
+            snapshot_interval: std::time::Duration::from_millis(50),
             ..Tuning::default()
         },
     )
     .unwrap());
-
-    // 先写末片：偏移 4 > hashed 0，暂存 4B > cap 2B → 回退全量
+    assert!(accept_ok_ready(session.id(), 0, chunk_of(&data, 0, chunk)));
+    receiver::snapshot_ack(session.id()).unwrap();
     accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
-    flush_ok(session.id());
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert!(!stats.incremental, "hash_wait 超限必须回退");
-    assert_eq!(stats.hashed_bytes, 0);
-    assert_eq!(stats.hash_wait_bytes, 0);
-
-    // 回退后继续收片/落盘不受影响，finalize 走全量且结果正确
-    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
-    flush_ok(session.id());
-    let leaves = leaves_of(&data, chunk);
-    let hash = receiver::finalize(
-        session.id(),
-        Some(&leaves_flat(&leaves)),
-        Some(&merkle_root(&leaves)),
-    )
-    .unwrap();
-    assert_eq!(hash, file_hash(&data));
-    let fin = last_finalize_stats(session.id()).unwrap();
-    assert!(!fin.incremental, "回退后的 finalize 走全量路径");
-    assert_eq!(fin.file_read_bytes, 8);
-    assert!(fin.fallback_after);
-    assert_eq!(std::fs::read(temp.path()).unwrap(), data);
+    let out = receiver::flush(session.id()).unwrap();
+    assert!(!out.snapshot_ready, "节流窗口内不应重复发信号");
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    assert!(receiver::flush(session.id()).unwrap().snapshot_ready);
 }
 
-// ---------------------------------------------------------------------------
-// 顺序收片时 accept 只做叶子、flush 才喂 hasher
-// ---------------------------------------------------------------------------
-
-#[test]
-fn accept_computes_leaf_digests_and_flush_feeds_hasher_incrementally() {
-    let temp = Temp::new();
-    let session = Session::new();
-    let data = pattern(12);
-    let (chunk, total) = (4usize, 12u64);
-    prealloc(temp.path(), total);
-    open_default(session.id(), temp.path(), total, chunk as u64, 3);
-
-    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
-    // accept 之后：叶子已算，但 hasher 未喂（只有落盘成功才喂）
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.leaf_digests_ready, 1);
-    assert_eq!(stats.hashed_bytes, 0);
-    // 重复 accept 不重复计算/改变状态
-    assert!(
-        receiver::accept(session.id(), 0, chunk_of(&data, 0, chunk), None)
-            .unwrap()
-            .duplicate
-    );
-    assert_eq!(
-        receiver::flush_stats(session.id())
-            .unwrap()
-            .leaf_digests_ready,
-        1
-    );
-
-    flush_ok(session.id());
-    assert_eq!(receiver::flush_stats(session.id()).unwrap().hashed_bytes, 4);
-
-    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
-    accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
-    flush_ok(session.id());
-    let stats = receiver::flush_stats(session.id()).unwrap();
-    assert_eq!(stats.hashed_bytes, 12);
-    assert_eq!(stats.leaf_digests_ready, 3);
-
-    let leaves = leaves_of(&data, chunk);
-    let hash = receiver::finalize(
-        session.id(),
-        Some(&leaves_flat(&leaves)),
-        Some(&merkle_root(&leaves)),
-    )
-    .unwrap();
-    assert_eq!(hash, file_hash(&data));
-    assert!(last_finalize_stats(session.id()).unwrap().incremental);
+fn accept_ok_ready(id: &str, index: u32, data: &[u8]) -> bool {
+    receiver::accept(id, index, data, None)
+        .unwrap()
+        .snapshot_ready
 }

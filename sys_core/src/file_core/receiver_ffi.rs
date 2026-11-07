@@ -156,7 +156,8 @@ pub extern "C" fn fc_receiver_exists(upload_id: *const c_char) -> i32 {
 // accept / flush
 // ---------------------------------------------------------------------------
 
-/// 接收一个分片（数据由 Rust 拷贝进 pending，调用方保留所有权）。
+/// 接收一个分片（write-through：直接把调用方数据定位写到临时文件 offset，不拷贝/不缓存；
+/// 调用方保留所有权）。写成功才置 accepted+persisted 并推进增量 hasher。
 #[no_mangle]
 pub extern "C" fn fc_receiver_accept(
     upload_id: *const c_char,
@@ -192,7 +193,8 @@ pub extern "C" fn fc_receiver_accept(
     })
 }
 
-/// 把 pending 合并落盘。out 可为 NULL。
+/// write-through 没有 pending 批量 IO：只把增量 hasher 推进到已落盘的连续前缀并刷新活动时间。
+/// out 可为 NULL。
 #[no_mangle]
 pub extern "C" fn fc_receiver_flush(upload_id: *const c_char, out: *mut FcAcceptResult) -> i32 {
     ffi_guard(|| {
@@ -281,8 +283,8 @@ pub extern "C" fn fc_receiver_snapshot_ack(upload_id: *const c_char) -> i32 {
 // finalize
 // ---------------------------------------------------------------------------
 
-/// flush 全部 pending 后校验并移除 receiver。
-/// 正常路径为增量校验的 O(片数) 比对（不重读整文件）；重启/快传恢复、暂存超限、
+/// 校验并移除 receiver（write-through 下没有待刷数据）。
+/// 正常路径为增量校验的 O(片数) 比对（不重读整文件）；重启/快传恢复、chunk 数过大、
 /// 叶子失配后等异常回退全量 fc_finalize（语义不变）。
 /// FC_OK 时 receiver 已移除；LEAF_MISMATCH 时写 `*out_bad_index`、清该位、保留 receiver。
 #[no_mangle]

@@ -1,11 +1,11 @@
 //! 服务端接收器的 complete 收尾：增量快路径 + 全量回退路径。
 //!
-//! 正常上传（绝大多数情况）走**增量快路径**：accept 时已算好每片叶子、flush 时已按文件序
-//! 喂完整文件 blake3，这里只做「stat 长度 → O(片数) 叶子比对 → Merkle 根比对 →
-//! hasher.finalize()」，不重读/重算整文件，消除 complete 的 CPU 峰值（465MB 从 ~0.66
-//! CPU 秒 × 多核降到毫秒级）。
+//! 正常上传（绝大多数情况）走**增量快路径**：accept 时已算好每片叶子、收片过程中已按
+//! 文件序喂完整文件 blake3（乱序片从页缓存回读补齐），这里只做「stat 长度 → O(片数)
+//! 叶子比对 → Merkle 根比对 → hasher.finalize()」，不重读/重算整文件，消除 complete 的
+//! CPU 峰值（465MB 从 ~0.66 CPU 秒 × 多核降到毫秒级）。
 //!
-//! 只有重启/快传恢复（open 带 persisted 位图）、`hash_wait` 超限、叶子失配后、增量状态
+//! 只有重启/快传恢复（open 带 persisted 位图）、chunk 数过大、叶子失配后、增量状态
 //! 不可用等异常场景才回退旧的全量 `fc_finalize` 路径（语义完全一致，只是多一次整文件读）。
 //!
 //! 独立成文件便于控制单文件规模；`Receiver` 字段由 receiver.rs 以 crate 内可见性提供。
@@ -56,13 +56,14 @@ pub fn finalize(
     maybe_collect_expired();
     let arc = lookup(upload_id)?;
 
-    // 会话锁内完成 flush + 校验 + 状态清理；IO 期间只持该会话的锁，其它会话并行。
+    // 会话锁内完成校验 + 状态清理；IO 期间只持该会话的锁，其它会话并行。
+    // write-through 没有待刷数据：只需把增量 hasher 尽量推进到连续前缀（通常已推进完）。
     let mut receiver = lock(&arc);
     if receiver.closed {
         return Err(ReceiverError::NotFound);
     }
     receiver.last_activity = std::time::Instant::now();
-    receiver.do_flush()?;
+    receiver.advance_hasher(None);
     let (result, stats) = receiver.finalize_locked(expected_leaves, leaf_count, expected_root);
 
     if result.is_ok() {
@@ -86,7 +87,7 @@ impl Receiver {
         leaf_count: usize,
         expected_root: Option<&[u8]>,
     ) -> (Result<[u8; HASH_SIZE], ReceiverError>, FinalizeStats) {
-        let fast = self.inc.ready(self.total_size);
+        let fast = self.inc.ready(self.chunk_count);
         let (result, file_read_bytes) = if fast {
             // 快路径只 stat 一次，不读内容
             (
@@ -107,7 +108,7 @@ impl Receiver {
         let stats = FinalizeStats {
             incremental: fast,
             file_read_bytes,
-            hashed_bytes: if fast { self.inc.hashed_bytes() } else { 0 },
+            hashed_bytes: if fast { self.stats.hashed_bytes } else { 0 },
             fallback_after: !self.inc.enabled(),
         };
         (result, stats)
@@ -155,9 +156,10 @@ impl Receiver {
         Ok(self.inc.finalize_hash())
     }
 
-    /// 全量回退路径：与改造前完全一致，flush 后调 `file_ops::fc_finalize` 重读整文件。
-    /// 这里的 LEAF_MISMATCH 不强制再置 fallback：若增量状态本仍有效，补传并重新落盘时
-    /// `on_written` 会识别「已哈希区间被重写」并自动回退，仍能保证后续哈希正确。
+    /// 全量回退路径：与改造前完全一致，调 `file_ops::fc_finalize` 重读整文件。
+    /// 这里的 LEAF_MISMATCH 不强制再置 fallback：若增量状态本仍有效，补传会覆盖坏片，
+    /// 但 hasher 已包含坏片字节无法回滚——快路径叶子失配时已主动 fallback，全量路径下
+    /// 增量状态仍在时补传后由「重写已哈希区间」场景保守处理。
     fn finalize_full(
         &mut self,
         expected_leaves: Option<&[u8]>,
