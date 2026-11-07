@@ -1,8 +1,15 @@
 //! 服务端分片接收器（VM 单 Go 进程、单实例部署设计）。
 //!
 //! Rust 负责：有界内存缓存（pending）、accepted/persisted 双位图、abandoned 判断、
-//! 相邻片合并的批量定位写、finalize 复用 `fc_finalize` 做叶子/Merkle 校验与坏块清理。
-//! Go 只做 HTTP/鉴权/会话元数据 + 低频 Redis persisted 位图快照；收片热路径 0 条 Redis。
+//! 相邻片合并的批量定位写、**增量校验**（accept 算叶子 + flush 增量喂整文件 blake3）、
+//! finalize 的 O(片数) 比对与坏块清理。Go 只做 HTTP/鉴权/会话元数据 + 低频 Redis
+//! persisted 位图快照；收片热路径 0 条 Redis。
+//!
+//! 为什么增量校验（方向 A）：旧路径 complete 时对整文件做一次并行 BLAKE3，465MB 需
+//! ~0.66 CPU 秒 × 多核，形成 complete 峰值。现在叶子哈希摊到 accept、整文件哈希摊到
+//! flush（都是单线程、随传输期分散），complete 只做 O(片数) 比对；只有「重启/快传恢复
+//!（带 persisted 位图）、hash_wait 超限、叶子失配、增量状态不可用」才回退全量
+//! `fc_finalize`。增量状态见 `receiver_incremental.rs`。
 //!
 //! 并发模型（契约 §1）：
 //! - 全局 `Mutex<HashMap<String, Arc<Mutex<Receiver>>>>` 只在查找/插入/移除时短暂持有，
@@ -29,6 +36,10 @@ use super::file_ops::{
     FC_ERR_ABANDONED, FC_ERR_ARG, FC_ERR_IO, FC_ERR_LEAF_MISMATCH, FC_ERR_NOT_FOUND,
     FC_ERR_ROOT_MISMATCH, FC_ERR_SIZE_MISMATCH, MAX_CHUNK_SIZE,
 };
+use super::receiver_bitset::{bitmap_len, Bitset};
+use super::receiver_incremental::IncrementalState;
+
+pub use super::receiver_observe::{finalize_counters, last_finalize_stats, Tuning};
 
 /// 单会话 pending 内存上限。超出前先把 pending 合并落盘；允许最多超出一个 chunk
 ///（chunk_size 上限 1 GiB 在 open 时校验），换取「不在热路径做零散小写」。
@@ -64,7 +75,7 @@ const MAX_ATTEMPT_ID_LEN: usize = 256;
 const MAX_CHUNK_COUNT: u64 = 1 << 24;
 
 /// blake3 哈希字节数（与 file_ops 内部常量一致；本模块只需 finalize 的哈希长度）。
-const HASH_SIZE: usize = 32;
+pub(crate) const HASH_SIZE: usize = 32;
 
 /// typed 语义错误；C ABI 层映射为 `FC_ERR_*` 负错误码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,98 +124,52 @@ pub struct AcceptOutcome {
     pub duplicate: bool,
 }
 
-/// 本会话累计的物理写调用统计（测试观测「相邻片合并成一次写」用，不参与业务）。
+/// 本会话观测统计（测试观测批量合并 / 增量校验进度用，不参与业务）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlushStats {
+    /// 物理写调用次数（相邻片合并后一组算一次）。
     pub write_calls: u64,
+    /// 累计写盘字节数。
     pub written_bytes: u64,
-}
-
-/// MSB-first 位图：offset i 对应 byte i/8 的第 `7-(i%8)` 位，与 Redis `SETBIT` 一致。
-#[derive(Clone)]
-struct Bitset {
-    bytes: Vec<u8>,
-    len: u32,
-}
-
-fn bitmap_len(count: u32) -> usize {
-    (count as usize).div_ceil(8)
-}
-
-impl Bitset {
-    fn new(len: u32) -> Self {
-        Self {
-            bytes: vec![0; bitmap_len(len)],
-            len,
-        }
-    }
-
-    /// 从外部字节恢复（Redis persisted 位图）。长度由调用方先校验；
-    /// chunk_count 之外的尾部无效位统一清零，保证 count/popcount 正确。
-    fn from_bytes(bytes: &[u8], len: u32) -> Self {
-        let mut out = vec![0u8; bitmap_len(len)];
-        let n = out.len().min(bytes.len());
-        out[..n].copy_from_slice(&bytes[..n]);
-        if let Some(last) = out.last_mut() {
-            let used = (len % 8) as u32;
-            if used != 0 {
-                *last &= 0xFFu8 << (8 - used);
-            }
-        }
-        Self { bytes: out, len }
-    }
-
-    fn get(&self, index: u32) -> bool {
-        if index >= self.len {
-            return false;
-        }
-        let byte = self.bytes[index as usize / 8];
-        byte & (0x80 >> (index % 8)) != 0
-    }
-
-    fn set(&mut self, index: u32) {
-        if index < self.len {
-            self.bytes[index as usize / 8] |= 0x80 >> (index % 8);
-        }
-    }
-
-    fn clear(&mut self, index: u32) {
-        if index < self.len {
-            self.bytes[index as usize / 8] &= !(0x80 >> (index % 8));
-        }
-    }
-
-    fn count(&self) -> i64 {
-        self.bytes.iter().map(|b| b.count_ones() as i64).sum()
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
+    /// 增量校验：已按文件序喂入顺序整文件 hasher 的字节数。
+    pub hashed_bytes: u64,
+    /// 增量校验：乱序落盘、等待前序空洞的暂存字节数。
+    pub hash_wait_bytes: usize,
+    /// 增量校验状态是否仍有效（false = 已回退全量 finalize）。
+    pub incremental: bool,
+    /// 已算出叶子的分片数。
+    pub leaf_digests_ready: usize,
+    /// 已接受分片数。
+    pub accepted: i64,
 }
 
 /// 单会话接收器状态。字段与契约 §1 一一对应。
-struct Receiver {
-    path: std::path::PathBuf,
-    total_size: u64,
-    chunk_size: u64,
-    chunk_count: u32,
-    accepted: Bitset,
-    persisted: Bitset,
-    received: i64,
+///
+/// 可见性：`pub(crate)` 仅为让 `receiver_finalize.rs` 复用同一份状态（finalize 拆文件以
+/// 控制单文件规模）；crate 外无法访问，C ABI 只走 receiver_ffi.rs。
+pub(crate) struct Receiver {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) total_size: u64,
+    pub(crate) chunk_size: u64,
+    pub(crate) chunk_count: u32,
+    pub(crate) accepted: Bitset,
+    pub(crate) persisted: Bitset,
+    pub(crate) received: i64,
     pending: BTreeMap<u32, Vec<u8>>,
     pending_bytes: usize,
     abandoned: HashSet<(u32, String)>,
     ttl: Duration,
-    last_activity: Instant,
+    pub(crate) last_activity: Instant,
     last_snapshot_at: Option<Instant>,
     /// persisted 位图有 Go 未 ack 的变化。
-    dirty: bool,
+    pub(crate) dirty: bool,
     /// receiver 已从全局表移除（finalize/close/GC）；stale Arc 的后续调用一律 NotFound。
-    closed: bool,
+    pub(crate) closed: bool,
     pending_cap: usize,
     snapshot_interval: Duration,
     stats: FlushStats,
+    /// 增量校验状态（叶子 + 顺序整文件 hasher + 乱序暂存）。
+    pub(crate) inc: IncrementalState,
 }
 
 impl Receiver {
@@ -217,7 +182,10 @@ impl Receiver {
         ttl: Duration,
         pending_cap: usize,
         snapshot_interval: Duration,
+        hash_wait_cap: usize,
     ) -> Self {
+        // 有 persisted 位图 = 崩溃恢复/快传秒传，没有增量状态，finalize 直接走全量路径。
+        let has_persisted = persisted.is_some();
         let (accepted, persisted_bits) = match persisted {
             Some(bits) => (bits.clone(), bits.clone()),
             None => (Bitset::new(chunk_count), Bitset::new(chunk_count)),
@@ -242,6 +210,7 @@ impl Receiver {
             pending_cap,
             snapshot_interval,
             stats: FlushStats::default(),
+            inc: IncrementalState::new(chunk_count, !has_persisted, hash_wait_cap),
         }
     }
 
@@ -309,8 +278,8 @@ impl Receiver {
 
     /// 把 pending 按 index 顺序、相邻片合并成一次定位写。
     /// 每组写成功后才置 persisted / 移出 pending / 扣 pending_bytes；失败立即停止，
-    /// 前面已成功的组照常落盘（契约 §3）。
-    fn do_flush(&mut self) -> Result<(), ReceiverError> {
+    /// 前面已成功的组照常落盘（契约 §3）。写成功组同时喂增量整文件 hasher。
+    pub(crate) fn do_flush(&mut self) -> Result<(), ReceiverError> {
         if self.pending.is_empty() {
             return Ok(());
         }
@@ -336,30 +305,49 @@ impl Receiver {
 
         for (start, end) in runs {
             let offset = start as u64 * self.chunk_size;
-            let result = if start == end {
-                super::file_ops::write_chunk_unchecked(&self.path, offset, &self.pending[&start])
+            // 多片合并成一段连续内存做一次写：pending 上限 64 MiB，多一次拷贝换一次
+            // 系统调用 + 一次句柄获取，热路径明显更划算；这同一块内存随后直接喂增量 hasher。
+            let merged = if start == end {
+                None
             } else {
-                // 合并成一段连续内存做一次写：pending 上限 64 MiB，多一次拷贝换一次
-                // 系统调用 + 一次句柄获取，热路径明显更划算。
                 let mut buf = Vec::with_capacity(self.run_bytes(start, end));
                 for i in start..=end {
                     buf.extend_from_slice(&self.pending[&i]);
                 }
-                super::file_ops::write_chunk_unchecked(&self.path, offset, &buf)
+                Some(buf)
+            };
+            let result = match &merged {
+                Some(buf) => super::file_ops::write_chunk_unchecked(&self.path, offset, buf),
+                None => super::file_ops::write_chunk_unchecked(
+                    &self.path,
+                    offset,
+                    &self.pending[&start],
+                ),
             };
             self.stats.write_calls += 1;
             match result {
                 Ok(()) => {
-                    let mut written = 0usize;
-                    for i in start..=end {
-                        if let Some(data) = self.pending.remove(&i) {
-                            written += data.len();
-                            self.persisted.set(i);
+                    // 只有写盘成功才置 persisted / 移出 pending，并喂增量整文件 hasher。
+                    // 写失败组保留 pending 且不进 hasher，下次重试成功后再喂。
+                    let data = match merged {
+                        Some(buf) => {
+                            for i in start..=end {
+                                self.pending.remove(&i);
+                                self.persisted.set(i);
+                            }
+                            buf
                         }
-                    }
+                        None => {
+                            let data = self.pending.remove(&start).expect("pending 组已存在");
+                            self.persisted.set(start);
+                            data
+                        }
+                    };
+                    let written = data.len();
                     self.pending_bytes = self.pending_bytes.saturating_sub(written);
                     self.stats.written_bytes += written as u64;
                     self.dirty = true;
+                    self.inc.on_written(offset, data);
                 }
                 // 写失败：本组及之后 pending 原样保留，persisted 不置位
                 Err(()) => return Err(ReceiverError::Io),
@@ -373,7 +361,7 @@ impl Receiver {
 // 全局注册表 / abandon 缓冲 / GC
 // ---------------------------------------------------------------------------
 
-fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<Receiver>>>> {
+pub(crate) fn registry() -> &'static Mutex<HashMap<String, Arc<Mutex<Receiver>>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<Mutex<Receiver>>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -400,12 +388,12 @@ fn gc_state() -> &'static Mutex<Option<Instant>> {
 
 /// 加锁并忽略毒化：receiver 状态在任意中间态都自洽（要么完整插入，要么未插入），
 /// 毒化后继续用远好于让整个进程的接收器永久失败。
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 全局表查找（短锁，不做任何 IO）。
-fn lookup(upload_id: &str) -> Result<Arc<Mutex<Receiver>>, ReceiverError> {
+pub(crate) fn lookup(upload_id: &str) -> Result<Arc<Mutex<Receiver>>, ReceiverError> {
     lock(registry())
         .get(upload_id)
         .cloned()
@@ -452,7 +440,7 @@ fn take_buffered_abandons(upload_id: &str) -> Vec<(u32, String)> {
 }
 
 /// 机会式 GC：全局节流约 60s 一次，所有 FFI 入口调用。只扫描内存状态，不做 IO。
-fn maybe_collect_expired() {
+pub(crate) fn maybe_collect_expired() {
     let now = Instant::now();
     {
         let mut last = lock(gc_state());
@@ -556,11 +544,10 @@ pub fn open(
     persisted: Option<&[u8]>,
     ttl_secs: u64,
 ) -> Result<bool, ReceiverError> {
-    let ttl = if ttl_secs == 0 {
-        DEFAULT_TTL
-    } else {
-        Duration::from_secs(ttl_secs)
-    };
+    let mut tuning = Tuning::default();
+    if ttl_secs != 0 {
+        tuning.ttl = Duration::from_secs(ttl_secs);
+    }
     open_with_tuning(
         upload_id,
         path,
@@ -568,14 +555,12 @@ pub fn open(
         chunk_size,
         chunk_count,
         persisted,
-        ttl,
-        PENDING_CAP,
-        SNAPSHOT_INTERVAL,
+        tuning,
     )
 }
 
-/// `open` 的可调版本：测试注入小 `pending_cap` / 短 `snapshot_interval` / 短 TTL。
-/// 生产路径由 [`open`] 使用 [`PENDING_CAP`] / [`SNAPSHOT_INTERVAL`] / 24h。
+/// `open` 的可调版本：测试注入小 `pending_cap` / 短 `snapshot_interval` / 短 TTL /
+/// 小 `hash_wait_cap`。生产路径由 [`open`] 使用 [`Tuning::default`]。
 pub fn open_with_tuning(
     upload_id: &str,
     path: &std::path::Path,
@@ -583,9 +568,7 @@ pub fn open_with_tuning(
     chunk_size: u64,
     chunk_count: u64,
     persisted: Option<&[u8]>,
-    ttl: Duration,
-    pending_cap: usize,
-    snapshot_interval: Duration,
+    tuning: Tuning,
 ) -> Result<bool, ReceiverError> {
     let count = validate_open(upload_id, path, total_size, chunk_size, chunk_count)?;
     let persisted_bits = parse_persisted(persisted, count)?;
@@ -600,9 +583,10 @@ pub fn open_with_tuning(
         chunk_size,
         count,
         persisted_bits.as_ref(),
-        ttl,
-        pending_cap,
-        snapshot_interval,
+        tuning.ttl,
+        tuning.pending_cap,
+        tuning.snapshot_interval,
+        tuning.hash_wait_cap,
     )));
     loop {
         let existing = {
@@ -703,6 +687,8 @@ pub fn accept(
         r.do_flush()?;
     }
 
+    // 增量校验：收片时单线程算叶子（约 2–3ms/4MiB，摊到传输期），complete 不再重算。
+    r.inc.record_chunk(index, data);
     r.pending.insert(index, data.to_vec());
     r.pending_bytes += data.len();
     r.accepted.set(index);
@@ -836,7 +822,7 @@ pub fn close(upload_id: &str) -> Result<(), ReceiverError> {
     Ok(())
 }
 
-/// 查询某会话累计物理写调用（测试观测批量合并用）。不存在返回 None。
+/// 查询某会话的观测统计（批量写次数 / 增量校验进度）。不存在或已移除返回 None。
 pub fn flush_stats(upload_id: &str) -> Option<FlushStats> {
     let arc = {
         let map = lock(registry());
@@ -844,149 +830,23 @@ pub fn flush_stats(upload_id: &str) -> Option<FlushStats> {
     }?;
     let r = lock(&arc);
     if r.closed {
-        None
-    } else {
-        Some(r.stats)
+        return None;
     }
+    Some(FlushStats {
+        hashed_bytes: r.inc.hashed_bytes(),
+        hash_wait_bytes: r.inc.wait_bytes(),
+        incremental: r.inc.enabled(),
+        leaf_digests_ready: r.inc.digest_ready(),
+        accepted: r.received,
+        ..r.stats
+    })
 }
 
 // ---------------------------------------------------------------------------
 // finalize
 // ---------------------------------------------------------------------------
+//
+// finalize 的增量快路径 / 全量回退实现放在 `receiver_finalize.rs`（控制单文件规模），
+// 这里只做 re-export，typed/FFI 调用方路径不变：`receiver::finalize(...)`。
 
-/// flush 全部 pending → 复用 `file_ops::fc_finalize` 做叶子/Merkle/整文件哈希校验。
-///
-/// - `Ok(hash)`：receiver 已从全局表移除（Go 随后 fc_move）。
-/// - `Err(LeafMismatch)`：清该 index 的 accepted/persisted 位（received--、dirty=true），
-///   保留 receiver，客户端补传该片后可再次 finalize。
-/// - 其它错误：保留 receiver。
-///
-/// `expected_leaves` 为 `leaf_count` 个 32B 连续哈希或 None；`expected_root` 32B 或 None，
-/// 语义与 `fc_finalize` 完全一致。
-pub fn finalize(
-    upload_id: &str,
-    expected_leaves: Option<&[u8]>,
-    expected_root: Option<&[u8]>,
-) -> Result<[u8; HASH_SIZE], ReceiverError> {
-    let leaf_count = match expected_leaves {
-        None => 0,
-        Some(bytes) => {
-            if bytes.len() % HASH_SIZE != 0 || bytes.len() / HASH_SIZE > u32::MAX as usize {
-                return Err(ReceiverError::Arg);
-            }
-            bytes.len() / HASH_SIZE
-        }
-    };
-    if let Some(root) = expected_root {
-        if root.len() != HASH_SIZE {
-            return Err(ReceiverError::Arg);
-        }
-    }
-    maybe_collect_expired();
-    let arc = lookup(upload_id)?;
-
-    // 会话锁内完成 flush + 校验 + 状态清理；IO 期间只持该会话的锁，其它会话并行。
-    let mut r = lock(&arc);
-    if r.closed {
-        return Err(ReceiverError::NotFound);
-    }
-    r.last_activity = Instant::now();
-    r.do_flush()?;
-
-    let path_str = match r.path.to_str() {
-        Some(s) => s,
-        None => return Err(ReceiverError::Arg),
-    };
-    let c_path = match std::ffi::CString::new(path_str) {
-        Ok(c) => c,
-        Err(_) => return Err(ReceiverError::Arg),
-    };
-    let mut out_hash = [0u8; HASH_SIZE];
-    let mut bad_index: i64 = -1;
-    let code = super::file_ops::fc_finalize(
-        c_path.as_ptr(),
-        r.chunk_size,
-        r.total_size,
-        expected_leaves.map_or(std::ptr::null(), |b| b.as_ptr()),
-        leaf_count,
-        expected_root.map_or(std::ptr::null(), |b| b.as_ptr()),
-        out_hash.as_mut_ptr(),
-        &mut bad_index,
-    );
-    match code {
-        super::file_ops::FC_OK => {
-            // 先置 closed，再释放会话锁、从全局表移除；stale Arc 的后续调用得到 NotFound。
-            r.closed = true;
-            drop(r);
-            let mut map = lock(registry());
-            if let Some(cur) = map.get(upload_id) {
-                if Arc::ptr_eq(cur, &arc) {
-                    map.remove(upload_id);
-                }
-            }
-            Ok(out_hash)
-        }
-        FC_ERR_LEAF_MISMATCH => {
-            if bad_index >= 0 && (bad_index as u64) < r.chunk_count as u64 {
-                let idx = bad_index as u32;
-                if r.accepted.get(idx) {
-                    r.received -= 1;
-                }
-                r.accepted.clear(idx);
-                r.persisted.clear(idx);
-                // persisted 位清了：需要下一次快照把「缺片」也持久化
-                r.dirty = true;
-            }
-            Err(ReceiverError::LeafMismatch { bad_index })
-        }
-        FC_ERR_ROOT_MISMATCH => Err(ReceiverError::RootMismatch),
-        FC_ERR_SIZE_MISMATCH => Err(ReceiverError::SizeMismatch),
-        FC_ERR_ARG => Err(ReceiverError::Arg),
-        _ => Err(ReceiverError::Io),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bitset_uses_msb_first_bit_order_like_redis_setbit() {
-        let mut bits = Bitset::new(12);
-        bits.set(0);
-        bits.set(3);
-        assert_eq!(bits.get(0), true);
-        assert_eq!(bits.get(1), false);
-        assert_eq!(bits.get(3), true);
-        assert_eq!(bits.as_bytes(), &[0b1001_0000, 0x00]);
-        bits.set(8);
-        bits.set(11);
-        assert_eq!(bits.as_bytes(), &[0b1001_0000, 0b1001_0000]);
-        bits.clear(3);
-        assert_eq!(bits.as_bytes(), &[0b1000_0000, 0b1001_0000]);
-        assert_eq!(bits.count(), 3);
-        // 越界不 panic、不置位
-        bits.set(99);
-        assert_eq!(bits.count(), 3);
-    }
-
-    #[test]
-    fn bitset_from_bytes_masks_tail_bits_and_counts_only_valid_chunks() {
-        let bits = Bitset::from_bytes(&[0xFF, 0xFF], 12);
-        assert_eq!(bits.count(), 12);
-        assert_eq!(bits.as_bytes(), &[0xFF, 0b1111_0000]);
-    }
-
-    #[test]
-    fn validate_open_rejects_bad_sizes_and_chunk_counts() {
-        let p = std::path::Path::new("x.part");
-        assert!(validate_open("", p, 10, 4, 3).is_err());
-        assert!(validate_open("id", std::path::Path::new(""), 10, 4, 3).is_err());
-        assert!(validate_open("id", p, 0, 4, 1).is_err());
-        assert!(validate_open("id", p, 10, 0, 3).is_err());
-        assert!(validate_open("id", p, 10, MAX_CHUNK_SIZE + 1, 1).is_err());
-        assert!(validate_open("id", p, 10, 4, 2).is_err());
-        assert_eq!(validate_open("id", p, 10, 4, 3).unwrap(), 3);
-        assert_eq!(validate_open("id", p, 12, 4, 3).unwrap(), 3);
-    }
-}
+pub use super::receiver_finalize::finalize;

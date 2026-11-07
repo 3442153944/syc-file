@@ -30,8 +30,10 @@ import (
 //	→ ensureReceiver + ReceiverFlush：把 Rust receiver 里 pending 的分片批量定位写落盘
 //	→ ReceiverBitmapAccepted 判收齐（内存已收但未落盘的片也算收到，missing 响应形状不变）
 //	→ persisted 位图快照写 Redis（finalize 成功但 Move 失败时重试可从 Redis 恢复）
-//	→ synccore.ReceiverFinalize：Rust 先 flush，再逐块比对叶子 + 重建 Merkle 树根 + 算整文件哈希；
-//	  成功时 receiver 已被 Rust 移除；坏块返回 422 + bad_index（Rust 已清该片位，客户端补传即可）
+//	→ synccore.ReceiverFinalize：Rust 先 flush；正常路径用收片期增量哈希做 O(片数) 叶子/Merkle 比对
+//	  和 O(1) 整文件哈希收尾（不再整文件重读/并行重算）；重启恢复、快传秒传、hash_wait 超限等
+//	  才回退全量 fc_finalize。成功时 receiver 已被 Rust 移除；坏块返回 422 + bad_index
+//	  （Rust 已清该片位，客户端补传即可）
 //	→ synccore.Move：临时文件原子 rename 到目标
 //	→ 写 file 表 / upload_history completed
 //	→ 删 Redis 会话（临时文件已随 Move 消失）
@@ -145,7 +147,9 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			return
 		}
 
-		// Rust：flush 全部 pending → 逐块比对叶子 + Merkle 树根 + 整文件哈希。
+		// Rust：flush 全部 pending；正常 upload 走增量校验快路径（收片期已算好分片/整文件哈希，
+		// 这里只做 O(片数) 叶子/Merkle 比对 + hasher 收尾，不重读整文件）；只有重启恢复、
+		// 快传秒传、hash_wait 超限等场景才回退全量 fc_finalize。
 		// 成功时 receiver 已由 Rust 移除（不必再 close）；坏块时 Rust 已清该片位并保留 receiver。
 		fileHash, badIndex, err := synccore.ReceiverFinalize(uploadID, leaves, expectedRoot)
 		if err != nil {

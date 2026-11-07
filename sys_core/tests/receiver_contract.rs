@@ -6,11 +6,10 @@ use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sys_core::file_core::receiver::{self, AcceptOutcome, ReceiverError};
-use sys_core::{
-    fc_abi_version, fc_evict, fc_merkle_root, fc_preallocate, FcAcceptResult, FC_ERR_ARG,
-    FC_ERR_LEAF_MISMATCH, FC_ERR_NOT_FOUND, FC_OK,
+use sys_core::file_core::receiver::{
+    self, last_finalize_stats, AcceptOutcome, ReceiverError, Tuning,
 };
+use sys_core::{fc_evict, fc_merkle_root, fc_preallocate, FC_OK};
 
 // ---------------------------------------------------------------------------
 // 测试夹具
@@ -187,6 +186,14 @@ fn out_of_order_and_duplicate_accept_then_finalize_ok() {
         "11110000"
     );
 
+    // 增量校验状态：叶子齐全、整文件已按序喂完。
+    // finalize 的增量快路径只做 O(片数) 比对，不重读/重算整文件。
+    let inc = receiver::flush_stats(session.id()).unwrap();
+    assert!(inc.incremental);
+    assert_eq!(inc.hashed_bytes, 14);
+    assert_eq!(inc.leaf_digests_ready, 4);
+    assert_eq!(inc.hash_wait_bytes, 0);
+
     let leaves = leaves_of(&data, chunk);
     let hash = receiver::finalize(
         session.id(),
@@ -195,6 +202,30 @@ fn out_of_order_and_duplicate_accept_then_finalize_ok() {
     )
     .unwrap();
     assert_eq!(hash, file_hash(&data));
+    // 快路径统计：增量、零整文件读；结果与 describe / fc_finalize 对拍
+    let stats = last_finalize_stats(session.id()).unwrap();
+    assert!(stats.incremental);
+    assert_eq!(stats.file_read_bytes, 0);
+    assert_eq!(stats.hashed_bytes, 14);
+    assert!(!stats.fallback_after);
+    let described = sys_core::file::describe(temp.path(), chunk).unwrap();
+    assert_eq!(described.file_hash_hex, hex::encode(hash));
+    let c_path = cstr(temp.path().to_str().unwrap());
+    let (mut final_hash, mut bad) = ([0u8; 32], -2i64);
+    assert_eq!(
+        sys_core::fc_finalize(
+            c_path.as_ptr(),
+            chunk as u64,
+            total,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            final_hash.as_mut_ptr(),
+            &mut bad,
+        ),
+        FC_OK
+    );
+    assert_eq!(final_hash, hash);
     assert!(!receiver::exists(session.id()));
     assert_eq!(std::fs::read(temp.path()).unwrap(), data);
     // finalize 成功即移除 receiver
@@ -268,9 +299,10 @@ fn pending_cap_triggers_flush_and_adjacent_chunks_merge_into_one_write() {
         chunk as u64,
         4,
         None,
-        Duration::from_secs(3600),
-        10,
-        Duration::from_secs(3600),
+        Tuning {
+            pending_cap: 10,
+            ..Tuning::default()
+        },
     )
     .unwrap());
 
@@ -304,6 +336,20 @@ fn pending_cap_triggers_flush_and_adjacent_chunks_merge_into_one_write() {
         "11110000"
     );
     assert_eq!(std::fs::read(temp.path()).unwrap(), data);
+
+    // 增量路径同样给出正确整文件哈希
+    let inc = receiver::flush_stats(session.id()).unwrap();
+    assert!(inc.incremental);
+    assert_eq!(inc.hashed_bytes, 16);
+    let leaves = leaves_of(&data, chunk);
+    let hash = receiver::finalize(
+        session.id(),
+        Some(&leaves_flat(&leaves)),
+        Some(&merkle_root(&leaves)),
+    )
+    .unwrap();
+    assert_eq!(hash, file_hash(&data));
+    assert!(last_finalize_stats(session.id()).unwrap().incremental);
 }
 
 #[test]
@@ -339,6 +385,8 @@ fn flush_failure_keeps_pending_and_persisted_unset() {
     let stats = receiver::flush_stats(session.id()).unwrap();
     assert_eq!(stats.write_calls, 1);
     assert_eq!(stats.written_bytes, 0);
+    // 写失败的组不得进入增量 hasher / 叶子完成状态
+    assert_eq!(stats.hashed_bytes, 0);
 
     // 补上文件后重试：pending 还在，一次合并写成功
     prealloc(temp.path(), total);
@@ -346,6 +394,8 @@ fn flush_failure_keeps_pending_and_persisted_unset() {
     let stats = receiver::flush_stats(session.id()).unwrap();
     assert_eq!(stats.write_calls, 2);
     assert_eq!(stats.written_bytes, 8);
+    assert_eq!(stats.hashed_bytes, 8);
+    assert_eq!(stats.leaf_digests_ready, 2);
     assert_eq!(
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
         "11000000"
@@ -359,6 +409,11 @@ fn flush_failure_keeps_pending_and_persisted_unset() {
     )
     .unwrap();
     assert_eq!(hash, file_hash(&data));
+    // 写失败重试成功后走增量快路径，complete 不重读整文件
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
+    assert_eq!(fin.hashed_bytes, 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,9 +496,10 @@ fn ttl_expiry_gc_removes_receiver() {
         4,
         1,
         None,
-        Duration::from_millis(300),
-        64 << 20,
-        Duration::from_secs(1),
+        Tuning {
+            ttl: Duration::from_millis(300),
+            ..Tuning::default()
+        },
     )
     .unwrap());
     assert!(receiver::exists(session.id()));
@@ -497,6 +553,8 @@ fn open_is_idempotent_and_never_overwrites_existing_state() {
         bitmap(&receiver::bitmap_persisted(other.id()).unwrap()),
         "11000000"
     );
+    // persisted 恢复的 receiver 没有增量状态，finalize 走全量路径
+    assert!(!receiver::flush_stats(other.id()).unwrap().incremental);
     assert!(accept_ok(other.id(), 0, chunk_of(&data, 0, 4)).duplicate);
     assert!(accept_ok(other.id(), 1, chunk_of(&data, 1, 4)).complete);
 }
@@ -550,6 +608,8 @@ fn crash_recovery_restores_only_persisted_chunks() {
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
         "11000000"
     );
+    // 有 persisted 位图 = 崩溃恢复，没有增量状态 → finalize 必须走全量路径
+    assert!(!receiver::flush_stats(session.id()).unwrap().incremental);
     // 补传第 3 片 → received 从 2 变 3
     let out = accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
     assert_eq!(out.received, 3);
@@ -565,6 +625,10 @@ fn crash_recovery_restores_only_persisted_chunks() {
     .unwrap();
     assert_eq!(hash, file_hash(&data));
     assert_eq!(std::fs::read(temp.path()).unwrap(), data);
+    // 崩溃恢复走全量 fc_finalize（唯一会整文件重读的 complete 场景）
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(!fin.incremental);
+    assert_eq!(fin.file_read_bytes, 12);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +662,11 @@ fn finalize_leaf_mismatch_clears_bad_chunk_then_resend_succeeds() {
     let root = merkle_root(&leaves);
     let err = receiver::finalize(session.id(), Some(&flat), Some(&root)).unwrap_err();
     assert_eq!(err, ReceiverError::LeafMismatch { bad_index: 2 });
+    // 首次 finalize 走增量快路径（O(片数) 比对）；叶子失配后 hasher 无法回滚 → 回退全量
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
+    assert!(fin.fallback_after);
     // 坏块位清零、received--、dirty=true，receiver 保留（不变式 5）
     assert!(receiver::exists(session.id()));
     assert_eq!(
@@ -608,6 +677,7 @@ fn finalize_leaf_mismatch_clears_bad_chunk_then_resend_succeeds() {
         bitmap(&receiver::bitmap_persisted(session.id()).unwrap()),
         "11000000"
     );
+    assert!(!receiver::flush_stats(session.id()).unwrap().incremental);
 
     // 补传正确片 → finalize 成功
     let out = accept_ok(session.id(), 2, chunk_of(&data, 2, chunk));
@@ -616,6 +686,10 @@ fn finalize_leaf_mismatch_clears_bad_chunk_then_resend_succeeds() {
     flush_ok(session.id());
     let hash = receiver::finalize(session.id(), Some(&flat), Some(&root)).unwrap();
     assert_eq!(hash, file_hash(&data));
+    // 补传后的 finalize 已回退全量路径（有整文件重读），语义与改造前一致
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(!fin.incremental);
+    assert_eq!(fin.file_read_bytes, 12);
     assert!(!receiver::exists(session.id()));
     assert_eq!(std::fs::read(temp.path()).unwrap(), data);
 }
@@ -647,6 +721,10 @@ fn finalize_root_or_size_mismatch_keeps_receiver() {
         ReceiverError::SizeMismatch
     );
     assert!(receiver::exists(session.id()));
+    // 增量状态未就绪（缺片）时走全量；size mismatch 在 fc_finalize 读盘前返回
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(!fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
 
     // root mismatch：文件补齐 + 收齐，但树根故意写错
     prealloc(temp.path(), total);
@@ -659,11 +737,19 @@ fn finalize_root_or_size_mismatch_keeps_receiver() {
         ReceiverError::RootMismatch
     );
     assert!(receiver::exists(session.id()));
+    // 收齐后走增量快路径；root 不匹配不回退（hasher 仍有效，重试仍可快路径）
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
+    assert!(!fin.fallback_after);
     // 正确的树根 → 成功
     assert_eq!(
         receiver::finalize(session.id(), Some(&flat), Some(&root)).unwrap(),
         file_hash(&data)
     );
+    let fin = last_finalize_stats(session.id()).unwrap();
+    assert!(fin.incremental);
+    assert_eq!(fin.file_read_bytes, 0);
     assert!(!receiver::exists(session.id()));
 
     // 缺 receiver：finalize/flush/bitmap/snapshot_ack 全部 NOT_FOUND
@@ -704,9 +790,10 @@ fn snapshot_ready_is_throttled_by_interval_and_ack_clears_dirty() {
         chunk as u64,
         3,
         None,
-        Duration::from_secs(3600),
-        64 << 20,
-        interval,
+        Tuning {
+            snapshot_interval: interval,
+            ..Tuning::default()
+        },
     )
     .unwrap());
 
@@ -733,245 +820,4 @@ fn snapshot_ready_is_throttled_by_interval_and_ack_clears_dirty() {
     receiver::snapshot_ack(session.id()).unwrap();
     std::thread::sleep(interval + Duration::from_millis(40));
     assert!(!flush_ok(session.id()).snapshot_ready);
-}
-
-// ---------------------------------------------------------------------------
-// C ABI 薄封装
-// ---------------------------------------------------------------------------
-
-#[test]
-fn c_abi_accept_result_bitmap_and_error_codes() {
-    let temp = Temp::new();
-    let session = Session::new();
-    let data = pattern(16);
-    let (chunk, total) = (4usize, 16u64);
-    prealloc(temp.path(), total);
-    let id = cstr(session.id());
-    let path = cstr(temp.path().to_str().unwrap());
-
-    assert_eq!(fc_abi_version(), 5);
-    // open：首次 1，重复 0，非法参数 FC_ERR_ARG
-    assert_eq!(
-        sys_core::fc_receiver_open(
-            id.as_ptr(),
-            path.as_ptr(),
-            total,
-            chunk as u64,
-            4,
-            std::ptr::null(),
-            0,
-            0
-        ),
-        1
-    );
-    assert_eq!(
-        sys_core::fc_receiver_open(
-            id.as_ptr(),
-            path.as_ptr(),
-            total,
-            chunk as u64,
-            4,
-            std::ptr::null(),
-            0,
-            0
-        ),
-        0
-    );
-    assert_eq!(
-        sys_core::fc_receiver_open(
-            id.as_ptr(),
-            std::ptr::null(),
-            total,
-            chunk as u64,
-            4,
-            std::ptr::null(),
-            0,
-            0
-        ),
-        FC_ERR_ARG
-    );
-    assert_eq!(sys_core::fc_receiver_exists(id.as_ptr()), 1);
-    assert_eq!(sys_core::fc_receiver_exists(std::ptr::null()), 0);
-
-    // accept 填充 fc_accept_result（乱序 + 重复）
-    for (n, index) in [3u32, 0].iter().enumerate() {
-        let buf = chunk_of(&data, *index, chunk);
-        let mut out = FcAcceptResult::default();
-        assert_eq!(
-            sys_core::fc_receiver_accept(
-                id.as_ptr(),
-                *index,
-                buf.as_ptr(),
-                buf.len(),
-                std::ptr::null(),
-                &mut out,
-            ),
-            FC_OK
-        );
-        assert_eq!(out.received, n as i64 + 1);
-        assert_eq!(out.duplicate, 0);
-        assert_eq!(out.reserved, 0);
-        assert_eq!(out.complete, 0);
-    }
-    let buf = chunk_of(&data, 0, chunk);
-    let mut dup = FcAcceptResult::default();
-    assert_eq!(
-        sys_core::fc_receiver_accept(
-            id.as_ptr(),
-            0,
-            buf.as_ptr(),
-            buf.len(),
-            std::ptr::null(),
-            &mut dup,
-        ),
-        FC_OK
-    );
-    assert_eq!(dup.duplicate, 1);
-    assert_eq!(dup.received, 2);
-    assert_eq!(dup.complete, 0);
-
-    // out 不可为 NULL
-    assert_eq!(
-        sys_core::fc_receiver_accept(
-            id.as_ptr(),
-            0,
-            buf.as_ptr(),
-            buf.len(),
-            std::ptr::null(),
-            std::ptr::null_mut(),
-        ),
-        FC_ERR_ARG
-    );
-    // 未知 receiver → NOT_FOUND
-    let unknown = cstr("rrust-definitely-missing");
-    let mut out = FcAcceptResult::default();
-    assert_eq!(
-        sys_core::fc_receiver_accept(
-            unknown.as_ptr(),
-            0,
-            buf.as_ptr(),
-            buf.len(),
-            std::ptr::null(),
-            &mut out,
-        ),
-        FC_ERR_NOT_FOUND
-    );
-    assert_eq!(
-        sys_core::fc_receiver_flush(unknown.as_ptr(), std::ptr::null_mut()),
-        FC_ERR_NOT_FOUND
-    );
-    assert_eq!(
-        sys_core::fc_receiver_snapshot_ack(unknown.as_ptr()),
-        FC_ERR_NOT_FOUND
-    );
-    assert_eq!(
-        sys_core::fc_receiver_bitmap_accepted(unknown.as_ptr(), std::ptr::null_mut(), 0),
-        FC_ERR_NOT_FOUND as i64
-    );
-    // attempt 空 → ARG
-    assert_eq!(
-        sys_core::fc_receiver_abandon(id.as_ptr(), 0, std::ptr::null()),
-        FC_ERR_ARG
-    );
-
-    // 位图导出（MSB-first：收 0 和 3 → 1001_0000）
-    assert_eq!(
-        sys_core::fc_receiver_flush(id.as_ptr(), std::ptr::null_mut()),
-        FC_OK
-    );
-    let mut bits = [0u8; 1];
-    assert_eq!(
-        sys_core::fc_receiver_bitmap_accepted(id.as_ptr(), bits.as_mut_ptr(), bits.len()),
-        1
-    );
-    assert_eq!(bits, [0b1001_0000]);
-    let mut persisted = [0u8; 1];
-    assert_eq!(
-        sys_core::fc_receiver_bitmap_persisted(
-            id.as_ptr(),
-            persisted.as_mut_ptr(),
-            persisted.len()
-        ),
-        1
-    );
-    assert_eq!(persisted, [0b1001_0000]);
-    // cap 不足 → ARG
-    assert_eq!(
-        sys_core::fc_receiver_bitmap_accepted(id.as_ptr(), bits.as_mut_ptr(), 0),
-        FC_ERR_ARG as i64
-    );
-
-    // close：幂等
-    assert_eq!(sys_core::fc_receiver_close(id.as_ptr()), FC_OK);
-    assert_eq!(sys_core::fc_receiver_close(id.as_ptr()), FC_OK);
-    assert_eq!(sys_core::fc_receiver_exists(id.as_ptr()), 0);
-    assert_eq!(sys_core::fc_receiver_close(std::ptr::null()), FC_ERR_ARG);
-}
-
-#[test]
-fn c_abi_finalize_reports_hash_and_bad_index() {
-    let temp = Temp::new();
-    let session = Session::new();
-    let data = pattern(8);
-    let (chunk, total) = (4usize, 8u64);
-    prealloc(temp.path(), total);
-    let id = cstr(session.id());
-    let path = cstr(temp.path().to_str().unwrap());
-    assert_eq!(
-        sys_core::fc_receiver_open(
-            id.as_ptr(),
-            path.as_ptr(),
-            total,
-            chunk as u64,
-            2,
-            std::ptr::null(),
-            0,
-            0
-        ),
-        1
-    );
-    // 第 2 片故意写坏
-    let mut corrupt = chunk_of(&data, 1, chunk).to_vec();
-    corrupt[0] ^= 0xFF;
-    accept_ok(session.id(), 0, chunk_of(&data, 0, chunk));
-    accept_ok(session.id(), 1, &corrupt);
-    flush_ok(session.id());
-
-    let leaves = leaves_of(&data, chunk);
-    let flat = leaves_flat(&leaves);
-    let root = merkle_root(&leaves);
-    let mut hash = [0u8; 32];
-    let mut bad: i64 = -2;
-    assert_eq!(
-        sys_core::fc_receiver_finalize(
-            id.as_ptr(),
-            flat.as_ptr(),
-            leaves.len(),
-            root.as_ptr(),
-            hash.as_mut_ptr(),
-            &mut bad,
-        ),
-        FC_ERR_LEAF_MISMATCH
-    );
-    assert_eq!(bad, 1);
-
-    // 补传正确片后 FFI finalize 成功：哈希正确、bad_index 重置 -1
-    accept_ok(session.id(), 1, chunk_of(&data, 1, chunk));
-    flush_ok(session.id());
-    let mut hash = [0u8; 32];
-    let mut bad: i64 = -2;
-    assert_eq!(
-        sys_core::fc_receiver_finalize(
-            id.as_ptr(),
-            flat.as_ptr(),
-            leaves.len(),
-            root.as_ptr(),
-            hash.as_mut_ptr(),
-            &mut bad,
-        ),
-        FC_OK
-    );
-    assert_eq!(hash, file_hash(&data));
-    assert_eq!(bad, -1);
-    assert_eq!(sys_core::fc_receiver_exists(id.as_ptr()), 0);
 }

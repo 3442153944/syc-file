@@ -281,7 +281,9 @@ pub extern "C" fn fc_receiver_snapshot_ack(upload_id: *const c_char) -> i32 {
 // finalize
 // ---------------------------------------------------------------------------
 
-/// flush 全部 pending → 复用 fc_finalize 校验。
+/// flush 全部 pending 后校验并移除 receiver。
+/// 正常路径为增量校验的 O(片数) 比对（不重读整文件）；重启/快传恢复、暂存超限、
+/// 叶子失配后等异常回退全量 fc_finalize（语义不变）。
 /// FC_OK 时 receiver 已移除；LEAF_MISMATCH 时写 `*out_bad_index`、清该位、保留 receiver。
 #[no_mangle]
 pub extern "C" fn fc_receiver_finalize(
