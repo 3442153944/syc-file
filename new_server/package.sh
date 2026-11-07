@@ -55,4 +55,6 @@ tar --exclude='*.a' -cf - deploy.sh install-systemd.sh config/config.example.yam
 PKG="$OUT/${NAME}.tar.gz"
 tar -czf "$PKG" -C "$STAGE" .
 echo "==> 已打包：$PKG"
-tar tzf "$PKG" | head -12
+# 用 sed 而不是 head：set -o pipefail 下 head 读够 12 行就关管道，tar 会收到 SIGPIPE
+# 使脚本在打包成功后仍以 141 退出（曾导致 CI/部署判定失败）。
+tar tzf "$PKG" | sed -n '1,12p'
