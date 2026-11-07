@@ -143,6 +143,12 @@ $supervisorLines = @(
     ("      command: '" + $CloudflaredExe + "'"),
     '      args: ["--no-autoupdate", "tunnel", "run", "--token-file", "C:/ProgramData/cloudflared/token"]',
     '      skip_if_running: true',
+    '      restart_delay_seconds: 10',
+    '    - name: frpc-ali',
+    '      enabled: true',
+    ("      command: '" + $FrpcExe + "'"),
+    '      args: ["-c", "deploy/frp/dsh.toml"]',
+    '      skip_if_running: true',
     '      restart_delay_seconds: 10'
 )
 
