@@ -2,6 +2,7 @@ package file
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -33,10 +35,56 @@ import (
 // 形状与旧单发快传接口（quick_share.go）对拍：同一份响应字段、同一条分享记录。
 
 type qsTestEnv struct {
-	db       *gorm.DB
-	router   *gin.Engine
-	basePath string
-	userID   uint
+	db        *gorm.DB
+	rdb       *redis.Client
+	router    *gin.Engine
+	basePath  string
+	userID    uint
+	redisCmds *redisCmdCounter // 统计测试窗口内的 Redis 命令（热路径 0 命令断言用）
+}
+
+// redisCmdCounter 用 go-redis Hook 记录命令名。hook 对每条命令/管道都触发，
+// 连接握手（HELLO/CLIENT SETINFO 等）也会被记录，因此断言前必须 Reset()，
+// 只统计显式标记的窗口，不能把客户端内部握手算进去。
+type redisCmdCounter struct {
+	mu   sync.Mutex
+	cmds []string
+}
+
+func (h *redisCmdCounter) Reset() {
+	h.mu.Lock()
+	h.cmds = nil
+	h.mu.Unlock()
+}
+
+func (h *redisCmdCounter) Snapshot() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.cmds...)
+}
+
+func (h *redisCmdCounter) record(name string) {
+	h.mu.Lock()
+	h.cmds = append(h.cmds, name)
+	h.mu.Unlock()
+}
+
+func (h *redisCmdCounter) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *redisCmdCounter) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.record(cmd.Name())
+		return next(ctx, cmd)
+	}
+}
+
+func (h *redisCmdCounter) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			h.record(cmd.Name())
+		}
+		return next(ctx, cmds)
+	}
 }
 
 func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
@@ -45,7 +93,9 @@ func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
 	logger.Logger = zap.NewNop()
 
 	mr := miniredis.RunT(t)
+	counter := &redisCmdCounter{}
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	rdb.AddHook(counter) // 在首次使用前挂 hook，才能覆盖后续所有命令
 	upload_store.Init(rdb)
 
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test.db")), &gorm.Config{})
@@ -76,7 +126,7 @@ func setupQuickShareUploadTest(t *testing.T) *qsTestEnv {
 	config.Conf.File.Storage.TempPath = "temp"
 	t.Cleanup(func() { config.Conf.File.Storage = restoreStorage })
 
-	env := &qsTestEnv{db: db, basePath: basePath, userID: 7}
+	env := &qsTestEnv{db: db, rdb: rdb, basePath: basePath, userID: 7, redisCmds: counter}
 	if err := db.Create(&model.User{ID: 7, Username: "user7", Password: "test", Status: 1, Level: model.LevelUser}).Error; err != nil {
 		t.Fatal(err)
 	}

@@ -27,7 +27,11 @@ import (
 
 // HandlerFuncUploadComplete 分片上传第三步：收齐后整体校验并原子落盘。
 //
-//	→ synccore.Finalize：单趟顺序读，逐块比对叶子 + 重建 Merkle 树根比对 + 算整文件哈希
+//	→ ensureReceiver + ReceiverFlush：把 Rust receiver 里 pending 的分片批量定位写落盘
+//	→ ReceiverBitmapAccepted 判收齐（内存已收但未落盘的片也算收到，missing 响应形状不变）
+//	→ persisted 位图快照写 Redis（finalize 成功但 Move 失败时重试可从 Redis 恢复）
+//	→ synccore.ReceiverFinalize：Rust 先 flush，再逐块比对叶子 + 重建 Merkle 树根 + 算整文件哈希；
+//	  成功时 receiver 已被 Rust 移除；坏块返回 422 + bad_index（Rust 已清该片位，客户端补传即可）
 //	→ synccore.Move：临时文件原子 rename 到目标
 //	→ 写 file 表 / upload_history completed
 //	→ 删 Redis 会话（临时文件已随 Move 消失）
@@ -92,14 +96,41 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			return
 		}
 
-		// 必须收齐所有分片
-		bitmap, _ := upload_store.Global.Bitmap(ctx, uploadID)
+		// 确保 Rust receiver 在线：进程重启后的首个 complete 从 Redis persisted 位图恢复，
+		// 然后把 pending（乱序/相邻分片）批量定位写落盘。IO 错误可让客户端重试 complete。
+		if err := ensureReceiver(ctx, sess); err != nil {
+			logger.Logger.Error("初始化分片接收器失败", zap.String("upload_id", uploadID), zap.Error(err))
+			response.WriteHTTP(c, http.StatusOK, 500, "分片接收失败", nil)
+			return
+		}
+		if _, err := synccore.ReceiverFlush(uploadID); err != nil {
+			logger.Logger.Error("分片落盘失败", zap.String("upload_id", uploadID), zap.Error(err))
+			response.WriteHTTP(c, http.StatusOK, 500, "分片写入失败", nil)
+			return
+		}
+
+		// 必须收齐所有分片。用 receiver 的 accepted 位图而不是 Redis：Redis 只是周期性快照，
+		// 内存里已接受但尚未落盘/尚未快照的片不能在 complete 时被误判缺失。
+		bitmap, err := synccore.ReceiverBitmapAccepted(uploadID, sess.ChunkCount)
+		if err != nil {
+			logger.Logger.Error("查询分片状态失败", zap.String("upload_id", uploadID), zap.Error(err))
+			response.WriteHTTP(c, http.StatusOK, 500, "查询分片状态失败", nil)
+			return
+		}
 		missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
 		if len(missing) > 0 {
 			response.WriteHTTP(c, http.StatusOK, 400, "分片未收齐", gin.H{
 				"missing": missing, "received": sess.ChunkCount - len(missing), "chunk_count": sess.ChunkCount,
 			})
 			return
+		}
+
+		// finalize 前无条件写一次 persisted 位图快照：ReceiverFinalize 成功后 receiver 会被 Rust
+		// 移除，若随后 Move/写库失败，重试 complete 只能靠 Redis 里这份快照恢复。失败仅 warn。
+		if bits, berr := synccore.ReceiverBitmapPersisted(uploadID, sess.ChunkCount); berr != nil {
+			logger.Logger.Warn("导出已落盘分片位图失败", zap.String("upload_id", uploadID), zap.Error(berr))
+		} else if perr := upload_store.Global.PersistBitmap(ctx, uploadID, bits, uploadSessionTTL); perr != nil {
+			logger.Logger.Warn("持久化分片位图快照失败", zap.String("upload_id", uploadID), zap.Error(perr))
 		}
 
 		// 解码会话里的叶子哈希与树根，做整体校验
@@ -114,14 +145,13 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			return
 		}
 
-		fileHash, badIndex, err := synccore.Finalize(
-			sess.TempPath, uint64(sess.ChunkSize), uint64(sess.TotalSize), leaves, expectedRoot,
-		)
+		// Rust：flush 全部 pending → 逐块比对叶子 + Merkle 树根 + 整文件哈希。
+		// 成功时 receiver 已由 Rust 移除（不必再 close）；坏块时 Rust 已清该片位并保留 receiver。
+		fileHash, badIndex, err := synccore.ReceiverFinalize(uploadID, leaves, expectedRoot)
 		if err != nil {
 			switch {
 			case errors.Is(err, synccore.ErrLeafMismatch) && badIndex >= 0:
-				// 定位到坏块：清其置位，让客户端只重传该片
-				_ = upload_store.Global.ClearChunk(ctx, uploadID, int(badIndex))
+				// 定位到坏块：Rust 已清其接收/落盘位，客户端重传该片后再次 complete 即可
 				logger.Logger.Warn("finalize 分片校验失败", zap.String("upload_id", uploadID), zap.Int64("bad_index", badIndex))
 				response.WriteHTTP(c, http.StatusOK, 422, "分片校验失败，请重传指定分片", gin.H{
 					"bad_index": badIndex,

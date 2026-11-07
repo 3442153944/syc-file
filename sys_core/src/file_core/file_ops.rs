@@ -60,6 +60,10 @@ pub const FC_ERR_LEAF_MISMATCH: i32 = -3;
 pub const FC_ERR_ROOT_MISMATCH: i32 = -4;
 /// 文件实际尺寸/分片数与描述不符（v1 里混在 ROOT_MISMATCH，v2 拆出）。
 pub const FC_ERR_SIZE_MISMATCH: i32 = -5;
+/// receiver 不存在（v5：服务端分片接收器）。
+pub const FC_ERR_NOT_FOUND: i32 = -6;
+/// 该 (index, attempt_id) 已被放弃（v5：服务端分片接收器）。
+pub const FC_ERR_ABANDONED: i32 = -7;
 
 const HASH_SIZE: usize = 32;
 /// 句柄缓存上限，超过后整体清空（在途 Arc 不受影响，仅防止废弃会话堆积句柄）。
@@ -72,10 +76,12 @@ const FINALIZE_WINDOW: usize = 64 << 20; // 64 MiB
 
 /// ABI 版本号，供宿主 smoke test 确认链接成功。
 /// v2：新增 fc_evict、FC_ERR_SIZE_MISMATCH；v3：新增 fc_describe（客户端描述计算）；
-/// v4：新增 fc_sys_snapshot/fc_free_string（进程/端口明细采集，见 sys_info.rs）。
+/// v4：新增 fc_sys_snapshot/fc_free_string（进程/端口明细采集，见 sys_info.rs）；
+/// v5：新增服务端分片接收器 fc_receiver_* 系列与 FC_ERR_NOT_FOUND/FC_ERR_ABANDONED
+///     （见 receiver.rs / receiver_ffi.rs）。
 #[no_mangle]
 pub extern "C" fn fc_abi_version() -> i32 {
-    4
+    5
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +99,10 @@ unsafe fn cstr_to_path<'a>(p: *const c_char) -> Option<&'a Path> {
 /// FFI 边界的 panic 防护：panic 跨 C ABI 展开是 UB，统一兜成 FC_ERR_IO。
 /// 依赖 profile 的 panic = "unwind"（abort 模式下 panic 直接带崩宿主进程）。
 /// R 泛化以支持 i32（多数导出）与 i64（fc_describe 返回叶子数）。
-fn ffi_guard<R: From<i32>, F: FnOnce() -> R>(f: F) -> R {
+/// receiver 的 C ABI 包装（receiver_ffi.rs）复用同一套防护。
+pub(crate) fn ffi_guard<R: From<i32>, F: FnOnce() -> R>(f: F) -> R {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| R::from(FC_ERR_IO))
 }
-
 /// 加锁并忽略毒化：缓存内容只是 Arc<File>，任何中间状态都自洽，
 /// 毒化后继续用远好于让所有后续 FFI 调用永久失败。
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -172,6 +178,27 @@ fn write_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
         offset += n as u64;
     }
     Ok(())
+}
+
+/// 批量/单次定位写 helper：走进程内写句柄缓存 + 平台定位写，不做叶子校验。
+/// 服务端分片接收器（receiver.rs）把相邻片合并后用它一次写入；
+/// `fc_chunk_write` 的落盘路径也复用它，保证两条路径的句柄缓存/失败逐出行为一致。
+///
+/// 调用方负责保证 `offset + data.len()` 在文件范围内（receiver 在 accept 时已按
+/// total_size/chunk_size 校验）。失败时逐出该路径句柄，让下次重开（文件可能已变）。
+pub(crate) fn write_chunk_unchecked(path: &Path, offset: u64, data: &[u8]) -> Result<(), ()> {
+    let file = match cached_write_handle(path) {
+        Ok(f) => f,
+        Err(_) => return Err(()),
+    };
+    match write_at(&file, data, offset) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // 写失败可能意味着句柄已过期（文件被外部删除/移动），逐出让下次重开
+            evict_handle(path);
+            Err(())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -292,17 +319,9 @@ pub extern "C" fn fc_chunk_write(
             }
         }
 
-        let file = match cached_write_handle(path) {
-            Ok(f) => f,
-            Err(_) => return FC_ERR_IO,
-        };
-        match write_at(&file, buf, offset) {
-            Ok(_) => FC_OK,
-            Err(_) => {
-                // 写失败可能意味着句柄已过期（文件被外部删除/移动），逐出让下次重开
-                evict_handle(path);
-                FC_ERR_IO
-            }
+        match write_chunk_unchecked(path, offset, buf) {
+            Ok(()) => FC_OK,
+            Err(()) => FC_ERR_IO,
         }
     })
 }

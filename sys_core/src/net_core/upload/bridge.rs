@@ -1,9 +1,10 @@
 //! Event bridge for JNI/foreign runtimes. Scheduling, files and retries stay in Rust.
 //! Hosts execute only HTTP requests and return the unmodified response envelope.
 use super::*;
+use crate::net_core::upload_planner as planner;
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
         Mutex, OnceLock,

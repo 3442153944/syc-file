@@ -1,6 +1,6 @@
 /*
- * filecore.h —— 文件同步上传 Rust 核心库的 C ABI 声明。
- * 供 Go 通过 cgo 静态链接 libfilecore.a 调用。
+ * filecore.h —— 共享 sys_core 的 HarmonyOS NAPI C ABI 声明。
+ * build.ps1 将各 OHOS target 的 libsys_core.a 复制为兼容名称 libfilecore.a。
  *
  * 约定：所有哈希均为 32 字节 blake3；返回码见下方 FC_* 常量，负数为错误。
  */
@@ -71,6 +71,16 @@ int32_t fc_evict(const char *path);
 int64_t fc_describe(const char *path, uint64_t chunk_size,
                     uint8_t *out_leaves, size_t leaf_cap,
                     uint8_t *out_root32, uint8_t *out_file_hash32);
+
+/* sys_core 上传事件桥：宿主只执行 HTTP，调度、文件与重试由内核负责。 */
+uint64_t fc_upload_start(const char *input_json);
+char *fc_upload_poll(uint64_t id);
+void fc_free_string(char *value);
+int32_t fc_upload_take_body(uint64_t id, uint64_t request,
+                            uint8_t **out_data, size_t *out_len);
+void fc_upload_body_free(uint8_t *data, size_t len);
+int32_t fc_upload_reply(uint64_t id, uint64_t request, const char *result_json);
+void fc_upload_cancel(uint64_t id);
 
 #ifdef __cplusplus
 }

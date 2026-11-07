@@ -37,7 +37,11 @@ var (
 	ErrLeafMismatch = errors.New("synccore: 分片哈希不匹配")
 	ErrRootMismatch = errors.New("synccore: Merkle 树根不匹配")
 	ErrSizeMismatch = errors.New("synccore: 文件尺寸/分片数与描述不符")
-	ErrUnknown      = errors.New("synccore: 未知错误")
+	// ErrReceiverNotFound v5 receiver：会话接收器不存在（进程重启/已 finalize/已 close）。
+	ErrReceiverNotFound = errors.New("synccore: 接收器不存在")
+	// ErrReceiverAbandoned v5 receiver：该 (index, attempt_id) 分片尝试已被放弃。
+	ErrReceiverAbandoned = errors.New("synccore: 分片尝试已放弃")
+	ErrUnknown           = errors.New("synccore: 未知错误")
 )
 
 func codeToErr(rc C.int32_t) error {
@@ -54,6 +58,10 @@ func codeToErr(rc C.int32_t) error {
 		return ErrRootMismatch
 	case C.FC_ERR_SIZE_MISMATCH:
 		return ErrSizeMismatch
+	case C.FC_ERR_NOT_FOUND:
+		return ErrReceiverNotFound
+	case C.FC_ERR_ABANDONED:
+		return ErrReceiverAbandoned
 	default:
 		return ErrUnknown
 	}

@@ -71,6 +71,9 @@ func cleanupTempOnce(databases ...*gorm.DB) {
 				continue
 			}
 			p := filepath.Join(dir, e.Name())
+			// 临时文件名即 <upload_id>.part：先让 Rust receiver 丢弃该会话的进程内状态
+			// （不 flush、不写盘），再逐出写句柄并删文件——避免残留接收状态指向已删的临时文件。
+			_ = synccore.ReceiverClose(strings.TrimSuffix(e.Name(), ".part"))
 			_ = synccore.Evict(p) // 先关 Rust 侧缓存句柄再删文件
 			if err := os.Remove(p); err == nil {
 				logger.Logger.Info("清理僵尸临时文件", zap.String("path", p))

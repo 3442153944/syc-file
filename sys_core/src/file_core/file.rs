@@ -15,7 +15,7 @@ pub struct Description {
 }
 /// The source must remain unchanged while describing and uploading.
 pub fn describe(path: &Path, chunk_size: usize) -> io::Result<Description> {
-    if chunk_size == 0 || chunk_size as u64 > crate::file_ops::MAX_CHUNK_SIZE {
+    if chunk_size == 0 || chunk_size as u64 > crate::file_core::file_ops::MAX_CHUNK_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid chunk size",
@@ -28,7 +28,7 @@ pub fn describe(path: &Path, chunk_size: usize) -> io::Result<Description> {
     let (leaves, hash) = if size == 0 {
         (Vec::new(), *blake3::hash(b"").as_bytes())
     } else {
-        crate::file_ops::compute_leaves_and_file_hash(&file, chunk_size as u64)?
+        crate::file_core::file_ops::compute_leaves_and_file_hash(&file, chunk_size as u64)?
     };
     let count = i32::try_from(leaves.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many chunks"))?;
@@ -42,7 +42,7 @@ pub fn describe(path: &Path, chunk_size: usize) -> io::Result<Description> {
         total_size,
         chunk_size: chunk_size as i64,
         chunk_count: count,
-        merkle_root_hex: hex::encode(crate::file_ops::merkle_root(&leaves)),
+        merkle_root_hex: hex::encode(crate::file_core::file_ops::merkle_root(&leaves)),
         file_hash_hex: hex::encode(hash),
         leaf_hashes_hex: leaves.iter().map(hex::encode).collect(),
     })
@@ -69,7 +69,7 @@ pub fn read_chunk(
 ) -> io::Result<Vec<u8>> {
     if index < 0
         || chunk_size == 0
-        || chunk_size as u64 > crate::file_ops::MAX_CHUNK_SIZE
+        || chunk_size as u64 > crate::file_core::file_ops::MAX_CHUNK_SIZE
         || total_size < 0
     {
         return Err(io::Error::new(

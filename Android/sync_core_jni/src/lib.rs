@@ -222,8 +222,8 @@ pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlan
     .unwrap_or(0)
 }
 
-/// 取下一个任务（Task JSON）。终态返回 {"type":"done"} / {"type":"failed","reason":..}；
-/// 句柄无效/序列化失败也返回 failed 任务，绝不返回 null（Kotlin 循环靠它退出）。
+/// 取下一个任务（Task JSON）。终态返回 done/failed；暂时全断返回 recover，
+/// 宿主等待 after_ms 后再次调用。句柄无效/序列化失败也返回 failed，绝不返回 null。
 #[no_mangle]
 pub extern "system" fn Java_com_sunyuanling_filesync_core_SyncPlanner_nativePlannerNext(
     mut env: JNIEnv,

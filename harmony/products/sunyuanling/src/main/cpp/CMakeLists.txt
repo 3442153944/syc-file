@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.5.0)
 project(filecore)
 
-# Compile NAPI wrapper for HarmonyOS. Links against the prebuilt Rust static
-# library libfilecore.a (built by ../../build.ps1 from new_server/file_lib,
-# targeting the OHOS Rust targets). The .a contains blake3 + rayon + memmap2
-# and exposes the C ABI declared in filecore.h (fc_hash_chunk / fc_merkle_root /
-# fc_describe / fc_abi_version).
+# Compile the HarmonyOS NAPI wrapper and link the shared sys_core static library
+# built by ../../build.ps1 for each OHOS target. The archive retains the legacy
+# libfilecore.a filename so existing package and NAPI loading names stay stable.
+# It exposes the C ABI declared in filecore.h.
 #
 # Output: libfilecore.so, loadable from ArkTS via `import filecore from 'libfilecore.so'`.
 

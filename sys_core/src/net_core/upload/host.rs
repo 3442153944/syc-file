@@ -1,5 +1,6 @@
 //! Host boundary: credentials, HTTP cancellation, logs and persistence stay with the host.
-use super::{planner, protocol::UploadChunkData};
+use super::protocol::UploadChunkData;
+use crate::net_core::upload_planner as planner;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};

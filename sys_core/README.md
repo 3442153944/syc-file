@@ -4,18 +4,25 @@
 
 ## 模块与边界
 
-- `src/file_ops.rs`：文件预分配、句柄缓存、定位写、blake3/Merkle 校验、描述计算及稳定 `fc_*` C ABI。
-- `src/file.rs`：Rust 类型化文件描述、整文件哈希、范围校验和完整分片读取；与 C ABI 共用计算实现。
-- `src/upload_planner.rs`：测速决策、父链瓶颈、同后端校验、选片、AIMD、超时和重试预算。
-- `src/upload/`（`upload` feature）：固定/自适应上传执行循环、秒传、会话重建、取消、旧尝试放弃、普通/快传收尾和入口下载检查。
-- `src/upload/host.rs`：宿主 HTTP、节点切换取消、日志和状态持久化接口，不读取登录凭证或全局配置。
-- `src/upload/bridge.rs`：外部运行时事件桥；Rust 持有任务与请求 ID，宿主执行请求后回报原始响应信封。分片字节通过单独接口取出，不用 JSON/base64 搬大文件。
-- `src/node_selection.rs`、`src/sys_info.rs`：节点选择及平台系统采集。
-- `src/mesh.rs`：桌面与 Android 共用的 mesh plan：候选端点轮换、CIDR 排序、握手确认。探测期间中继持续承载目标网段，直连 peer 暂不持有 AllowedIPs；确认后切直连，不再周期性删除探测 peer。
-- `examples/mesh_plan.rs` 与 `tests/mesh/nat-acceptance.py`：同一 planner 驱动真实隔离 WireGuard/NAT。运行方法与端口预测边界见 [NAT-ACCEPTANCE.md](tests/mesh/NAT-ACCEPTANCE.md)。
-- `include/sys_core.h`：唯一维护的 C ABI 声明，现有 `fc_*` 名称和 ABI v4 保持兼容。
+核心算法和上传状态机只在本 crate 维护。`src/lib.rs` 保留旧模块路径的兼容导出，宿主不随目录归类改变调用方式。
 
-宿主保留 HTTP 连接/平台证书、登录身份、权限、界面、进度显示、配置落点和应用生命周期。服务端保留 HTTP 鉴权、Redis 会话、数据库及同步业务编排。桌面 `sync_engine`、watcher、WS、剪贴板和窗口等应用模块不属于此次上传/文件内核迁移范围。
+- `src/file_core/file_ops.rs`：文件预分配、句柄缓存、定位写、blake3/Merkle 校验、描述计算及稳定 `fc_*` C ABI。
+- `src/file_core/file.rs`：Rust 类型化文件描述、整文件哈希、范围校验和完整分片读取；与 C ABI 共用计算实现。
+- `src/file_core/receiver.rs`、`src/file_core/receiver_ffi.rs`：服务端分片接收器（VM 单 Go 进程内状态）：有界 pending 缓存、accepted/persisted 双位图、abandoned 判定与 open 前缓冲、相邻片合并的批量定位写、finalize 复用 `fc_finalize` 并清理坏块；Go 只做 HTTP/鉴权/会话元数据与低频 Redis 快照。
+- `src/net_core/upload_planner/`：测速决策、父链瓶颈、同后端校验、选片、AIMD、超时、重试预算和全链路恢复；公开 DTO、状态机、C ABI 与测试分文件维护。
+- `src/net_core/upload/`（`upload` feature）：固定/自适应上传执行循环、秒传、会话重建、取消、旧尝试放弃、普通/快传收尾和入口下载检查。
+- `src/net_core/upload/host.rs`：宿主 HTTP、节点切换取消、日志和状态持久化接口，不读取登录凭证或全局配置。
+- `src/net_core/upload/bridge.rs`：外部运行时事件桥；Rust 持有任务与请求 ID，宿主执行请求后回报原始响应信封。分片字节通过单独接口取出，不用 JSON/base64 搬大文件。
+- `src/net_core/node_selection.rs`、`src/sys_info.rs`：节点选择及平台系统采集。
+- `src/net_core/mesh.rs`：桌面与 Android 共用的 mesh plan：候选端点轮换、CIDR 排序、握手确认。探测期间中继持续承载目标网段，直连 peer 暂不持有 AllowedIPs；确认后切直连，不再周期性删除探测 peer。
+- `examples/mesh_plan.rs` 与 `tests/mesh/nat-acceptance.py`：同一 planner 驱动真实隔离 WireGuard/NAT。运行方法与端口预测边界见 [NAT-ACCEPTANCE.md](tests/mesh/NAT-ACCEPTANCE.md)。
+- `include/sys_core.h`：唯一维护的 C ABI 声明，现有 `fc_*` 名称和 ABI v5 保持兼容（v5 新增服务端接收器 `fc_receiver_*` 系列、`FC_ERR_NOT_FOUND`/`FC_ERR_ABANDONED`）。
+
+自适应上传在所有入口暂时断开时返回 `recover` 任务并周期性重新探测，不进入终态；宿主等待 `after_ms` 后继续取任务。恢复期间保留缺失分片和会话，取消语义不变。数据校验失败、重试耗尽和后端不一致不属于可恢复断网。
+
+服务端收片（VM）由 `file_core/receiver` 承担：Go 收到 HTTP 分片后整块交给进程内 receiver，分片缓存、接收/落盘位图、abandoned 判定和批量定位写都在 Rust；普通收片热路径不访问 Redis，Go 只在 `snapshot_ready` 信号下低频回写【已落盘】位图快照（约 1s 节流，实际由 flush 触发；complete 前无条件快照一次）用于崩溃恢复。因此服务端接收器按单 Go 进程/单实例部署设计，多实例需实例亲和。
+
+宿主保留 HTTP 连接/平台证书、登录身份、权限、界面、进度显示、配置落点和应用生命周期。服务端保留 HTTP 鉴权、Redis 会话、数据库及同步业务编排。桌面 `sync_engine`、watcher、WS、剪贴板和窗口等应用模块不属于上传/文件内核。
 
 ## 使用与产物
 
@@ -23,8 +30,10 @@
 
 Android `Android/sync_core_jni` 依赖同一核心。`SysUpload.kt` 只泵送 HTTP/进度/会话/持久化事件，`ChunkedUploader.kt` 是平台门面和节点注册表。缺失或过旧的上传 JNI 产物会明确报错，不再回退另一份 Kotlin 上传循环。现有 `SyncCore` 的哈希 JNI 入口与其他业务中的 Java 流式哈希兼容调用仍保留。
 
+HarmonyOS `harmony/products/sunyuanling/build.ps1` 分别为三个 OHOS target 构建同一核心，再把静态库链接进 NAPI `libfilecore.so`。`fc_upload_*` C ABI 复用与 Android 相同的事件桥；ArkTS 只保留 NAPI 参数封送、HTTP 和生命周期，不维护另一份上传或 Merkle 实现。
+
 ```powershell
-# 测试共享内核（文件、C ABI、调度、执行桥及 mesh plan；最近一次 49 项通过）
+# 测试共享内核（文件、C ABI、调度、执行桥及 mesh plan）
 cargo test --manifest-path sys_core/Cargo.toml --features upload --offline
 # 桌面检查，需满足当前 Tauri 依赖的工具链要求
 cargo +1.90.0 check --manifest-path filesync-desktop/src-tauri/Cargo.toml --offline
@@ -32,9 +41,11 @@ cargo +1.90.0 check --manifest-path filesync-desktop/src-tauri/Cargo.toml --offl
 .\Android\gradle-local.ps1 :app:assembleDebug --offline --console=plain --no-daemon
 # Android：从 Android/sync_core_jni 执行，需配置 NDK 与 cargo-ndk
 cargo ndk -t arm64-v8a -t x86_64 -o ../app/src/main/jniLibs build --release --offline
+# HarmonyOS：需安装 OHOS Rust targets 与 DevEco native NDK
+.\harmony\products\sunyuanling\build.ps1
 ```
 
-Android 产出每个 ABI 的 `libsync_core_jni.so`，保持现有 `System.loadLibrary("sync_core_jni")` 名称。JNI `nativeBridgeVersion=1` 检查新增上传桥入口，独立于已有 C ABI v4。最近一次双 ABI 重建：`arm64-v8a` 1,997,760 B、`x86_64` 2,129,608 B，均含 `MeshPlanner_nativePlan` 入口；尺寸、sha256 与验收环境见 `VALIDATION.md`。
+Android 产出每个 ABI 的 `libsync_core_jni.so`，保持现有 `System.loadLibrary("sync_core_jni")` 名称。JNI `nativeBridgeVersion=1` 检查新增上传桥入口，独立于 C ABI v5。最近一次双 ABI 重建：`arm64-v8a` 1,997,760 B、`x86_64` 2,129,608 B，均含 `MeshPlanner_nativePlan` 入口；尺寸、sha256 与验收环境见 `VALIDATION.md`。
 
 Go 直接使用本目录的 C ABI 产物：仓库根执行 `./sys_core/build.ps1`（Windows GNU）或 `bash sys_core/build.sh`（Linux），生成 `sys_core/lib/libsys_core.a`。`--offline` 等额外参数传递给 Cargo；脚本尊重 `CARGO_TARGET_DIR`，并显式选择本机目标。`lib/` 与 `target/` 为本机产物，不入 Git；`build.sh`、`build.ps1` 随源码跟踪。
 
@@ -53,4 +64,4 @@ docker build --build-context sys_core=../sys_core -t filesync-server:dev .
 - 上传描述与传输期间源文件必须保持稳定；读取完整范围，尺寸变化或短读报错，不补零上传。
 - `missing=[]` 表示分片已收齐，直接收尾；非法、重复或越界索引拒绝进入执行循环。
 - 暂停/取消时释放 Rust Future 或桥任务句柄；固定及自适应路径的子任务均归 `JoinSet` 管理。
-- C ABI 删除/移动与定位写的并发约束仍见 `file_ops.rs`；迁移不改变原协议和服务端会话规则。
+- C ABI 删除/移动与定位写的并发约束仍见 `src/file_core/file_ops.rs`；归类不改变原协议和服务端会话规则。

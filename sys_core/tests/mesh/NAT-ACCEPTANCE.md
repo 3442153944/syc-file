@@ -36,7 +36,7 @@ cargo build --example mesh_plan --offline
 python3 tests/mesh/nat-acceptance.py target/debug/examples/mesh_plan
 ```
 
-Windows 工作区与 VM 缓存的依赖版本可能不同；本次只在 `/tmp/filesync-nat-acceptance/sys_core` 副本删除 lock 并离线解析，未改工作区 Cargo.lock。保留实际 `src/mesh.rs` 内容，不能另写简化 planner 替代被测实现。
+Windows 工作区与 VM 缓存的依赖版本可能不同；本次只在 `/tmp/filesync-nat-acceptance/sys_core` 副本删除 lock 并离线解析，未改工作区 Cargo.lock。保留实际 `src/net_core/mesh.rs` 内容，不能另写简化 planner 替代被测实现。
 
 脚本 finally 删除自有 natwg 接口并恢复两台测试路由器原有的40010/40011映射。测试容器仍保留。异常 SIGKILL 不会运行 finally，接手先检查自有接口和规则；正常退出已确认清理。
 
