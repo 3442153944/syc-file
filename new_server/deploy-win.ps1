@@ -24,7 +24,8 @@ param(
     [switch]$SkipTools,
     [string]$ProdHost = 'vm',
     [string]$FrpcExe = 'E:\内网穿透\frp\frpc.exe',
-    [string]$DdnsExe = 'F:\proxy\ddns\ddns-go.exe'
+    [string]$DdnsExe = 'F:\proxy\ddns\ddns-go.exe',
+    [string]$CloudflaredExe = 'C:\Program Files (x86)\cloudflared\cloudflared.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -136,7 +137,13 @@ $supervisorLines = @(
     ("      command: '" + $DdnsExe + "'"),
     '      args: ["-c", "deploy/ddns/ddns_go_config.yaml"]',
     '      skip_if_running: true',
-    '      restart_delay_seconds: 30'
+    '      restart_delay_seconds: 30',
+    '    - name: cloudflared',
+    '      enabled: true',
+    ("      command: '" + $CloudflaredExe + "'"),
+    '      args: ["--no-autoupdate", "tunnel", "run", "--token-file", "C:/ProgramData/cloudflared/token"]',
+    '      skip_if_running: true',
+    '      restart_delay_seconds: 10'
 )
 
 $i = 0
