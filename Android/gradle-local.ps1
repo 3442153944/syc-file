@@ -1,4 +1,6 @@
 # Windows Gradle entry point with a valid, short Unix-domain socket directory.
+# Build APKs with build.ps1 instead: it packages sys_core into the JNI libraries
+# first and then calls this script. Use this script directly only for Gradle-only work.
 # Usage: .\gradle-local.ps1 :app:assembleDebug --offline --console=plain
 $ErrorActionPreference = "Stop"
 $gradleArguments = @($args)
