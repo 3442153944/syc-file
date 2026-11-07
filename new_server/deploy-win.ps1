@@ -191,16 +191,16 @@ while ($i -lt $sourceLines.Count) {
             } elseif ($inAllowedPaths) {
                 $inAllowedPaths = $false
             }
-            if ($line -match '^    base_path:') { $line = '    base_path: "FileSync"' }
+            if ($line -match '^    base_path:') { $line = '    base_path: "file_sync"' }
         }
         'share' {
-            if ($line -match '^  temp_path:') { $line = '  temp_path: "E:/fileSynchronization/temp/"' }
+            if ($line -match '^  temp_path:') { $line = '  temp_path: "F:/file_sync/share_temp/"' }
         }
         'quick_share' {
-            if ($line -match '^  base_path:') { $line = '  base_path: "E:/fileSynchronization/quickshare/"' }
+            if ($line -match '^  base_path:') { $line = '  base_path: "F:/file_sync/quickshare/"' }
         }
         'sync' {
-            if ($line -match '^  sync_catalogue:') { $line = '  sync_catalogue: "F:/同步目录/"' }
+            if ($line -match '^  sync_catalogue:') { $line = '  sync_catalogue: "F:/file_sync/sync/"' }
         }
     }
     $out.Add($line)

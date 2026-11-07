@@ -1,4 +1,4 @@
-# Windows 一键构建/部署
+﻿# Windows 一键构建/部署
 
 四个动作，全部通过仓库根 `deploy.ps1` 或直接调用子脚本：
 
@@ -65,3 +65,7 @@ powershell -NoProfile -File harmony\build.ps1 -Hap
 - 证书续签/推送由现有 ACME（Windows win-acme / Linux acme.sh）负责，不在本目录脚本内。
 - 生产库里有部分历史文件 `original_path` 是 Linux 路径（`/mnt/data/...`），只迁移数据库时这些旧文件的下载/同步会失效；新上传不受影响。
 - 域名/nginx 已由宝塔站点配置（`www.sunyuanling.com.conf` 反代 `localhost:8991`），脚本只打印提示，不修改。
+
+## 数据目录
+
+生产数据已迁移到 `F:\file_sync`（uploads/versions/quickshare/share_temp/sync/web 等），数据库里的历史路径也已改写成 `F:/file_sync/...`；脚本生成配置时默认使用该目录，重新部署不会回退。
