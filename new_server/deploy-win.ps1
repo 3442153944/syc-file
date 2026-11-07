@@ -244,7 +244,7 @@ Ok "已生成 $configPathOut（db/redis -> 127.0.0.1，密钥保留未打印）"
 Step '复制 frpc/ddns-go 运行时配置'
 $deploySrc = Join-Path $PSScriptRoot 'deploy'
 $copied = 0
-foreach ($rel in @('frp\frpc.toml', 'frp\frpc_akile.toml', 'frp\frpc_ny.toml', 'ddns\ddns_go_config.yaml')) {
+foreach ($rel in @('frp\frpc.toml', 'frp\frpc_akile.toml', 'frp\frpc_ny.toml', 'frp\dsh.toml', 'ddns\ddns_go_config.yaml')) {
     $src = Join-Path $deploySrc $rel
     if (Test-Path $src) {
         Copy-Item $src (Join-Path $InstallDir ('deploy\' + $rel)) -Force
