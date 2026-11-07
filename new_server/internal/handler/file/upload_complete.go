@@ -100,25 +100,31 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 
 		// 确保 Rust receiver 在线：进程重启后的首个 complete 从 Redis persisted 位图恢复，
 		// 然后把 pending（乱序/相邻分片）批量定位写落盘。IO 错误可让客户端重试 complete。
+		tEnsure := time.Now()
 		if err := ensureReceiver(ctx, sess); err != nil {
 			logger.Logger.Error("初始化分片接收器失败", zap.String("upload_id", uploadID), zap.Error(err))
 			response.WriteHTTP(c, http.StatusOK, 500, "分片接收失败", nil)
 			return
 		}
+		ensureDur := time.Since(tEnsure)
+		tFlush := time.Now()
 		if _, err := synccore.ReceiverFlush(uploadID); err != nil {
 			logger.Logger.Error("分片落盘失败", zap.String("upload_id", uploadID), zap.Error(err))
 			response.WriteHTTP(c, http.StatusOK, 500, "分片写入失败", nil)
 			return
 		}
+		flushDur := time.Since(tFlush)
 
 		// 必须收齐所有分片。用 receiver 的 accepted 位图而不是 Redis：Redis 只是周期性快照，
 		// 内存里已接受但尚未落盘/尚未快照的片不能在 complete 时被误判缺失。
+		tBitmap := time.Now()
 		bitmap, err := synccore.ReceiverBitmapAccepted(uploadID, sess.ChunkCount)
 		if err != nil {
 			logger.Logger.Error("查询分片状态失败", zap.String("upload_id", uploadID), zap.Error(err))
 			response.WriteHTTP(c, http.StatusOK, 500, "查询分片状态失败", nil)
 			return
 		}
+		bitmapDur := time.Since(tBitmap)
 		missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
 		if len(missing) > 0 {
 			response.WriteHTTP(c, http.StatusOK, 400, "分片未收齐", gin.H{
@@ -129,13 +135,16 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 
 		// finalize 前无条件写一次 persisted 位图快照：ReceiverFinalize 成功后 receiver 会被 Rust
 		// 移除，若随后 Move/写库失败，重试 complete 只能靠 Redis 里这份快照恢复。失败仅 warn。
+		tSnapshot := time.Now()
 		if bits, berr := synccore.ReceiverBitmapPersisted(uploadID, sess.ChunkCount); berr != nil {
 			logger.Logger.Warn("导出已落盘分片位图失败", zap.String("upload_id", uploadID), zap.Error(berr))
 		} else if perr := upload_store.Global.PersistBitmap(ctx, uploadID, bits, uploadSessionTTL); perr != nil {
 			logger.Logger.Warn("持久化分片位图快照失败", zap.String("upload_id", uploadID), zap.Error(perr))
 		}
+		snapshotDur := time.Since(tSnapshot)
 
 		// 解码会话里的叶子哈希与树根，做整体校验
+		tDecode := time.Now()
 		leaves, err := hex.DecodeString(sess.Leaves)
 		if err != nil {
 			response.WriteHTTP(c, http.StatusOK, 500, "会话叶子哈希损坏", nil)
@@ -146,11 +155,13 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			response.WriteHTTP(c, http.StatusOK, 500, "会话树根损坏", nil)
 			return
 		}
+		decodeDur := time.Since(tDecode)
 
 		// Rust：flush 全部 pending；正常 upload 走增量校验快路径（收片期已算好分片/整文件哈希，
 		// 这里只做 O(片数) 叶子/Merkle 比对 + hasher 收尾，不重读整文件）；只有重启恢复、
 		// 快传秒传、hash_wait 超限等场景才回退全量 fc_finalize。
 		// 成功时 receiver 已由 Rust 移除（不必再 close）；坏块时 Rust 已清该片位并保留 receiver。
+		tFinalize := time.Now()
 		fileHash, badIndex, err := synccore.ReceiverFinalize(uploadID, leaves, expectedRoot)
 		if err != nil {
 			switch {
@@ -170,6 +181,7 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 			}
 			return
 		}
+		finalizeDur := time.Since(tFinalize)
 
 		fileHashHex := hex.EncodeToString(fileHash)
 		// 额外一致性：服务端算出的整文件哈希须与客户端描述一致
@@ -184,11 +196,20 @@ func HandlerFuncUploadComplete(db *gorm.DB, redisClient *redis.Client, engine *s
 		if !sess.QuickShare && !checkFilePath(c, db, sess.TargetPath) {
 			return
 		}
+		tMove := time.Now()
 		if err := synccore.Move(sess.TempPath, sess.TargetPath); err != nil {
 			logger.Logger.Error("落盘失败", zap.String("upload_id", uploadID), zap.String("dst", sess.TargetPath), zap.Error(err))
 			response.WriteHTTP(c, http.StatusOK, 500, "落盘失败", nil)
 			return
 		}
+		moveDur := time.Since(tMove)
+
+		// 阶段耗时（低并发路径，Info 级别保留，便于对比不同用户/分片大小下的慢点：
+		// flush 是 pending 批量写盘，finalize 正常应 <10ms；若 finalize 数百 ms 说明走了全量回退）
+		logger.Logger.Info("分片上传阶段耗时", zap.String("upload_id", uploadID), zap.String("path", sess.TargetPath),
+			zap.Duration("ensure", ensureDur), zap.Duration("flush", flushDur), zap.Duration("bitmap", bitmapDur),
+			zap.Duration("snapshot", snapshotDur), zap.Duration("decode", decodeDur),
+			zap.Duration("finalize", finalizeDur), zap.Duration("move", moveDur))
 
 		// 粘贴快传：文件已落到 quickshare 目标路径，这里不建 file 记录、不交同步引擎，
 		// 直接生成分享记录。响应 data 用 finalizeShareLink 的原值，形状与旧单发快传接口一致。

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
+
 	"syc-file/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -127,14 +129,18 @@ func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 		}
 
 		// 1) 确保 Rust receiver 在线（进程重启后从 Redis persisted 位图恢复）
+		tEnsure := time.Now()
 		if err := ensureReceiver(ctx, sess); err != nil {
 			logger.Logger.Error("初始化分片接收器失败", zap.String("upload_id", uploadID), zap.Error(err))
 			response.WriteHTTP(c, http.StatusOK, 500, "分片接收失败", nil)
 			return
 		}
+		ensureDur := time.Since(tEnsure)
 
 		// 2) 整块交给 Rust：落 pending、幂等重复判定、abandoned 判定都在接收器内
+		tAccept := time.Now()
 		result, err := synccore.ReceiverAccept(uploadID, index, data, attemptID)
+		acceptDur := time.Since(tAccept)
 		if err != nil {
 			switch {
 			case errors.Is(err, synccore.ErrReceiverAbandoned):
@@ -149,6 +155,13 @@ func HandlerFuncUploadChunk(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 				response.WriteHTTP(c, http.StatusOK, 500, "分片写入失败", nil)
 			}
 			return
+		}
+
+		// 采样：accept 在 pending 达到上限时会同步批量写盘/喂哈希，慢盘上可能出现错峰停顿。
+		// 慢请求留一条 warn，便于定位上传吞吐抖动（正常 4MiB 片在几毫秒内）。
+		if acceptDur > 200*time.Millisecond {
+			logger.Logger.Warn("分片接收耗时偏高", zap.String("upload_id", uploadID), zap.Int("index", index),
+				zap.Duration("ensure", ensureDur), zap.Duration("accept", acceptDur), zap.Int("received", result.Received))
 		}
 
 		// 3) 幂等重复：此前已接受过该片，响应形状与旧实现一致
