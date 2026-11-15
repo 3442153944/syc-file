@@ -790,3 +790,95 @@ Qt（`server_ui/`）：
 - UI Automation 读窗口：标题 **私有云服务器设置**，概览显示「● 运行中 /
   HTTP 8991 · PID 53700 / 节点 win-home」；单实例仍只保留一个进程。
 - 截图 `server_ui/build/shots/rename-overview.png`（沙箱内连服务管道仍受限，只用于看布局）。
+
+---
+
+## 21. 单文件安装包（MSI，2026-11-15 22:00-22:45）
+
+用户要求：构建产物应该是一个单文件；运行后走安装流程，指定安装路径并释放依赖文件。
+
+### 21.1 先试 NSIS：能装文件，但注册表/快捷方式被火绒拦截
+
+- 用 NSIS 3.11（Tauri 缓存里的 `makensis`）做了自解压 setup exe（10.6 MB，中文 MUI 向导、
+  可选目录、开始菜单、HKCU 自启、卸载清单），编译和文件释放都正常；
+- 本机 **火绒（HipsDaemon）** 会拦截未签名安装包写注册表/开始菜单：
+  NSIS 里 `WriteRegStr`、`CreateDirectory "$SMPROGRAMS"`、`CreateShortcut` 全部返回错误
+  （`IfErrors` 实测 `write-error / dir-error / shortcut-error`），`ExecWait powershell` 也被拦
+  （helper 脚本根本没执行）；文件释放不受影响。这解释了“装完没有快捷方式/自启”的现象。
+- 结论：不是脚本写错，换安装器。
+
+### 21.2 改用 Windows Installer（MSI，WiX 5）
+
+- `msiexec` 是系统信任的安装服务，火绒放行：实测 HKCU Run、开始菜单快捷方式、
+  「应用和功能」卸载项、文件释放全部成功。
+- 新增 `server_ui/installer/make-msi.ps1`：
+  - 按 `dist` 目录递归生成 WiX v5 工程：每个子目录（platforms/styles/imageformats/…）
+    单独建 `<Directory>` + `<ComponentGroup>`，保证 Qt 插件落在正确子目录；
+  - 中文安装向导：`WixUI_InstallDir` + `-culture zh-CN`，许可页 RTF 由脚本生成
+    （中文转 `\uN?` 转义），目录页可自选安装路径；
+  - per-user：`Scope="perUser"` + `ALLUSERS=2` + `MSIINSTALLPERUSER=1`，
+    默认装到 `%LOCALAPPDATA%\Programs\私有云服务器设置`，不需要管理员；
+  - 开始菜单快捷方式、HKCU 登录自启、ARP 图标/版本、固定 UpgradeCode 支持升级；
+  - `.wixpdb`/生成的 `app.wxs` 放在 `build\installer\wix-build`，`release\` 只留 MSI。
+- `build-win.ps1 -Installer`（隐含 `-Package`）调用它，输出
+  `server_ui\release\私有云服务器设置-0.1.0.msi`（12.9 MB，单文件）。
+- 前置：WiX 5（`dotnet tool install --global wix --version 5.*`）+
+  `wix extension add -g WixToolset.UI.wixext/5.0.2`；WiX v6/v7 需要接受 OSMF EULA，脚本用 v5。
+
+### 21.3 实测
+
+- `msiexec /i msi /qn INSTALLFOLDER=<dir>`：20 个文件（含 `platforms\qwindows.dll` 等子目录）、
+  开始菜单快捷方式、HKCU Run、ARP 全部就位，exit 0；
+- `msiexec /x msi /qn`：本包文件/快捷方式/Run/ARP 清除，预置的 `keep.txt` 与
+  `config\config.yaml` 保留（不会误删同目录后端文件）；
+- 向导 UI 标题「私有云服务器设置 安装程序」，中文，目录页可选路径；
+- 说明：ARP 实际注册在 HKLM（Windows Installer 行为），仍可在「应用和功能」卸载；
+  per-user 安装不需要管理员。
+- 旧的 NSIS 脚本/产物已删除，`release\` 与 `dist\` 都在 `.gitignore` 里。
+
+---
+
+## 22. 安装到别处后找不到后端：运行时定位 + 安装器外部传 -config（2026-11-15 22:55-23:30）
+
+用户把控制台装到 `E:\Program Files\私有云` 后，界面仍默认读
+`<安装目录>\config\config.yaml`，报“后端未运行/找不到 runtime.json”。用户意见：
+“可以用 -config 指定，为什么不把它放在 GUI 外面指定？”
+
+### 22.1 控制台：运行时定位后端（不写死安装位置）
+
+- 新增 `src/configlocator.{h,cpp}`：没有显式 `--config` 时按顺序定位：
+  1. `<程序目录>\config\config.yaml`（同目录部署，兼容旧行为）；
+  2. Windows 服务注册：`FileSyncBackend` 的 `Parameters\AppDirectory` /
+     `Parameters\Application` / `Parameters\AppParameters`（nssm 包装的真实后端）以及
+     `ImagePath`（直接注册 exe 的服务），覆盖 `syc-file` 等常见别名；
+  3. 正在运行的 `syc-file.exe` 进程（Toolhelp + `QueryFullProcessImageName`，用可执行文件目录定位）；
+  4. Linux/macOS：扫 `/proc/<pid>/exe|cwd|cmdline`；
+  5. 都没有 → 回落 `<程序目录>\config\config.yaml`，界面明确显示“配置文件不存在”。
+- 显式 `--config` 仍然优先；但**显式路径不存在时自动回退到运行时发现**
+  （快捷方式/安装器里的路径可能因后端搬家而失效），避免卡死在不存在的路径。
+- 配置页路径显示“（不存在）”并给出 `--config` 提示；不再只有一句“读取配置字段失败”。
+
+### 22.2 安装器：把 -config 写在 GUI 外面
+
+- MSI 在安装时通过 RegistrySearch 读 `FileSyncBackend\Parameters\AppDirectory`，
+  `SetProperty` 生成 `BACKENDCONFIG=<后端目录>\config\config.yaml` 和 `BACKEND_ARGS=--config "..."`，
+  写进**开始菜单快捷方式参数**和 **HKCU Run 命令**——用户不需要在控制台里填任何路径。
+- 也支持外部覆盖：`msiexec /i 私有云服务器设置.msi BACKENDCONFIG=<config.yaml>`。
+- 版本升到 **0.1.1**（exe 版本资源/ MSI 同步）。
+
+### 22.3 实测
+
+- 安装到 `E:\Program Files\私有云` 后：快捷方式参数
+  `--config "E:\fileSynchronization\syc-file-win\config\config.yaml"`，HKCU Run 同样带该参数；
+  启动后 UIA 读到「● 运行中 / HTTP 8991 · PID 53700」。
+- 不带 `--config` 直接启动安装目录的 exe：同样通过运行时定位连上服务后端。
+- 用 `--config Z:\nope\config.yaml` 启动：自动回退到服务注册的配置（配置页显示正确路径）。
+- 安装/卸载/保留同目录后端文件仍正常。
+
+### 22.4 事故与恢复（重要）
+
+- 测试 0.1.1 MSI 的 MajorUpgrade 时，把用户实机已安装的 0.1.0 产品卸载掉了
+  （文件被删、ARP 消失）；随后用 0.1.1 MSI 重新安装到 `E:\Program Files\私有云`，
+  文件/快捷方式（带 `--config`）/HKCU Run/ARP 全部恢复并验证运行中。
+- 教训：同一 UpgradeCode 的 MSI 测试安装会升级/卸载实机产品；以后这类验证用不同
+  UpgradeCode 的测试包或虚拟机，不要在本机实装目录上跑。

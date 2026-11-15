@@ -1,5 +1,6 @@
 #include "backendclient.h"
 #include "appinfo.h"
+#include "configlocator.h"
 #include "icons.h"
 #include "mainwindow.h"
 #include "theme.h"
@@ -80,9 +81,11 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription(
         QStringLiteral("私有云服务器设置：查看后端状态、编辑配置、过滤日志、启停后端，常驻系统托盘。"));
     parser.addHelpOption();
-    QCommandLineOption configOption(QStringLiteral("config"),
-                                    QStringLiteral("指定 config.yaml 路径（默认：程序目录/config/config.yaml）"),
-                                    QStringLiteral("path"));
+    QCommandLineOption configOption(
+        QStringLiteral("config"),
+        QStringLiteral("指定 config.yaml 路径（默认自动发现：同目录 → 服务注册/运行中的后端进程；"
+                       "都找不到时用程序目录/config/config.yaml）"),
+        QStringLiteral("path"));
     QCommandLineOption autoStartOption(
         QStringLiteral("auto-start"),
         QStringLiteral("由后端自动拉起：已有实例时静默退出，不弹窗（后端 desktoplaunch 使用）"));
@@ -90,11 +93,8 @@ int main(int argc, char *argv[])
     parser.process(app);
 
     const bool autoStart = parser.isSet(autoStartOption);
-    QString configPath = parser.value(configOption);
-    if (configPath.isEmpty())
-        configPath = QDir(QCoreApplication::applicationDirPath())
-                         .absoluteFilePath(QStringLiteral("config/config.yaml"));
-    configPath = QFileInfo(configPath).absoluteFilePath();
+    // 不假设后端装在哪：显式 --config 优先，否则运行时定位（服务注册 / 运行中的后端进程）。
+    const QString configPath = configlocator::resolve(parser.value(configOption));
 
     // ---- 单实例：同一份配置只保留一个控制台 ----
     // 后端启动时也会拉起控制台；如果用户已经开着，后起的实例把请求转给已有窗口（手动启动时）

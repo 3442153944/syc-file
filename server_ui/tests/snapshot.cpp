@@ -8,6 +8,7 @@
 // （一次 /status 轮询 + 配置表单拉取）后再截图。
 #include "backendclient.h"
 #include "appinfo.h"
+#include "configlocator.h"
 #include "mainwindow.h"
 #include "theme.h"
 
@@ -40,11 +41,7 @@ int main(int argc, char *argv[])
     parser.addOptions({configOption, outOption, pageOption, widthOption, heightOption});
     parser.process(app);
 
-    QString configPath = parser.value(configOption);
-    if (configPath.isEmpty())
-        configPath = QDir(QCoreApplication::applicationDirPath())
-                         .absoluteFilePath(QStringLiteral("config/config.yaml"));
-    configPath = QFileInfo(configPath).absoluteFilePath();
+    const QString configPath = configlocator::resolve(parser.value(configOption));
 
     QString outPath = parser.value(outOption);
     if (outPath.isEmpty())

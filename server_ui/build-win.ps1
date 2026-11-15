@@ -22,20 +22,31 @@
 .PARAMETER Package
   构建后运行 windeployqt，把 Qt DLL/插件打进 DistDir。
 
+.PARAMETER Installer
+  在 Package 的基础上编译单个 MSI 安装包到 SetupDir（默认 release\）。
+  安装向导可选安装路径；由 Windows Installer（msiexec）释放 exe + Qt 依赖、
+  创建开始菜单快捷方式与登录自启项（不受安全软件对未签名 exe 的注册表拦截影响）。
+
+.PARAMETER SetupDir
+  安装包输出目录，默认 <本脚本目录>\release。
+
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1 -Clean -Package
+  powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1 -Clean -Installer
 #>
 [CmdletBinding()]
 param(
     [string]$QtDir = '',
     [string]$BuildDir = '',
     [string]$DistDir = '',
+    [string]$SetupDir = '',
     [switch]$Clean,
-    [switch]$Package
+    [switch]$Package,
+    [switch]$Installer
 )
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
+if ($Installer) { $Package = $true }
 
 function Write-Step([string]$text) {
     Write-Host ''
@@ -161,6 +172,7 @@ $exe = Join-Path $buildFull 'syc-file-gui.exe'
 if (-not (Test-Path $exe)) { Fail "编译完成但找不到产物: $exe" }
 
 $distFull = ''
+$setupPath = ''
 if ($Package) {
     if (-not $DistDir) { $DistDir = Join-Path $root 'dist' }
     $distFull = Resolve-FullPath $DistDir $root
@@ -179,10 +191,41 @@ if ($Package) {
     Remove-Item (Join-Path $distFull 'opengl32sw.dll'), (Join-Path $distFull 'D3Dcompiler_47.dll') -Force -ErrorAction SilentlyContinue
 }
 
+if ($Installer) {
+    $version = '0.1.0'
+    $cmakeText = Get-Content (Join-Path $root 'CMakeLists.txt') -Raw
+    if ($cmakeText -match 'project\(\s*server_ui\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+        $version = $Matches[1]
+    }
+
+    if (-not $SetupDir) { $SetupDir = Join-Path $root 'release' }
+    $setupFull = Resolve-FullPath $SetupDir $root
+    New-Item -ItemType Directory -Force -Path $setupFull | Out-Null
+    $setupPath = Join-Path $setupFull ("私有云服务器设置-$version.msi")
+
+    Write-Step '生成单文件 MSI 安装包（Windows Installer）'
+    $msiScript = Join-Path $root 'installer\make-msi.ps1'
+    $msiArgs = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $msiScript,
+        '-SourceDir', $distFull,
+        '-Version', $version,
+        '-OutFile', $setupPath,
+        '-IconFile', (Join-Path $root 'resources\appicon.ico')
+    )
+    & powershell.exe @msiArgs
+    if ($LASTEXITCODE -ne 0) { Fail "MSI 生成失败（exit=$LASTEXITCODE）" }
+    if (-not (Test-Path $setupPath)) { Fail "安装包没有生成: $setupPath" }
+}
+
 Write-Step '完成'
 Write-Host "  可执行文件: $exe"
 if ($distFull) {
-    Write-Host "  打包目录  : $distFull（Qt DLL/插件已就位，可整目录拷走）"
+    Write-Host "  Qt 运行目录: $distFull（windeployqt 已就位）"
+}
+if ($setupPath) {
+    $size = [math]::Round((Get-Item $setupPath).Length / 1MB, 1)
+    Write-Host "  安装包    : $setupPath（$size MB，单文件 MSI）"
+    Write-Host '              双击安装：可选安装路径，msiexec 释放 Qt 依赖并建快捷方式/自启'
 }
 Write-Host '  运行      : syc-file-gui.exe --config <config.yaml>'
 Write-Host '  默认配置  : <程序目录>\config\config.yaml'

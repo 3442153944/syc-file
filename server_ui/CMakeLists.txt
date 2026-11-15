@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(server_ui VERSION 0.1.0 LANGUAGES CXX)
+project(server_ui VERSION 0.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,8 @@ set(SERVER_UI_SOURCES
     src/backendclient.h
     src/configfile.cpp
     src/configfile.h
+    src/configlocator.cpp
+    src/configlocator.h
     src/configpage.cpp
     src/configpage.h
     src/icons.cpp
