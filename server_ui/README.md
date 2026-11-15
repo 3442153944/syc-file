@@ -74,11 +74,21 @@ powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1
 # 指定 kit / 清理重建 / 把 Qt 运行库打进 dist\（可整目录拷走运行）
 powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1 `
   -QtDir C:\Qt\6.9.3\mingw_64 -Clean -Package
+
+# 单文件安装包（安装向导可选路径，msiexec 释放 exe + Qt 依赖）
+powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1 -Installer
+# -> server_ui\release\私有云服务器设置-<版本>.msi
 ```
 
 - 产物：`server_ui\build\syc-file-gui.exe`（GUI 子系统，无控制台窗口）、
   `server_ui\build\server_ui_snapshot.exe`（离屏截图工具）；
-- `-Package` 额外产出 `server_ui\dist\`：exe + windeployqt 打好的 Qt DLL/插件。
+- `-Package` 额外产出 `server_ui\dist\`：exe + windeployqt 打好的 Qt DLL/插件（调试/绿色分发用）；
+- `-Installer`（隐含 `-Package`）产出**单个 MSI**；需要 WiX 5，首次执行：
+
+  ```powershell
+  dotnet tool install --global wix --version 5.*
+  wix extension add -g WixToolset.UI.wixext/5.0.2
+  ```
 
 ### Linux（系统 Qt6）
 
@@ -123,9 +133,27 @@ cmake --build server_ui/build
 
 ## 打包 / 部署
 
-- **独立打包**：`build-win.ps1 -Package` → `server_ui\dist\`（Qt 运行库齐全，可整目录拷走；
-  配置用 `--config` 指定，或放 `dist\config\config.yaml`）。
-- **日常部署**：`new_server/deploy-win.ps1` 会构建后端 + Qt 控制台并安装到
+### 单文件安装包（MSI）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1 -Installer
+```
+
+输出 `server_ui\release\私有云服务器设置-<版本>.msi`（约 13 MB，单个文件）：
+
+- 双击进入**中文 Windows Installer 向导**（欢迎 → 许可 → **选择安装路径** → 安装 → 完成）；
+- 安装时由 `msiexec` 释放 `syc-file-gui.exe` + Qt DLL/插件（含 platforms/styles/… 子目录），
+  创建开始菜单快捷方式和 HKCU 登录自启项，并在「应用和功能」注册卸载入口；
+- 默认装到 `%LOCALAPPDATA%\Programs\私有云服务器设置`（当前用户，无需管理员）；
+- 卸载只删除安装包释放的文件，同目录的后端/配置/日志不会被删。
+
+> 为什么用 MSI 而不是自解压 exe：本机火绒等 HIPS 会拦截未签名自解压安装包写注册表/开始菜单
+> （NSIS 实测 `WriteRegStr`/`CreateShortcut` 全部失败），而 `msiexec` 是系统信任的安装服务，实测正常。
+
+### 绿色部署
+
+- `-Package` 产出 `server_ui\dist\`（Qt 运行库齐全，可整目录拷走；配置用 `--config` 指定）；
+- 日常部署：`new_server/deploy-win.ps1` 会构建后端 + Qt 控制台并安装到
   `E:\fileSynchronization\syc-file-win`（`-SkipGui` 跳过 GUI，`-QtDir` 指定 Qt 目录）。
 
 ## 运行

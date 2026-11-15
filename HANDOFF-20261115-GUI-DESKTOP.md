@@ -790,3 +790,48 @@ Qt（`server_ui/`）：
 - UI Automation 读窗口：标题 **私有云服务器设置**，概览显示「● 运行中 /
   HTTP 8991 · PID 53700 / 节点 win-home」；单实例仍只保留一个进程。
 - 截图 `server_ui/build/shots/rename-overview.png`（沙箱内连服务管道仍受限，只用于看布局）。
+
+---
+
+## 21. 单文件安装包（MSI，2026-11-15 22:00-22:45）
+
+用户要求：构建产物应该是一个单文件；运行后走安装流程，指定安装路径并释放依赖文件。
+
+### 21.1 先试 NSIS：能装文件，但注册表/快捷方式被火绒拦截
+
+- 用 NSIS 3.11（Tauri 缓存里的 `makensis`）做了自解压 setup exe（10.6 MB，中文 MUI 向导、
+  可选目录、开始菜单、HKCU 自启、卸载清单），编译和文件释放都正常；
+- 本机 **火绒（HipsDaemon）** 会拦截未签名安装包写注册表/开始菜单：
+  NSIS 里 `WriteRegStr`、`CreateDirectory "$SMPROGRAMS"`、`CreateShortcut` 全部返回错误
+  （`IfErrors` 实测 `write-error / dir-error / shortcut-error`），`ExecWait powershell` 也被拦
+  （helper 脚本根本没执行）；文件释放不受影响。这解释了“装完没有快捷方式/自启”的现象。
+- 结论：不是脚本写错，换安装器。
+
+### 21.2 改用 Windows Installer（MSI，WiX 5）
+
+- `msiexec` 是系统信任的安装服务，火绒放行：实测 HKCU Run、开始菜单快捷方式、
+  「应用和功能」卸载项、文件释放全部成功。
+- 新增 `server_ui/installer/make-msi.ps1`：
+  - 按 `dist` 目录递归生成 WiX v5 工程：每个子目录（platforms/styles/imageformats/…）
+    单独建 `<Directory>` + `<ComponentGroup>`，保证 Qt 插件落在正确子目录；
+  - 中文安装向导：`WixUI_InstallDir` + `-culture zh-CN`，许可页 RTF 由脚本生成
+    （中文转 `\uN?` 转义），目录页可自选安装路径；
+  - per-user：`Scope="perUser"` + `ALLUSERS=2` + `MSIINSTALLPERUSER=1`，
+    默认装到 `%LOCALAPPDATA%\Programs\私有云服务器设置`，不需要管理员；
+  - 开始菜单快捷方式、HKCU 登录自启、ARP 图标/版本、固定 UpgradeCode 支持升级；
+  - `.wixpdb`/生成的 `app.wxs` 放在 `build\installer\wix-build`，`release\` 只留 MSI。
+- `build-win.ps1 -Installer`（隐含 `-Package`）调用它，输出
+  `server_ui\release\私有云服务器设置-0.1.0.msi`（12.9 MB，单文件）。
+- 前置：WiX 5（`dotnet tool install --global wix --version 5.*`）+
+  `wix extension add -g WixToolset.UI.wixext/5.0.2`；WiX v6/v7 需要接受 OSMF EULA，脚本用 v5。
+
+### 21.3 实测
+
+- `msiexec /i msi /qn INSTALLFOLDER=<dir>`：20 个文件（含 `platforms\qwindows.dll` 等子目录）、
+  开始菜单快捷方式、HKCU Run、ARP 全部就位，exit 0；
+- `msiexec /x msi /qn`：本包文件/快捷方式/Run/ARP 清除，预置的 `keep.txt` 与
+  `config\config.yaml` 保留（不会误删同目录后端文件）；
+- 向导 UI 标题「私有云服务器设置 安装程序」，中文，目录页可选路径；
+- 说明：ARP 实际注册在 HKLM（Windows Installer 行为），仍可在「应用和功能」卸载；
+  per-user 安装不需要管理员。
+- 旧的 NSIS 脚本/产物已删除，`release\` 与 `dist\` 都在 `.gitignore` 里。

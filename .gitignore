@@ -83,3 +83,4 @@ __debug_bin*
 # Qt 桌面控制台（server_ui/）构建产物与打包目录
 /server_ui/build/
 /server_ui/dist/
+/server_ui/release/
