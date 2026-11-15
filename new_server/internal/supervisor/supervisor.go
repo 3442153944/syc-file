@@ -119,13 +119,18 @@ func (s *Supervisor) Start() {
 func (s *Supervisor) supervise(pc ProcessConfig) {
 	defer s.wg.Done()
 
-	// 用户已经手动起过就不抢。这里只在首次启动时判断：后续由我们拉起的进程
-	// 死掉时理应重启，不该因为"检测到自己刚死剩下的同名残留"而放弃。
+	// 用户已经手动起过就优先用它，但不能直接退出：现成实例同样会退出，
+	// 退出后必须由本 goroutine 接管重启。只在首次启动时按已有实例判断，
+	// 后续由我们拉起的进程死掉时理应重启，不该因为"检测到自己刚死剩下的同名残留"而放弃。
 	if pc.SkipIfRunning {
 		if pid, ok := findRunning(pc.Command, pc.Args); ok {
-			s.log.Info("外部进程已在运行，交由现有实例接管",
+			s.log.Info("外部进程已在运行，开始监控现有实例",
 				zap.String("name", pc.Name), zap.Int32("pid", pid))
-			return
+			if !s.watchExisting(pc, pid) {
+				return // ctx 被取消
+			}
+			s.log.Info("现有外部进程已退出，接管并启动托管实例",
+				zap.String("name", pc.Name))
 		}
 	}
 
@@ -160,6 +165,38 @@ func (s *Supervisor) supervise(pc ProcessConfig) {
 		case <-time.After(delay):
 		case <-s.ctx.Done():
 			return
+		}
+	}
+}
+
+// watchExisting 监控一个不是本进程拉起的现有实例。
+// 返回 true 表示实例已退出（调用方应接管启动）；返回 false 表示 ctx 被取消。
+func (s *Supervisor) watchExisting(pc ProcessConfig, pid int32) bool {
+	const pollInterval = 5 * time.Second
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	expectedExe, _ := filepath.Abs(pc.Command)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+
+		p, err := process.NewProcess(pid)
+		if err != nil {
+			return true // 进程已不存在
+		}
+		running, err := p.IsRunning()
+		if err != nil || !running {
+			return true
+		}
+		// 防 PID 复用：进程还在但已经不是同一路径，按已退出处理。
+		if exe, err := p.Exe(); err == nil && exe != "" && expectedExe != "" {
+			if normalizePath(exe) != normalizePath(expectedExe) {
+				return true
+			}
 		}
 	}
 }

@@ -158,7 +158,7 @@ func SharedPathActive(db *gorm.DB, path string) error {
 	if owner != nil {
 		return ActiveTree(db, *owner, pool)
 	}
-	if config.Conf.IsPathAllowed(path) {
+	if config.Live().IsPathAllowed(path) {
 		return nil
 	}
 	return ErrDenied
@@ -219,7 +219,7 @@ func Within(root, path string) bool {
 // 只有系统管理员可以访问配置允许的其他目录，普通管理员仍受账号空间限制。
 func Authorize(db *gorm.DB, uid uint, path string) error {
 	if db == nil {
-		if config.Conf.IsPathAllowed(path) {
+		if config.Live().IsPathAllowed(path) {
 			return nil
 		}
 		return ErrDenied
@@ -250,9 +250,9 @@ func Authorize(db *gorm.DB, uid uint, path string) error {
 			}
 		}
 	}
-	if u.Level >= model.LevelSuper && config.Conf.IsPathAllowed(path) {
+	if u.Level >= model.LevelSuper && config.Live().IsPathAllowed(path) {
 		canonical, err := filepath.EvalSymlinks(path)
-		if err == nil && !config.Conf.IsPathAllowed(canonical) {
+		if err == nil && !config.Live().IsPathAllowed(canonical) {
 			return ErrDenied
 		}
 		return nil

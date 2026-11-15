@@ -124,7 +124,7 @@ func (h *APIHandler) DownloadPackage(c *gin.Context) {
 		return
 	}
 	real, err := filepath.EvalSymlinks(rel.FilePath)
-	if err != nil || !config.Conf.IsPathAllowed(real) {
+	if err != nil || !config.Live().IsPathAllowed(real) {
 		c.Status(404)
 		return
 	}

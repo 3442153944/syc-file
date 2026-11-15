@@ -83,6 +83,9 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		}
 		userID := uint(claims.(*token.Claims).UserID)
 
+		// file.upload.* 是热字段：本次请求读一次 Live 快照，保存后无需重启即生效。
+		live := config.Live()
+
 		var req uploadInitReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.WriteHTTP(c, http.StatusOK, 400, "参数解析失败", nil)
@@ -115,16 +118,16 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 				return
 			}
 			req.Path = filepath.Dir(fullPath)
-			if !config.Conf.IsExtensionAllowed(filepath.Ext(req.Name)) {
+			if !live.IsExtensionAllowed(filepath.Ext(req.Name)) {
 				response.WriteHTTP(c, http.StatusOK, 400, "不允许上传该类型的文件", nil)
 				return
 			}
-			if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
+			if len(req.Name) > live.File.Upload.MaxFilenameLength {
 				response.WriteHTTP(c, http.StatusOK, 400, "文件名过长", nil)
 				return
 			}
 		}
-		if req.TotalSize <= 0 || (!req.QuickShare && req.TotalSize > config.Conf.File.Upload.MaxFileSize) {
+		if req.TotalSize <= 0 || (!req.QuickShare && req.TotalSize > live.File.Upload.MaxFileSize) {
 			response.WriteHTTP(c, http.StatusOK, 400, "文件大小超出限制", nil)
 			return
 		}
@@ -478,6 +481,7 @@ func uniqueNameWithTimestamp(reqPath, name string) (string, string, error) {
 // quickShareTargetPath 快传分片上传的目标路径：quick_share.base_path/<userID>/<uuid><ext>。
 // 与旧单发快传接口同一套落地规则。BasePath 未配置返回错误（调用方回 500）。
 func quickShareTargetPath(userID uint, name string) (string, error) {
+	// quick_share.base_path 是冷字段（启动时装配），按设计继续读 Conf。
 	qs := config.Conf.QuickShare
 	if qs.BasePath == "" {
 		return "", errors.New("未配置粘贴快传目录 quick_share.base_path")
@@ -490,8 +494,9 @@ func quickShareTargetPath(userID uint, name string) (string, error) {
 }
 
 // quickShareRemainingBytes 快传剩余配额 = 容量上限（config 未配时 10GB 兜底）- 已用。
+// quick_share.max_capacity_bytes 是热字段：读 Live 快照。
 func quickShareRemainingBytes(db *gorm.DB, userID uint) (int64, error) {
-	maxCapacity := config.Conf.QuickShare.MaxCapacityBytes
+	maxCapacity := config.Live().QuickShare.MaxCapacityBytes
 	if maxCapacity <= 0 {
 		maxCapacity = defaultQuickShareCapacityBytes
 	}

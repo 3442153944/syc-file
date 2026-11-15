@@ -141,12 +141,12 @@ func Init(cfg config.ThumbnailConfig, rdb *redis.Client) (*Service, error) {
 	}
 	dir, tmpDir := cfg.Dir, cfg.TempDir
 	if dir == "" || tmpDir == "" {
-		if len(config.Conf.File.AllowedPaths) == 0 {
+		if len(config.Live().File.AllowedPaths) == 0 {
 			logger.Logger.Warn("没有配置 file.allowed_paths，无法确定缩略图目录，缩略图功能不可用")
 			return nil, nil
 		}
 		st := config.Conf.File.Storage
-		vol := volroot.RootOf(config.Conf.File.AllowedPaths[0])
+		vol := volroot.RootOf(config.Live().File.AllowedPaths[0])
 		if dir == "" {
 			dir = filepath.Join(vol, st.BasePath, "thumbs")
 		}
@@ -831,7 +831,7 @@ func widthOfMember(member string) int {
 
 // storageHealthy 配置的存储根目录是否都能读到且非空。
 func storageHealthy() bool {
-	for _, p := range config.Conf.File.AllowedPaths {
+	for _, p := range config.Live().File.AllowedPaths {
 		entries, err := os.ReadDir(p)
 		if err != nil || len(entries) == 0 {
 			return false

@@ -124,7 +124,8 @@ func getBriefDiskList() ([]diskInfoBrief, error) {
 		return nil, fmt.Errorf("获取磁盘分区失败: %w", err)
 	}
 
-	allowedPaths := config.Conf.GetAllowedPaths()
+	// file.allowed_paths 是热字段：读 Live 快照，保存后无需重启。
+	allowedPaths := config.Live().GetAllowedPaths()
 	var disks []diskInfoBrief
 
 	for _, partition := range partitions {

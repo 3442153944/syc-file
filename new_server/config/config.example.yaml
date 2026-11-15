@@ -234,3 +234,12 @@ vpn:
   server_endpoint: ""
   # 服务器本机 wg 接口名；配置后后端按会话有效性自动增删 peer
   server_interface: ""
+
+# 桌面控制台（syc-file-gui.exe，独立进程，Qt6 构建）。
+# gui.enabled / gui.ui_path 由后端读取（启动后自动拉起控制台）；其余字段由控制台自己读取。
+gui:
+  enabled: true                    # true = 后端启动后自动拉起控制台；headless/Docker 部署建议 false
+  ui_path: ""                      # 空 = 与后端同目录的 syc-file-gui(.exe)；相对路径按后端 exe 目录解析
+  start_minimized: true            # true = 启动只驻留系统托盘，不弹窗口
+  backend_path: ""                 # 空 = GUI 同目录的 syc-file(.exe)；可填绝对路径
+  backend_workdir: ""              # 空 = backend_path 所在目录；配置里的相对路径以它为基准

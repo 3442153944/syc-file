@@ -46,7 +46,8 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			return
 		}
 
-		maxExpire := config.Conf.Share.MaxExpireMinutes
+		// share.max_expire_minutes 是热字段：读 Live 快照，保存后无需重启。
+		maxExpire := config.Live().Share.MaxExpireMinutes
 		if maxExpire <= 0 {
 			maxExpire = 30 * 24 * 60
 		}
@@ -72,6 +73,7 @@ func HandlerFuncCreateShareLink(db *gorm.DB, redisClient *redis.Client) gin.Hand
 			return
 		}
 
+		// share.temp_path 是冷字段（启动时装配），按设计继续读 Conf。
 		tempDir := config.Conf.Share.TempPath
 		if tempDir == "" {
 			response.WriteHTTP(c, http.StatusOK, 500, "未配置分享临时目录 share.temp_path", nil)

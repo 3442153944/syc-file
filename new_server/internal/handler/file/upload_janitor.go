@@ -33,7 +33,9 @@ func StartTempJanitor(db *gorm.DB) {
 func cleanupTempOnce(databases ...*gorm.DB) {
 	threshold := time.Now().Add(-uploadSessionTTL)
 	dirs := make([]string, 0)
-	for _, drive := range config.Conf.File.AllowedPaths {
+	// file.allowed_paths 是热字段：读 Live 快照；storage.* 是冷字段，仍读 Conf。
+	live := config.Live()
+	for _, drive := range live.File.AllowedPaths {
 		vol := volroot.RootOf(drive)
 		base := config.Conf.File.Storage.BasePath
 		if !filepath.IsAbs(base) {

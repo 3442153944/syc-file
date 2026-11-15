@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Windows 一键部署后端（构建 sys_core + Go 二进制、生成配置、起 redis、启动后端）。
 
@@ -21,6 +21,8 @@ param(
     [string]$ConfigPath = '',
     [string]$NodeName = 'win-home',
     [switch]$NoSupervisor,
+    [switch]$SkipGui,
+    [string]$QtDir = 'C:\Qt\6.9.3\mingw_64',
     [switch]$SkipTools,
     [string]$ProdHost = 'vm',
     [string]$FrpcExe = 'E:\内网穿透\frp\frpc.exe',
@@ -83,7 +85,52 @@ if (-not $SkipBuild) {
         if ($LASTEXITCODE -ne 0) { Die "go build 失败 ($LASTEXITCODE)" }
     } finally { Pop-Location }
     Ok 'syc-file.exe 构建完成'
-} else {
+
+    # 桌面控制台（独立 C++/Qt6 项目 server_ui/）：与后端解耦，只通过 config.yaml、
+    # 日志文件和 localapi（runtime.json + token）通信。
+    # -SkipGui 可在没有 Qt 工具链的机器上跳过；Qt 路径可用 -QtDir 覆盖。
+    if (-not $SkipGui) {
+        Step '构建桌面控制台 (C++/Qt6 · server_ui)'
+        $serverUi = Join-Path $Repo 'server_ui'
+        if (-not (Test-Path (Join-Path $serverUi 'CMakeLists.txt'))) { Die "找不到 $serverUi\CMakeLists.txt" }
+        $qtBin = Join-Path $QtDir 'bin'
+        if (-not (Test-Path (Join-Path $qtBin 'windeployqt.exe'))) { Die "找不到 Qt（$QtDir），可用 -QtDir 指定 Qt 6 的 mingw_64 目录" }
+        $qtRoot = Split-Path $QtDir -Parent
+        $mingwBin = Join-Path $qtRoot 'Tools\mingw1310_64\bin'
+        $ninjaExe = Join-Path $qtRoot 'Tools\Ninja\ninja.exe'
+        $env:Path = $qtBin + ';' + $mingwBin + ';' + (Split-Path $ninjaExe -Parent) + ';' + $env:Path
+        $cmakeCmd = Get-Command cmake -ErrorAction SilentlyContinue
+        if (-not $cmakeCmd) { Die '找不到 cmake' }
+        $uiBuild = Join-Path $serverUi 'build'
+        $qtPrefix = $QtDir -replace '\\','/'
+        $gxx = (Join-Path $mingwBin 'g++.exe') -replace '\\','/'
+        $gcc = (Join-Path $mingwBin 'gcc.exe') -replace '\\','/'
+        $ninja = $ninjaExe -replace '\\','/'
+        & $cmakeCmd.Source -S $serverUi -B $uiBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_PREFIX_PATH=$qtPrefix" "-DCMAKE_CXX_COMPILER=$gxx" "-DCMAKE_C_COMPILER=$gcc" "-DCMAKE_MAKE_PROGRAM=$ninja"
+        if ($LASTEXITCODE -ne 0) { Die "cmake 配置失败 ($LASTEXITCODE)" }
+        & $cmakeCmd.Source --build $uiBuild
+        if ($LASTEXITCODE -ne 0) { Die "桌面控制台构建失败 ($LASTEXITCODE)" }
+
+        $uiDist = Join-Path $serverUi 'dist'
+        if (Test-Path $uiDist) { Remove-Item $uiDist -Recurse -Force }
+        New-Item -ItemType Directory -Path $uiDist | Out-Null
+        Copy-Item (Join-Path $uiBuild 'syc-file-gui.exe') $uiDist
+        & (Join-Path $qtBin 'windeployqt.exe') --release --no-translations --compiler-runtime --dir $uiDist (Join-Path $uiDist 'syc-file-gui.exe')
+        if ($LASTEXITCODE -ne 0) { Die "windeployqt 失败 ($LASTEXITCODE)" }
+        Remove-Item (Join-Path $uiDist 'opengl32sw.dll'), (Join-Path $uiDist 'D3Dcompiler_47.dll') -Force -ErrorAction SilentlyContinue
+
+        # 更新前先结束在跑的托盘进程，否则 exe 被占用。
+        Get-Process -Name 'syc-file-gui' -ErrorAction SilentlyContinue | ForEach-Object { & taskkill /PID $_.Id /T /F 2>&1 | Out-Null }
+        Start-Sleep -Milliseconds 800
+        Get-ChildItem $uiDist -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring($uiDist.Length + 1)
+            $targetPath = Join-Path $InstallDir $rel
+            $targetDir = Split-Path $targetPath -Parent
+            if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+            Copy-Item $_.FullName $targetPath -Force
+        }
+        Ok 'syc-file-gui.exe（Qt6）构建并部署完成'
+    }} else {
     Step '跳过构建'
     if (-not (Test-Path (Join-Path $InstallDir 'syc-file.exe'))) { Die '安装目录没有 syc-file.exe，不能 -SkipBuild' }
 }
@@ -237,6 +284,25 @@ if (-not $serverModeSeen) {
     }
 }
 $config = ($out -join "`r`n") + "`r`n"
+
+# GUI 段：后端读 enabled/ui_path（启动后自动拉起控制台），其余字段控制台自己读。
+if ($config -notmatch '(?m)^gui:') {
+    $guiLines = @(
+        '',
+        '# 桌面控制台（syc-file-gui.exe）。后端读 enabled/ui_path；其余字段控制台自己读。',
+        'gui:',
+        '  enabled: true                  # 后端启动后自动拉起控制台',
+        '  ui_path: ""                    # 空 = 与后端同目录的 syc-file-gui.exe',
+        '  start_minimized: true          # 启动只驻留托盘',
+        '  backend_path: ""               # 空 = GUI 同目录的 syc-file.exe',
+        '  backend_workdir: ""            # 空 = backend_path 所在目录'
+    )
+    $config = $config + ($guiLines -join "`r`n") + "`r`n"
+} elseif ($config -notmatch '(?m)^\s+ui_path:') {
+    # 老配置补 ui_path（保持原 gui 段其余键不动）
+    $config = [regex]::Replace($config, '(?m)^gui:\s*$', "gui:`r`n  ui_path: `"`"")
+}
+
 if ($config -notmatch '(?m)^db:' -or $config -notmatch '(?m)^redis:' -or $config -notmatch '(?m)^auth:') { Die '生成配置缺少 db/redis/auth 段' }
 
 $configPathOut = Join-Path $InstallDir 'config\config.yaml'
@@ -332,6 +398,9 @@ Write-Host '部署完成。' -ForegroundColor Green
 Write-Host "  安装目录 : $InstallDir"
 Write-Host "  端口     : $Port（nginx 已反代 localhost:$Port）"
 Write-Host "  日志     : $InstallDir\log\server.log"
+if (-not $SkipGui -and (Test-Path (Join-Path $InstallDir 'syc-file-gui.exe'))) {
+    Write-Host "  控制台   : $InstallDir\syc-file-gui.exe（托盘常驻，管配置/日志/启停；关掉不影响后端）"
+}
 if ($NoSupervisor) { Write-Host '  supervisor: 未启用（-NoSupervisor）' -ForegroundColor Yellow }
 Write-Host ''
 Write-Host '下一步：'

@@ -128,7 +128,7 @@ func (h *APIHandler) Publish(c *gin.Context) {
 		return
 	}
 	// 安装包路径必须落在允许盘内（与 download/upload 一致的安全边界）
-	if !config.Conf.IsPathAllowed(req.FilePath) {
+	if !config.Live().IsPathAllowed(req.FilePath) {
 		jsonErr(c, 400, "安装包路径不在允许的存储范围内")
 		return
 	}

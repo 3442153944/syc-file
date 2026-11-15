@@ -94,7 +94,15 @@ flowchart LR
 ### 3.1 目录
 
 ```
-cmd/main.go            入口
+cmd/main.go            入口（薄壳：app.Init → Start → WaitExit → Stop）
+internal/app/          后端装配（Init/Start/Stop）与运行状态采集（原 main.go 初始化链）
+internal/localapi/     本地管理接口（127.0.0.1 + 随机 token + runtime.json）：
+                       status / restart / shutdown / config-validate
+internal/desktopapi/   本地管理接口的线上契约类型（纯标准库；后端不含任何 GUI 代码）
+config/live.go         atomic 配置快照（热字段热重载）
+config/editor.go       yaml.Node 保注释编辑 + 备份 + 原子写
+config/hot.go          热/冷字段表与变更分类
+config/watch.go        监听 config.yaml（1s mtime 轮询 + 防抖）
 config/                Viper：config.yaml（不入库）+ config.example.yaml
 deploy/                frpc / ddns-go 配置模板（真实配置不入库）
 sync_core/              Rust 静态库 libsync_core.a（C ABI v4）
@@ -123,6 +131,11 @@ sql/                   参考 DDL / 手工迁移脚本（share_link.sql、sync_f
 ### 3.2 启动序列与后台任务
 
 `config.Init` → `logger.Init` → `procpriority.Raise` → Gin（CORS + ZapLogger + Recovery）→ MySQL + `AutoMigrate` → Redis → `ws.InitWS` → monitor（广播器、历史记录、日归档、资源告警、保留清理）→ `device_store` / `upload_store` → 临时目录与分享链接 janitor → `sync.InitSync`（N 个 worker + Reaper）→ OperationLogger → 静态资源（头像 / 分享临时目录）→ 路由 → supervisor → `Run(:8991)`。
+
+2026-11 起这段装配整体搬进 `internal/app`（`App.Init/Start/Stop`），`cmd/main.go` 只剩调用；
+`Start` 额外做两件事：在 loopback 上启 `internal/localapi`（桌面控制台的状态/重启/停止入口），
+以及启动 `config` 的 `config.yaml` 监听（热字段即时生效，冷字段等重启）。这两者失败都只告警，
+不影响后端本身提供服务。
 
 ### 3.3 鉴权
 
