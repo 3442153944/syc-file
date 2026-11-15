@@ -136,7 +136,15 @@ ConfigPage::ConfigPage(BackendClient *client, QWidget *parent)
     connect(client_, &BackendClient::configFieldsLoaded, this,
             [this](bool ok, const ConfigForm &form, const QString &error) {
                 if (!ok) {
-                    showFormMessage(QStringLiteral("读取配置字段失败：%1").arg(error), true);
+                    if (!QFileInfo::exists(client_->configPath())) {
+                        showFormMessage(
+                            QStringLiteral("配置文件不存在：%1。控制台会自动定位后端（服务注册 / 运行中的后端进程）；"
+                                           "也可以用 --config <config.yaml> 显式指定。")
+                                .arg(client_->configPath()),
+                            true);
+                    } else {
+                        showFormMessage(QStringLiteral("读取配置字段失败：%1").arg(error), true);
+                    }
                     return;
                 }
                 buildForm(form);
@@ -163,11 +171,11 @@ void ConfigPage::reload()
 
 void ConfigPage::updatePathLabel()
 {
-    pathLabel_->setText(client_->configPath());
+    const QFileInfo info(client_->configPath());
+    pathLabel_->setText(info.exists() ? info.absoluteFilePath()
+                                      : info.absoluteFilePath() + QStringLiteral("（不存在）"));
     pathLabel_->setToolTip(QStringLiteral("最后修改：%1")
-                               .arg(QFileInfo(client_->configPath())
-                                        .lastModified()
-                                        .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
+                               .arg(info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))));
 }
 
 void ConfigPage::loadRawText()

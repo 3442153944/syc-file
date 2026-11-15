@@ -199,11 +199,12 @@ foreach ($rel in $allDirs) {
     <ComponentGroup Id="CG_Shortcuts" Directory="INSTALLFOLDER">
       <Component Id="C_Shortcuts" Guid="*">
         <Shortcut Id="StartMenuShortcut" Directory="AppProgramMenuDir" Name="私有云服务器设置"
-                  Target="[INSTALLFOLDER]syc-file-gui.exe" WorkingDirectory="INSTALLFOLDER" Advertise="no" />
+                  Target="[INSTALLFOLDER]syc-file-gui.exe" Arguments="[BACKEND_ARGS]"
+                  WorkingDirectory="INSTALLFOLDER" Advertise="no" />
         <RemoveFolder Id="RemoveAppProgramMenuDir" Directory="AppProgramMenuDir" On="uninstall" />
         <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
                        Name="私有云服务器设置" Type="string"
-                       Value="&quot;[INSTALLFOLDER]syc-file-gui.exe&quot;" KeyPath="yes" />
+                       Value="&quot;[INSTALLFOLDER]syc-file-gui.exe&quot; [BACKEND_ARGS]" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 '@)
@@ -233,6 +234,20 @@ $wxs = @"
     <Property Id="ALLUSERS" Value="2" />
     <Property Id="MSIINSTALLPERUSER" Value="1" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- 安装时从服务注册读出后端目录，把 -config 参数写进快捷方式/自启项：
+         控制台即使用户改了安装位置，也不需要手动在界面里填配置路径。
+         也可以在命令行覆盖：msiexec /i setup.msi BACKENDCONFIG=<config.yaml> -->
+    <Property Id="BACKEND_APPDIR">
+      <RegistrySearch Id="BackendAppDirSearch" Root="HKLM"
+                      Key="SYSTEM\CurrentControlSet\Services\FileSyncBackend\Parameters"
+                      Name="AppDirectory" Type="raw" />
+    </Property>
+    <SetProperty Id="BACKENDCONFIG" Value="[BACKEND_APPDIR]\config\config.yaml"
+                 After="CostFinalize" Condition="BACKEND_APPDIR AND NOT BACKENDCONFIG" />
+    <SetProperty Id="BACKEND_ARGS" Value="--config &quot;[BACKENDCONFIG]&quot;"
+                 After="CostFinalize" Condition="BACKENDCONFIG" />
+
     <WixVariable Id="WixUILicenseRtf" Value="`$(var.LicenseRtf)" />
     <ui:WixUI Id="WixUI_InstallDir" />
 

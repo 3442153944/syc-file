@@ -144,7 +144,13 @@ powershell -ExecutionPolicy Bypass -File server_ui\build-win.ps1 -Installer
 - 双击进入**中文 Windows Installer 向导**（欢迎 → 许可 → **选择安装路径** → 安装 → 完成）；
 - 安装时由 `msiexec` 释放 `syc-file-gui.exe` + Qt DLL/插件（含 platforms/styles/… 子目录），
   创建开始菜单快捷方式和 HKCU 登录自启项，并在「应用和功能」注册卸载入口；
-- 默认装到 `%LOCALAPPDATA%\Programs\私有云服务器设置`（当前用户，无需管理员）；
+- **安装位置可以自选，不需要在控制台里再填后端路径**：安装器会从
+  `HKLM\SYSTEM\CurrentControlSet\Services\FileSyncBackend\Parameters\AppDirectory`
+  读出后端目录，把 `--config "<后端目录>\config\config.yaml"` 直接写进快捷方式和自启项；
+  也可在命令行覆盖：`msiexec /i 私有云服务器设置.msi BACKENDCONFIG=<config.yaml>`；
+- 控制台自身也会在未显式指定 `--config` 时**运行时定位**后端（同目录 → 服务注册 → 运行中的
+  `syc-file.exe` 进程）；显式路径失效时自动回退到运行时发现，所以后端搬家/装在不同盘也能用；
+- 默认装到 `%LOCALAPPDATA%\Programs\私有云服务器设置`（当前用户，不需要管理员）；
 - 卸载只删除安装包释放的文件，同目录的后端/配置/日志不会被删。
 
 > 为什么用 MSI 而不是自解压 exe：本机火绒等 HIPS 会拦截未签名自解压安装包写注册表/开始菜单
