@@ -42,12 +42,15 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 			name = "pasted-file"
 		}
 
+		// quick_share.base_path 是冷字段（启动时装配）；配额 / 内存阈值 / 默认有效期是热字段，
+		// 从 Live 快照读，保存后无需重启。
 		qs := config.Conf.QuickShare
+		liveQuickShare := config.Live().QuickShare
 		if qs.BasePath == "" {
 			response.WriteHTTP(c, http.StatusOK, 500, "未配置粘贴快传目录 quick_share.base_path", nil)
 			return
 		}
-		maxCapacity := qs.MaxCapacityBytes
+		maxCapacity := liveQuickShare.MaxCapacityBytes
 		if maxCapacity <= 0 {
 			maxCapacity = defaultQuickShareCapacityBytes
 		}
@@ -70,7 +73,7 @@ func HandlerFuncQuickShareUpload(db *gorm.DB, redisClient *redis.Client) gin.Han
 		userDir := filepath.Join(qs.BasePath, strconv.FormatUint(uint64(userID), 10))
 		diskPath := filepath.Join(userDir, tempName)
 
-		data, onDisk, size, err := spillToDiskIfLarge(limitedBody, qs.MemoryThresholdBytes, func() (string, error) {
+		data, onDisk, size, err := spillToDiskIfLarge(limitedBody, liveQuickShare.MemoryThresholdBytes, func() (string, error) {
 			if mkErr := os.MkdirAll(userDir, 0o755); mkErr != nil {
 				return "", mkErr
 			}
@@ -134,7 +137,8 @@ func HandlerFuncQuickShareQuota(db *gorm.DB) gin.HandlerFunc {
 			response.WriteHTTP(c, http.StatusOK, 500, "查询配额失败", nil)
 			return
 		}
-		maxCapacity := config.Conf.QuickShare.MaxCapacityBytes
+		// quick_share.max_capacity_bytes 是热字段：读 Live 快照。
+		maxCapacity := config.Live().QuickShare.MaxCapacityBytes
 		if maxCapacity <= 0 {
 			maxCapacity = defaultQuickShareCapacityBytes
 		}
@@ -159,7 +163,8 @@ func quickShareUsedBytes(db *gorm.DB, userID uint) (int64, error) {
 
 // quickShareExpireMinutesFor 用户在用户中心配置的默认有效期优先，没配就用全局默认值。
 func quickShareExpireMinutesFor(db *gorm.DB, userID uint) int {
-	fallback := config.Conf.QuickShare.DefaultExpireMinutes
+	// quick_share.default_expire_minutes 是热字段：读 Live 快照。
+	fallback := config.Live().QuickShare.DefaultExpireMinutes
 	if fallback <= 0 {
 		fallback = 60
 	}

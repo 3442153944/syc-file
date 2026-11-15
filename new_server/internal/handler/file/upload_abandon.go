@@ -11,6 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 	"syc-file/pkg/token"
 	"syc-file/pkg/upload_store"
 )
@@ -102,6 +105,16 @@ func HandlerFuncUploadAbandon(rdb *redis.Client) gin.HandlerFunc {
 		if _, err := pipe.Exec(ctx); err != nil {
 			response.WriteHTTP(c, http.StatusOK, 500, "记录放弃失败", nil)
 			return
+		}
+		// 保留上面的 Redis 写入（重启恢复/兼容旧数据），同时把放弃记录同步给 Rust receiver：
+		// 收片热路径不再逐片 HExists 查这张表，改由 receiver 在内存里判定 abandoned。
+		// receiver 不存在时 Rust 会先缓冲、open 时合并——「abandon 先到、分片请求后 open」
+		// 的竞态不会漏判（upload_abandon_test.go 的延迟请求场景依赖这一点）。
+		for _, a := range req.Attempts {
+			if err := synccore.ReceiverAbandon(req.UploadID, a.Index, a.AttemptID); err != nil {
+				logger.Logger.Warn("记录分片放弃到接收器失败", zap.String("upload_id", req.UploadID),
+					zap.Int("index", a.Index), zap.Error(err))
+			}
 		}
 		response.WriteHTTP(c, http.StatusOK, 200, "已放弃分片尝试", gin.H{"count": len(req.Attempts)})
 	}

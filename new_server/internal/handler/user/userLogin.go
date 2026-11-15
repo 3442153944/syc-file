@@ -113,7 +113,7 @@ func HandlerFuncLogin(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 				[]string{u.Role},
 				req.DeviceID,
 				u.Level,
-				config.Conf.Auth.TokenExpire,
+				config.Live().Auth.TokenExpire,
 			)
 		}
 		if err != nil {

@@ -9,7 +9,7 @@
 
 | 端 | 技术 | 同步角色 |
 |---|---|---|
-| 后端 `new_server/` | Go 1.25 + Gin + GORM；Rust 静态库 `sync_core`（cgo） | 编排：接收上报 → 冲突检测 → 派发任务 |
+| 后端 `new_server/` | Go 1.25 + Gin + GORM；Rust 内核 `sys_core`，兼容静态库 `sync_core`（cgo） | 编排：接收上报 → 冲突检测 → 派发任务 |
 | 桌面端 `filesync-desktop/` | Tauri 2 + Vue 3 + Naive UI + Rust；Windows 为主，Linux（deb）可构建 | 双向（notify watcher） |
 | Android `Android/` | Kotlin + Compose；Rust JNI（`sync_core_jni`） | 双向（inotify 递归 watcher） |
 | 鸿蒙 `harmony/` | ArkTS + ArkUI；Rust NAPI（`libfilecore.so`） | 仅下行 download_only（无 root、无监听） |
@@ -45,7 +45,7 @@
 
 **Windows 主机**：后端 / MySQL / Redis / nginx / frpc / ddns-go 均已停止，仅作客户端开发环境与数据备份。客户端域名端口不变，无需改配置。
 
-**组网（2026-10-19 上线）**：与 `syc-file` 同进程，`vpn.server_interface: syc0` 由 systemd 以 root 运行；服务器节点 `172.1.0.254/16`，UDP `51820`（WireGuard）+ `3478`（STUN-lite）需在防火墙放行。配置段 `vpn:`（pool / stun_port / server_address / server_pubkey / server_endpoint / server_interface），`server_endpoint` 留空时按客户端请求实际使用的 Host 推导，避免绑死某一个入口。私钥只在服务端存密文，解密密钥来自 `/etc/syc-file.env` 的 `SYC_VPN_MASTER_KEY`（systemd EnvironmentFile 注入）。
+**组网（2026-10-19 上线）**：与 `syc-file` 同进程，`vpn.server_interface: syc0` 由 systemd 以 root 运行；服务器节点 `172.1.0.254/16`，UDP `51820`（WireGuard）+ `3478`（STUN-lite）需在防火墙放行。配置段 `vpn:`（pool / stun_port / server_address / server_pubkey / server_endpoint / server_interface），`server_endpoint` 留空时按客户端请求实际使用的 Host 推导，避免绑死某一个入口。组网配置只从 `config.yaml` 读取（生产/开发各一份，不入库）；设备私钥只由服务端进程内存动态生成并托管，不落数据库、不进 Redis，服务重启后设备下次取身份自动重新签发，因此不需要主密钥配置。
 
 ---
 
@@ -94,7 +94,15 @@ flowchart LR
 ### 3.1 目录
 
 ```
-cmd/main.go            入口
+cmd/main.go            入口（薄壳：app.Init → Start → WaitExit → Stop）
+internal/app/          后端装配（Init/Start/Stop）与运行状态采集（原 main.go 初始化链）
+internal/localapi/     本地管理接口（127.0.0.1 + 随机 token + runtime.json）：
+                       status / restart / shutdown / config-validate
+internal/desktopapi/   本地管理接口的线上契约类型（纯标准库；后端不含任何 GUI 代码）
+config/live.go         atomic 配置快照（热字段热重载）
+config/editor.go       yaml.Node 保注释编辑 + 备份 + 原子写
+config/hot.go          热/冷字段表与变更分类
+config/watch.go        监听 config.yaml（1s mtime 轮询 + 防抖）
 config/                Viper：config.yaml（不入库）+ config.example.yaml
 deploy/                frpc / ddns-go 配置模板（真实配置不入库）
 sync_core/              Rust 静态库 libsync_core.a（C ABI v4）
@@ -123,6 +131,11 @@ sql/                   参考 DDL / 手工迁移脚本（share_link.sql、sync_f
 ### 3.2 启动序列与后台任务
 
 `config.Init` → `logger.Init` → `procpriority.Raise` → Gin（CORS + ZapLogger + Recovery）→ MySQL + `AutoMigrate` → Redis → `ws.InitWS` → monitor（广播器、历史记录、日归档、资源告警、保留清理）→ `device_store` / `upload_store` → 临时目录与分享链接 janitor → `sync.InitSync`（N 个 worker + Reaper）→ OperationLogger → 静态资源（头像 / 分享临时目录）→ 路由 → supervisor → `Run(:8991)`。
+
+2026-11 起这段装配整体搬进 `internal/app`（`App.Init/Start/Stop`），`cmd/main.go` 只剩调用；
+`Start` 额外做两件事：在 loopback 上启 `internal/localapi`（桌面控制台的状态/重启/停止入口），
+以及启动 `config` 的 `config.yaml` 监听（热字段即时生效，冷字段等重启）。这两者失败都只告警，
+不影响后端本身提供服务。
 
 ### 3.3 鉴权
 
@@ -235,7 +248,7 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
   - 追赶（每次 WS Connected）：Phase1 上传离线变更 + Phase2 `scan`；stat 缓存避免重算；上传 / 下载各 Semaphore(2)；`syncOnWifiOnly` 门控；
   - 冲突：本地副本隔离 `.syncpending/<conflictId>/content`，相对路径单独保存；`keep_local` 按原子目录恢复，以 server_hash 为 base 回放重传；上传或上报失败保留隔离副本。旧格式缺少路径时保留供手动恢复。自写路径 10s 抑制回环。
 - **保活**：`SyncKeepAliveService`（dataSync 前台服务，30s 守护重连，`forceKeepAliveEnabled`）；root 设备进程级守护（LSPosed 看门狗）在 app 外部维护；持久化续传（`persistentDownloadEnabled`）仅 root 可见。
-- **Rust 内核**：`sync_core_jni`（cdylib，需 NDK + cargo-ndk）→ `core/SyncCore`（`describe` / `hashChunk` / `merkleRoot`）；普通上传和快传的多路径决策均走 `core/SyncPlanner` → 共享 `sync_core::upload_planner`。入口健康选择走 `core/NodeSelector` → 共享 `sync_core::node_selection`，Windows 灾备也调用同一函数；Kotlin 执行探测、HTTP、持久化和界面，不重新实现选路。缺 .so 时普通上传回退 Java 固定分片，自动选路不做 Kotlin 替代。
+- **Rust 内核**：共享实现位于仓库根目录 `sys_core/`。桌面直接链接 rlib，Android 的 `sync_core_jni` 链接同一实现；`core/SysUpload` 只适配 HTTP、取消、进度和持久化，上传执行、会话重建、分片读取、重试、快传收尾统一由 `sys_core::upload` 维护。`api/file/ChunkedUploader` 平台门面不再维护 Kotlin 上传循环，上传 JNI 缺失或过旧时明确报错。Go 的 `new_server/sync_core` 仅为旧 C ABI/构建产物的兼容壳；预分配、定位写、哈希、Merkle、节点选择和系统采集只有一份 Rust 核心实现。窗口、watcher、WS 和各端同步业务编排仍在宿主。详见 `sys_core/README.md`。
 - **快传 / 灾备**：首页“快传与分享管理”提供暂存队列、暂停恢复、取消、自动复制和服务端分享历史；`QuickShareService` 提供半透明图标投递窗与前台通知，拖入才展开，`QuickShareActivity` 接系统分享和文件 URI 授权。快传完成在同后端入口间重试，复制前校验真实 Range 下载。服务器设置可编辑备用入口与灾备开关。当前进度、验证和边界见 `Android/PROGRESS.md`。
 - **其它能力**：文件在线预览（`previewUtil/` + `ui/screen/preview/`：图 / 视频 / 音频 / PDF / 文本 / Office，Office 经 POI，**需真机验证**）；应用更新（`update/UpdateController`：check + WS 推送 + 复用下载 + FileProvider 安装 + 强制更新）；设备监控（`DevicesList`，admin 多一个「所有在线设备」分区）；同步列表分页（每页 10 条）。
 - 底部四标签：Home / Files / Monitor / Personal；导航为 Navigation-Compose 类型安全路由（`router/AppRoute.kt` 为死代码）。
@@ -307,7 +320,8 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 
 ### 9.3 密钥与身份
 
-- X25519（clamp 后）生成密钥对；私钥用 AES-256-GCM 加密入库，AAD 绑 `device_id`；主密钥只从环境变量 `SYC_VPN_MASTER_KEY` 读（见 `keys.go`）。
+- X25519（clamp 后）生成密钥对；私钥只存在服务进程内存（`hosted_keys.go`），数据库只存公钥，不落盘、不进 Redis，也没有加密主密钥。
+- 服务重启后内存清空，设备下次取身份（`identity`）会自动重新生成并下发新身份；客户端不持久化私钥，所以这是"重新签发"而不是长期故障。旧加密列 `priv_key_enc` 仅保留列、不再写入。
 - 设备入组有两条路：管理端发一次性入组码（`enroll` → `register`），或桌面端 `POST /v1/vpn/auto-enroll`（按登录 `Device-Id` 自动选组登记；管理员无组时自动落到第一个组/默认组）。
 - **身份不落盘**：`GET /v1/vpn/identity` 用当前 JWT 换回解密后的私钥，启动隧道时现取现用；私钥仍只在服务端存密文。
 - 会话有效期 `session_expires_at`：注册写入、`heartbeat`（30s）续期；`peers` / `server-peers` 只返回未过期设备。会话过期只移除 peer，设备与地址保留。
@@ -329,7 +343,8 @@ Viper 读 `config/config.yaml` + `AutomaticEnv`。段：db / redis(含 password)
 
 - **CLI** `filesync-cli/`（bin `syc`）：`login/status/devices/groups/enroll/register/peers/link/nat/wg-config/up/down/netcheck/ping`；`up` 用 `wg setconf` + 临时 `ListenPort=0`，`wg-config` 输出 wg-quick 格式；`netcheck` 一次看公网端点、链路模式、对端；`ping` 可 `--iface` 强制走隧道。
 - **桌面端**：Tauri 命令 `vpn_nat/link/wg_config/up/down/stun/ping/ping_stream/tunnel_status/up_embedded/down_embedded`；独立「组网」页（`views/vpn/Mesh.vue`）：总览（服务器置顶）、任意地址 ping（逐行实时输出）、踢/停用（可选时长）/封禁/释放。`NodeSwitcher` 显示直连/中继。
-- **Windows 内嵌隧道**：`src-tauri/resources/wireguard/wireguard.exe` 固定 **WireGuard for Windows 1.1.1**（仓库入库，sha256 见 `VERSION`），只认自依赖、不回退 `Program Files`；生成配置写 `%ProgramData%\syc\syc0.conf` 后调 `/installtunnelservice`，只操作 `syc0`，不影响用户其它 WireGuard 隧道。
+- **组网协调节点**：`/v1/vpn/*` 请求不跟随当前文件节点，而是按探测延迟从低到高选可达节点（失败自动降级），并在本次隧道生命周期内固定；服务器 peer 端点由后端 `vpn.server_endpoint` 固定（生产 `ali.sunyuanling.cn:52000`，阿里 frp UDP 再转到 VM 的 51820），客户端不按协调节点自行拼端点。
+- **Windows 内嵌隧道**：`src-tauri/resources/wireguard/wireguard.exe` 固定 **WireGuard for Windows 1.1.1**（仓库入库，sha256 见 `VERSION`），只认自依赖、不回退 `Program Files`；配置由 `sys_core::windows_tunnel` 纯 Rust 实现经受限一次性命名管道直接交给系统服务（无 PowerShell、私钥不落盘/不进命令行环境变量），仅服务命令里出现管道名；同目录 `wg.exe` 只用于公开身份校验。只操作 `syc0`，不影响用户其它 WireGuard 隧道；服务设为按需启动，重启后需重新认证取身份。
 - **自启与自动组网**：`tauri-plugin-autostart`（Windows 注册表 / Linux `~/.config/autostart`）；启动后若开关开启且隧道未起，自动用会话换身份拉起隧道；NSIS 卸载钩子清理 Run 项、`syc0` 服务与 ProgramData 配置。
 - **本机 / 局域网代理**：桌面「组网」页与 `syc proxy` 共用 `filesync-cli/mesh-proxy/`，HTTP / HTTPS CONNECT / SOCKS5 TCP 混合端口默认 `7897`。默认仅回环，认证由客户端独立开关控制、默认关闭，LAN 也可免密码；仅转发 `172.1.0.0/16`，出站绑定已有隧道地址。支持实时连接/流量统计与停止释放，不修改系统代理或防火墙。使用与验证见 `filesync-cli/MESH_PROXY.md`；Android 接入准备见 `Android/MESH_INTEGRATION_PLAN.md`。
 

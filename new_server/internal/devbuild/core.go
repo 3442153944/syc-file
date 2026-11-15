@@ -4,7 +4,9 @@ package devbuild
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -102,7 +104,8 @@ func objectTarget(b []byte) string {
 	return ""
 }
 
-// EnsureCore repairs absent or foreign native libraries before Go invokes cgo.
+// EnsureCore asks Cargo to check shared sources before Go invokes cgo. Cargo's
+// own incremental cache handles unchanged sources; architecture alone is not freshness.
 func EnsureCore(root string) error {
 	want := runtime.GOOS + "/" + runtime.GOARCH
 	if runtime.GOOS != "windows" && runtime.GOOS != "linux" {
@@ -112,19 +115,15 @@ func EnsureCore(root string) error {
 }
 
 func ensureCore(root, want string, build func() error) error {
-	lib := filepath.Join(root, "sync_core", "lib", "libsync_core.a")
+	lib := filepath.Join(root, "..", "sys_core", "lib", "libsys_core.a")
 	got, checkErr := ArchiveTarget(lib)
-	if checkErr == nil && got == want {
-		fmt.Printf("==> sync_core: %s verified\n", got)
-		return nil
-	}
-	fmt.Printf("==> sync_core requires rebuild: have %q (%v), need %s\n", got, checkErr, want)
+	fmt.Printf("==> checking shared sys_core sources: have %q (%v), need %s\n", got, checkErr, want)
 	if err := build(); err != nil {
 		return err
 	}
 	got, err := ArchiveTarget(lib)
 	if err != nil || got != want {
-		return fmt.Errorf("rebuilt sync_core target %q, expected %s (error: %v)", got, want, err)
+		return fmt.Errorf("shared sys_core target %q, expected %s (error: %v)", got, want, err)
 	}
 	return nil
 }
@@ -135,9 +134,9 @@ func buildCore(root string) error {
 		if runtime.GOARCH != "amd64" {
 			return fmt.Errorf("Windows build script currently supports amd64 only")
 		}
-		cmd = exec.Command("powershell.exe", "-NoProfile", "-File", filepath.Join(root, "sync_core", "build.ps1"))
+		cmd = exec.Command("powershell.exe", "-NoProfile", "-File", filepath.Join(root, "..", "sys_core", "build.ps1"))
 	} else {
-		cmd = exec.Command("bash", filepath.Join(root, "sync_core", "build.sh"))
+		cmd = exec.Command("bash", filepath.Join(root, "..", "sys_core", "build.sh"))
 	}
 	cmd.Dir = root
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -145,4 +144,18 @@ func buildCore(root string) error {
 		return fmt.Errorf("build sync_core: %w", err)
 	}
 	return nil
+}
+
+// CoreLinkerFlags makes Rust-only changes participate in Go's final link cache key.
+func CoreLinkerFlags(root string) (string, error) {
+	f, err := os.Open(filepath.Join(root, "..", "sys_core", "lib", "libsys_core.a"))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "-X syc-file/pkg/synccore.CoreArchiveSHA256=" + hex.EncodeToString(h.Sum(nil)), nil
 }

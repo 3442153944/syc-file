@@ -19,7 +19,7 @@ const enrollTTL = 5 * time.Minute
 // sessionTTL 设备会话有效期：与登录 token 一致（默认 7 天）。
 // heartbeat 每 30s 续期一次，用户真正离线超过这个时间，peer 才会被服务器移除。
 func sessionTTL() time.Duration {
-	days := config.Conf.Auth.TokenExpire
+	days := config.Live().Auth.TokenExpire
 	if days <= 0 {
 		days = 7
 	}

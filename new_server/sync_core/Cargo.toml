@@ -2,38 +2,13 @@
 name = "sync_core"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.74"
-description = "文件同步上传核心：预分配、乱序分片定位写(句柄缓存)、blake3 分片校验与 Merkle 树校验、整文件哈希(mmap+rayon)"
-
+description = "Compatibility artifact for sys_core: stable Go C ABI"
 [lib]
-name = "sync_core"
-# staticlib：产出 libsync_core.a，供 Go 通过 cgo 静态链接
-# rlib：供 Android/sync_core_jni 等 Rust 包装 crate 作为依赖复用同一实现
 crate-type = ["staticlib", "rlib"]
-
 [dependencies]
-blake3 = { version = "1", features = ["rayon"] }
-memmap2 = "0.9"
-rayon = "1"
-sysinfo = "0.32"
-netstat2 = "0.11"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
-    "Win32_System_IO",
-    "Win32_System_Ioctl",
-] }
-
+sys_core = { path = "../../sys_core" }
 [profile.release]
 lto = true
 opt-level = 3
 codegen-units = 1
-# 必须 unwind：FFI 边界的 catch_unwind 依赖它把 panic 兜成错误码；
-# abort 会让任何 panic（含 rayon 工作线程）直接带崩宿主进程（Go/Tauri/安卓/鸿蒙）。
 panic = "unwind"

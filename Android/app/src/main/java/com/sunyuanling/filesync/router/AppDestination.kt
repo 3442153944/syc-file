@@ -29,6 +29,7 @@ import kotlinx.serialization.Serializable
 @Serializable data object SettingsDestination
 /**服务器设置*/
 @Serializable data object ServerSettingsDestination
+@Serializable data object MeshDestination
 /**同步设置*/
 @Serializable data object SyncSettingsDestination
 /**关于*/

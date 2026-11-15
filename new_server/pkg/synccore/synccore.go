@@ -1,18 +1,18 @@
 // Package synccore 是对 Rust 核心库 synccore 的 cgo 封装。
 //
-// 底层实现见 new_server/sync_core（Rust，staticlib）。构建产物为
-// sync_core/lib/libsync_core.a，需先运行 sync_core/build.ps1 生成。
+// 底层实现与构建产物均来自仓库根目录 sys_core。
+// 构建前运行 sys_core/build.sh 或 build.ps1，生成 sys_core/lib/libsys_core.a。
 //
 // 所有哈希均为 32 字节 blake3。Go 侧只做编排（HTTP/鉴权/Redis 会话/DB），
 // 预分配、乱序定位写、分片与 Merkle 校验、整文件哈希等热路径全在 Rust。
 package synccore
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../sync_core
-#cgo windows LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
-#cgo linux LDFLAGS: -L${SRCDIR}/../../sync_core/lib -lsync_core -lpthread -ldl -lm
+#cgo CFLAGS: -I${SRCDIR}/../../../sys_core/include
+#cgo windows LDFLAGS: -L${SRCDIR}/../../../sys_core/lib -lsys_core -lkernel32 -lntdll -luserenv -lws2_32 -ldbghelp -liphlpapi -lpdh -lole32 -loleaut32 -lpropsys -lruntimeobject -lpsapi -lsecur32 -lnetapi32 -lpowrprof
+#cgo linux LDFLAGS: -L${SRCDIR}/../../../sys_core/lib -lsys_core -lpthread -ldl -lm
 #include <stdlib.h>
-#include "sync_core.h"
+#include "sys_core.h"
 */
 import "C"
 
@@ -21,6 +21,11 @@ import (
 	"errors"
 	"unsafe"
 )
+
+// CoreArchiveSHA256 is set by official build entry points. Including the native
+// archive fingerprint in linker flags invalidates Go's cached final link when
+// only Rust sources changed (external .a files are not Go source dependencies).
+var CoreArchiveSHA256 string
 
 // HashSize 是 blake3 哈希字节数。
 const HashSize = 32
@@ -32,7 +37,11 @@ var (
 	ErrLeafMismatch = errors.New("synccore: 分片哈希不匹配")
 	ErrRootMismatch = errors.New("synccore: Merkle 树根不匹配")
 	ErrSizeMismatch = errors.New("synccore: 文件尺寸/分片数与描述不符")
-	ErrUnknown      = errors.New("synccore: 未知错误")
+	// ErrReceiverNotFound v5 receiver：会话接收器不存在（进程重启/已 finalize/已 close）。
+	ErrReceiverNotFound = errors.New("synccore: 接收器不存在")
+	// ErrReceiverAbandoned v5 receiver：该 (index, attempt_id) 分片尝试已被放弃。
+	ErrReceiverAbandoned = errors.New("synccore: 分片尝试已放弃")
+	ErrUnknown           = errors.New("synccore: 未知错误")
 )
 
 func codeToErr(rc C.int32_t) error {
@@ -49,6 +58,10 @@ func codeToErr(rc C.int32_t) error {
 		return ErrRootMismatch
 	case C.FC_ERR_SIZE_MISMATCH:
 		return ErrSizeMismatch
+	case C.FC_ERR_NOT_FOUND:
+		return ErrReceiverNotFound
+	case C.FC_ERR_ABANDONED:
+		return ErrReceiverAbandoned
 	default:
 		return ErrUnknown
 	}
@@ -164,7 +177,7 @@ func Evict(path string) error {
 }
 
 // ProcessInfo 一个进程的资源占用快照。Score 是排序用的加权综合分
-//（cpu*2 + mem*1.5 + 连接数*1，各自在本轮进程集合内归一化，见 sys_info.rs），
+// （cpu*2 + mem*1.5 + 连接数*1，各自在本轮进程集合内归一化，见 sys_info.rs），
 // 网络维度缺跨平台可靠的进程级字节数接口，用连接数代理。
 type ProcessInfo struct {
 	PID            uint32  `json:"pid"`

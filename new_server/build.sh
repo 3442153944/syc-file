@@ -20,11 +20,12 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-bash sync_core/build.sh
+bash ../sys_core/build.sh
 if [[ -n "$ffmpeg_source" ]]; then
     bash tools/fetch-ffmpeg.sh linux --source "$ffmpeg_source"
 else
     bash tools/fetch-ffmpeg.sh linux
 fi
-CGO_ENABLED=1 CC=gcc go build -o syc-file ./cmd
+core_sha="$(sha256sum ../sys_core/lib/libsys_core.a | cut -d' ' -f1)"
+CGO_ENABLED=1 CC=gcc go build -ldflags "-X syc-file/pkg/synccore.CoreArchiveSHA256=$core_sha" -o syc-file ./cmd
 echo "==> built: $(pwd)/syc-file"

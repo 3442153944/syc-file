@@ -10,12 +10,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/shirou/gopsutil/v3/cpu"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"syc-file/internal/model"
 	"syc-file/internal/ws"
-	"syc-file/pkg/synccore"
 	"syc-file/pkg/logger"
+	"syc-file/pkg/synccore"
 )
 
 // 资源告警：看的是单个 CPU 核心的占用率，不是单个进程的占用率。异常负载常常是
@@ -45,6 +46,13 @@ const (
 	alertRecoverThreshold = alertTriggerThreshold - 10.0
 	alertBreachStreak     = 3
 	alertScanTopN         = 20 // 触发时顺带采的进程快照条数，仅供参考用
+	// 触发时的“进程归因”门槛（相当于几个单核）。sysinfo 的进程 cpu_percent 已按逻辑核数归一化，
+	// 乘回核数即“相当于吃满几个核”。VMware Workstation 等宿主机抢占 vCPU 时，guest 的
+	// /proc/stat steal 不一定可读（VMware 常报 0），被恢复的 vCPU 短暂处理中断/写回就能让某个
+	// 核在 200ms 窗口里读成 90%+，但进程快照里没有任何进程对得上——这类宿主调度/磁盘争用噪声
+	// 不应落成 CPU 告警。真实的应用/内核热点至少会有一个进程（含 ksoftirqd/kswapd 等内核线程）
+	// 达到该门槛。
+	alertMinAttributedCorePercent = 50.0
 	// gopsutil 的 cpu.Percent(0, ...) 用的是包级共享的"上次调用时间点"，跟
 	// monitor.go 的 collectCPU()（WS 推送、/monitor/system 接口都在用）共用同一份
 	// 状态——两边各自独立调用会互相打乱对方的采样窗口。这里改用非零的固定窗口，
@@ -126,14 +134,24 @@ func maxPerCore(perCore []float64) (best float64, idx int) {
 }
 
 // fireAlert 落库 + 补采一份进程快照（供参考 + 顺带进常规历史）+ 推送通知。
+// 触发前先做“进程归因”校验：核心忙但没有任何进程对得上时，判定为虚拟机宿主争用/调度噪声，
+// 只记一条 warn、不落库也不推送（详见 alertMinAttributedCorePercent）。
 func fireAlert(coreIdx int, coreCPU float64) *activeAlert {
 	snapshotJSON := []byte("[]")
+	var procs []synccore.ProcessInfo
+	var numCpus uint32
 	if snap, err := synccore.CollectSysSnapshot(alertScanTopN); err == nil {
+		procs, numCpus = snap.Processes, snap.NumCpus
 		sorted := append([]synccore.ProcessInfo(nil), snap.Processes...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].CPUPercent > sorted[j].CPUPercent })
 		if b, err := json.Marshal(sorted); err == nil {
 			snapshotJSON = b
 		}
+	}
+	if !alertCorroborated(procs, numCpus) {
+		logger.Logger.Warn("CPU 核心占用高但无进程归因，疑似虚拟机宿主争用/调度噪声，跳过告警",
+			zap.Int("core", coreIdx), zap.Float64("core_percent", coreCPU))
+		return nil
 	}
 	go recordDetailOnce() // 让告警时刻也进常规历史，进程页图表上能对上
 
@@ -157,6 +175,21 @@ func fireAlert(coreIdx int, coreCPU float64) *activeAlert {
 	)
 
 	return &activeAlert{id: alert.ID}
+}
+
+// alertCorroborated 判断“核心忙”是否有进程级归因（阈值见 alertMinAttributedCorePercent）。
+// 拿不到核数时不拦（宁可多报，也不掩盖真实热点）。
+func alertCorroborated(procs []synccore.ProcessInfo, numCpus uint32) bool {
+	if numCpus == 0 {
+		return true
+	}
+	scale := float64(numCpus)
+	for _, p := range procs {
+		if float64(p.CPUPercent)*scale >= alertMinAttributedCorePercent {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveAlert(id uint64) {

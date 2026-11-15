@@ -2,6 +2,26 @@
 
 对标 Android/Windows/Go 后端的鸿蒙 NEXT 客户端（ArkTS + ArkUI）。详细架构见仓库根 `ARCHITECTURE.md` §3C。
 
+## 🔨 构建（`harmony/build.ps1`）
+
+鸿蒙构建前必须先把 `sys_core` 打成 3 个 OHOS ABI 的静态库并纳入 `prebuilts`，统一入口是 `harmony/build.ps1`
+（先打包 core，再按参数决定是否用 DevEco hvigor 构建 HAP）：
+
+```powershell
+./build.ps1                     # 默认：只打包 sys_core（3 target → prebuilts，校验并打印 size+SHA256）
+./build.ps1 -Hap -Unsigned      # 打包 sys_core + 构建 unsigned HAP（当前签名配置下可用，退出码 0）
+./build.ps1 -Hap                # 打包 sys_core + 签名 HAP；若仅签名失败则自动降级 unsigned，退出码 2
+./build.ps1 -Offline            # cargo 用本地缓存离线打包 sys_core
+```
+
+- 依赖：DevEco Studio（hvigor / SDK / 自带 node，默认 `E:\Program Files\DevEco Studio`，可用 `DEVECO_HOME` 覆盖）；
+  rustup 已装 `aarch64-unknown-linux-ohos`、`armv7-unknown-linux-ohos`、`x86_64-unknown-linux-ohos`。
+- 产物：`products/sunyuanling/src/main/cpp/prebuilts/<abi>/libfilecore.a`；
+  HAP 在 `products/sunyuanling/build/default/outputs/default/sunyuanling-default-{signed,unsigned}.hap`。
+- 已知问题：`SignHap` 报 `00303074`（`app.json5` 的 bundleName `com.example.fileSyc` 与 `build-profile.json5`
+  里的 SigningConfigs 不匹配），HAP 编译/打包本身是通过的。修复方式：DevEco Studio → Project Structure →
+  Signing Configs → 自动签名/Fix；未修复前用 `-Hap -Unsigned` 验证构建，或 `-CoreOnly` 只出 core。
+
 ---
 
 ## ⭐ 鸿蒙手机把文件写到公共 Download 目录的正确方法（血泪总结）

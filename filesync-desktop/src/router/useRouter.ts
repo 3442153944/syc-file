@@ -70,6 +70,16 @@ function clearSession() {
 router.beforeEach(async (to) => {
     const rs = useRouteStore(pinia)
     const token = localStorage.getItem("token")
+    if (!token) {
+        const mesh = await import('@/api/vpn')
+        mesh.clearMeshIdentity()
+        if (isTauri()) {
+            const {invoke} = await import('@tauri-apps/api/core')
+            if (await invoke<boolean>('vpn_tunnel_status').catch(() => false))
+                await mesh.stopEmbeddedTunnel().catch(e => { mesh.meshMaintenanceError.value = String(e) })
+        }
+        restoredThisSession = false
+    }
 
     // 1. 服务器是否已初始化：没有就一律引导去初始化向导（服务器不可达时 status 为 null，不拦，交给登录页报错）
     const status = await rs.ensureStatus()

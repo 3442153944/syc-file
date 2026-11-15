@@ -1,16 +1,18 @@
 <script setup lang="ts">
 // 组网总览：设备 / 用户 / 分配地址 / 在线状态，外加任意地址 ping。
 // 管理员看自己机构，超管看全部；普通用户看不到这个页面（路由 MinLevel=2）。
-import {computed, h, onMounted, ref} from 'vue'
+import {computed, h, onBeforeUnmount, onMounted, ref} from 'vue'
 import {
   NAlert, NButton, NCard, NDataTable, NInput, NInputNumber, NModal, NSpace, NSwitch, NTag, NText, useDialog, useMessage,
 } from 'naive-ui'
 import type {DataTableColumns} from 'naive-ui'
 import {isTauri} from '@tauri-apps/api/core'
 import MeshProxyPanel from '@/components/MeshProxyPanel.vue'
+import MeshEgressSelect from '@/components/MeshEgressSelect.vue'
+import {meshNodeName} from '@/api/net'
 import {
   ensureVpnDevice, fetchMeshOverview, startEmbeddedTunnel, stopEmbeddedTunnel,
-  vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
+  fetchVpnLink, meshMaintenanceError, vpnBan, vpnKick, vpnReleaseDevice, vpnSuspend,
 } from '@/api/vpn'
 
 interface MeshRow {
@@ -34,15 +36,21 @@ const rows = ref<MeshRow[]>([])
 const loading = ref(false)
 const serverAddress = ref('172.1.0.254')
 const target = ref('172.1.0.254')
+let overviewInitialized = false
 const pingOut = ref('')
 const pinging = ref(false)
 const tunnelUp = ref<boolean | null>(null)
+/** 本次隧道实际使用的组网协调节点（按延迟自动选，和当前文件节点无关） */
+const meshNode = ref('')
+const peerLinks = ref<Awaited<ReturnType<typeof fetchVpnLink>>['peers']>([])
+const localAddress = ref('')
 const showSuspend = ref(false)
 const suspendTarget = ref<MeshRow | null>(null)
 const suspendMinutes = ref(30)
 const tunnelBusy = ref(false)
 const autoStart = ref(false)
 const autoTunnel = ref(localStorage.getItem('syc_vpn_auto_tunnel') === '1')
+// 组网在线由后端按服务器 WireGuard 接口的实时流量判断，不再看 last_seen
 const onlineCount = computed(() => rows.value.filter(r => r.online).length)
 
 async function fetchOverview() {
@@ -52,7 +60,18 @@ async function fetchOverview() {
     rows.value = (data.devices || []) as MeshRow[]
     if (data.server_address) {
       serverAddress.value = data.server_address
-      target.value = data.server_address
+      // Initialize the default once. Periodic overview refresh must not overwrite
+      // a target the user is editing or currently pinging.
+      if (!overviewInitialized) target.value = data.server_address
+    }
+    overviewInitialized = true
+    const device = localStorage.getItem('syc_vpn_device')
+    if (isTauri() && device) {
+      try {
+        const link = await fetchVpnLink(device)
+        peerLinks.value = link.peers
+        localAddress.value = link.self.address
+      } catch { peerLinks.value = [] }
     }
   } catch (e) {
     message.error(String(e))
@@ -95,7 +114,8 @@ async function startTunnel() {
   try {
     const device = await ensureVpnDevice()
     const msg = await startEmbeddedTunnel(device)
-    message.success(msg)
+    meshNode.value = meshNodeName()
+    message.success(`${msg}（组网节点：${meshNode.value}）`)
     // wireguard 服务启动到接口就绪有延迟，轮询几次状态再显示
     for (let i = 0; i < 10; i++) {
       await new Promise(r => setTimeout(r, 500))
@@ -130,6 +150,7 @@ async function refreshTunnel() {
   try {
     const {invoke} = await import('@tauri-apps/api/core')
     tunnelUp.value = await invoke<boolean>('vpn_tunnel_status')
+    if (tunnelUp.value) meshNode.value = meshNodeName()
   } catch {
     tunnelUp.value = null
   }
@@ -174,6 +195,18 @@ const columns: DataTableColumns<MeshRow> = [
   {title: '用户', key: 'username', width: 140},
   {title: '设备', key: 'device_id', width: 200, ellipsis: {tooltip: true}},
   {title: '地址', key: 'address', width: 130},
+  {
+    title: '本机链路', key: 'local_path', width: 160,
+    render: r => {
+      if (r.address === localAddress.value) return h(NTag, {size: 'small', bordered: false}, {default: () => '本机'})
+      const link = peerLinks.value.find(p => p.device_id === r.device_id)
+      const mode = link?.mode
+      const text = mode === 'direct' ? r.role === 'server' ? '服务器已握手' : '直连已握手'
+        : mode === 'vpn' ? '经系统VPN（中继）'
+        : mode === 'relay' ? '经中继（待测）' : '未验证'
+      return h(NTag, {size: 'small', bordered: false, type: mode === 'direct' ? 'success' : mode === 'vpn' || mode === 'relay' ? 'warning' : 'default'}, {default: () => text})
+    },
+  },
   {title: '组 / 机构', key: 'group', width: 180, render: r => `${r.group || '-'} / ${r.org || '-'}`},
   {
     title: '状态', key: 'online', width: 100,
@@ -185,7 +218,7 @@ const columns: DataTableColumns<MeshRow> = [
     render: r => (r.last_seen ? new Date(r.last_seen).toLocaleString() : '-'),
   },
   {title: '端点', key: 'endpoint', ellipsis: {tooltip: true},
-    render: r => r.endpoint || '(未知)'},
+    render: r => peerLinks.value.find(p => p.device_id === r.device_id && (p.mode === 'direct' || p.mode === 'vpn'))?.endpoint || r.endpoint || '(无可用候选)'},
   {
     title: '操作', key: 'actions', width: 300,
     render: r => {
@@ -229,10 +262,21 @@ function toggleAutoTunnel(v: boolean) {
   message.success(v ? '启动后将自动组网' : '已关闭自动组网')
 }
 
+let overviewTimer: number | undefined
+let tunnelTimer: number | undefined
 onMounted(() => {
   fetchOverview()
   refreshTunnel()
   loadAutoStart()
+  // 在线状态靠 2s 心跳刷新，页面停留时 5s 拉一次
+  overviewTimer = window.setInterval(fetchOverview, 5_000)
+  // 隧道状态要调 netsh，没必要 5s 一次；30s 足够
+  tunnelTimer = window.setInterval(refreshTunnel, 30_000)
+})
+
+onBeforeUnmount(() => {
+  if (overviewTimer) window.clearInterval(overviewTimer)
+  if (tunnelTimer) window.clearInterval(tunnelTimer)
 })
 </script>
 
@@ -252,12 +296,17 @@ onMounted(() => {
         <NTag size="small" :type="tunnelUp === true ? 'success' : tunnelUp === false ? 'warning' : 'default'" :bordered="false">
           隧道 {{ tunnelUp === true ? '已启动' : tunnelUp === false ? '未启动' : '未知' }}
         </NTag>
+        <NTag v-if="tunnelUp === true" size="small" :bordered="false">组网节点 {{ meshNode || '—' }}</NTag>
         <NTag size="small" round type="success" :bordered="false">在线 {{ onlineCount }} / {{ rows.length }}</NTag>
         <NButton size="small" :loading="loading" @click="fetchOverview">刷新</NButton>
       </NSpace>
     </NSpace>
 
+    <NAlert v-if="meshMaintenanceError" type="warning" style="margin-bottom: 12px">{{ meshMaintenanceError }}</NAlert>
     <MeshProxyPanel v-if="isTauri()"/>
+    <div v-if="isTauri()" style="margin-bottom: 12px">
+      <MeshEgressSelect/>
+    </div>
 
     <NCard size="small" style="margin-bottom: 12px">
       <NSpace align="center">

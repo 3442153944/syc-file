@@ -6,8 +6,8 @@
 
 ## 本轮实现
 
-- **共享 Rust 决策**：上传沿用 `new_server/sync_core/src/upload_planner.rs`，Android `core/SyncPlanner.kt` 通过 JNI 调用；快传与普通上传复用 `ChunkedUploader`。没有在 Kotlin 重写分片选路、AIMD、DRR 或父链带宽折算。
-- **共享灾备选路**：将 Windows 现有“当前入口健康则保持，故障时选择最低延迟可用入口”的决策抽到 `new_server/sync_core/src/node_selection.rs`。Windows `src-tauri/src/net.rs` 与 Android `NodeSelector` JNI 调用同一函数。平台代码只执行 HTTP 探测、配置持久化、连接和状态展示。
+- **共享 Rust 决策**：上传沿用 `sys_core/src/net_core/upload_planner/`，Android `core/SyncPlanner.kt` 通过 JNI 调用；快传与普通上传复用 `ChunkedUploader`。没有在 Kotlin 重写分片选路、AIMD、DRR 或父链带宽折算。
+- **共享灾备选路**：将 Windows 现有“当前入口健康则保持，故障时选择最低延迟可用入口”的决策抽到 `sys_core/src/net_core/node_selection.rs`。Windows `src-tauri/src/net.rs` 与 Android `NodeSelector` JNI 调用同一函数。平台代码只执行 HTTP 探测、配置持久化、连接和状态展示。
 - **自动灾备**：服务器设置新增开关和备用入口编辑，最多 8 个；应用进程存活期间每 30 秒巡检，请求传输失败会触发节流检查。探测不带登录令牌，Android 自动接管只接受已确认属于同一后端的入口。尚未确认后端身份或所有入口不可用时保持当前配置并展示状态。健康的当前入口保持稳定，不因另一个入口更快而来回切换。
 - **多节点快传**：快传初始化带 `quick_share=true`，多线路探测、同后端筛选、分片并发和失败重排仍由 Rust 上传规划器决定。内置节点及自定义备用入口进入规划池，保留原有父链关系。
 - **会话与收尾**：记录服务端 `upload_id`；暂停、继续、取消并删除、失败重试和进程退出后的手动恢复均可使用。恢复时先查询原会话完成结果或缺片状态，保留原分片大小。收尾在规划器确认可用的同后端入口间重试，保存入口候选；复制前实际请求 Range 下载并检查附件响应头，拒绝失效链接。
@@ -63,8 +63,8 @@ cd E:/fileSynchronization/project/Android/sync_core_jni
 $env:ANDROID_NDK_HOME='F:/download/android-ndk-r27d'
 cargo ndk -t arm64-v8a -t x86_64 -o ../app/src/main/jniLibs build --release --offline
 
-cd E:/fileSynchronization/project/new_server/sync_core
-cargo test --offline --lib
+cd E:/fileSynchronization/project
+cargo test --manifest-path sys_core/Cargo.toml --features upload --offline
 
 cd E:/fileSynchronization/project/filesync-desktop/src-tauri
 cargo check --offline

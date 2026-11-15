@@ -31,6 +31,9 @@ func HandlerFuncUpload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 		userClaims := claims.(*token.Claims)
 		userID := uint(userClaims.UserID)
 
+		// file.upload.* 是热字段：本次请求读一次 Live 快照，保存后无需重启即生效。
+		live := config.Live()
+
 		var req struct {
 			Path   string `json:"path" binding:"required"`
 			Name   string `json:"name" binding:"required"`
@@ -75,13 +78,13 @@ func HandlerFuncUpload(db *gorm.DB, redisClient *redis.Client) gin.HandlerFunc {
 		}
 
 		ext := filepath.Ext(req.Name)
-		if !config.Conf.IsExtensionAllowed(ext) {
+		if !live.IsExtensionAllowed(ext) {
 			response.WriteHTTP(c, http.StatusOK, 400, "不允许上传该类型的文件", nil)
 			return
 		}
 
-		if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
-			response.WriteHTTP(c, http.StatusOK, 400, fmt.Sprintf("文件名过长（最大 %d 字符）", config.Conf.File.Upload.MaxFilenameLength), nil)
+		if len(req.Name) > live.File.Upload.MaxFilenameLength {
+			response.WriteHTTP(c, http.StatusOK, 400, fmt.Sprintf("文件名过长（最大 %d 字符）", live.File.Upload.MaxFilenameLength), nil)
 			return
 		}
 
@@ -133,8 +136,10 @@ func handleUpload(c *gin.Context, db *gorm.DB, fullPath, fileName string, userID
 		return
 	}
 
-	if fileHeader.Size > config.Conf.File.Upload.MaxFileSize {
-		response.WriteHTTP(c, http.StatusOK, 400, fmt.Sprintf("文件大小超过限制（最大 %d MB）", config.Conf.File.Upload.MaxFileSize/1024/1024), nil)
+	// file.upload.max_file_size 是热字段：读 Live 快照。
+	maxSize := config.Live().File.Upload.MaxFileSize
+	if fileHeader.Size > maxSize {
+		response.WriteHTTP(c, http.StatusOK, 400, fmt.Sprintf("文件大小超过限制（最大 %d MB）", maxSize/1024/1024), nil)
 		return
 	}
 

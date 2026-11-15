@@ -8,10 +8,12 @@ import java.io.File
 import java.util.Properties
 
 object ConfigManager {
+    private var directoryName = "FileSync"
+    fun useIsolatedTestStorage() { directoryName = "FileSync-mesh-test" }
 
     private val configFile: File
         get() {
-            val dir = File(Environment.getExternalStorageDirectory(), "FileSync")
+            val dir = File(Environment.getExternalStorageDirectory(), directoryName)
             if (!dir.exists()) dir.mkdirs()
             return File(dir, "config.conf")
         }

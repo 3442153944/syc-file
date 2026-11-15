@@ -18,6 +18,7 @@ func ZapLogger() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		query := c.Request.URL.RawQuery
 		method := c.Request.Method
+		redact := sensitiveBodyPath(path)
 
 		// ======== Debug 模式：捕获请求体 ========
 		var requestBody string
@@ -63,16 +64,21 @@ func ZapLogger() gin.HandlerFunc {
 				zap.Duration("latency", latency),
 			}
 
-			if requestBody != "" {
+			if requestBody != "" && !redact {
 				fields = append(fields, zap.String("req_body", requestBody))
 			}
 
-			if respWriter != nil && respWriter.body.Len() > 0 {
+			if respWriter != nil && respWriter.body.Len() > 0 && !redact {
 				respBody := respWriter.body.String()
 				if len(respBody) > 4096 {
 					respBody = respBody[:4096] + "...(truncated)"
 				}
 				fields = append(fields, zap.String("resp_body", respBody))
+			}
+
+			// 凭据类接口只记长度不记内容，留个标记便于排查
+			if redact {
+				fields = append(fields, zap.Bool("body_redacted", true))
 			}
 
 			switch {
@@ -123,6 +129,13 @@ func ZapLogger() gin.HandlerFunc {
 			)
 		}
 	}
+}
+
+// sensitiveBodyPath 这些接口的请求/响应体里带凭据——管理员令牌、DSH 访问令牌、
+// VPS 节点入口秘钥。它们不能进日志：日志会轮转落盘，等同于把密钥抄了一份。
+func sensitiveBodyPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/admin/vps/") ||
+		strings.HasPrefix(path, "/v1/admin/dsh/")
 }
 
 // ======== ResponseWriter 包装器，捕获响应内容 ========

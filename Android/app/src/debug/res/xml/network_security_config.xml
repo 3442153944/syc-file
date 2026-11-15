@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+    <domain-config>
+        <domain>ali.sunyuanling.cn</domain>
+        <domain>8.137.77.99</domain>
+        <trust-anchors><certificates src="system"/><certificates src="@raw/filesync_mesh_test_ca"/></trust-anchors>
+    </domain-config>
+</network-security-config>

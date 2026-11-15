@@ -42,11 +42,33 @@ type Config struct {
 	Supervisor supervisor.Config `mapstructure:"supervisor"`
 	Monitor    MonitorConfig     `mapstructure:"monitor"`
 	Thumbnail  ThumbnailConfig   `mapstructure:"thumbnail"`
+	// GUI 桌面控制台（独立进程 syc-file-gui.exe）：后端启动后可按此自动拉起控制台。
+	// 后端只消费 enabled / ui_path；其余字段由控制台自己读取，后端原样保留。
+	GUI GuiConfig `mapstructure:"gui"`
 	// Vpn 组网地址池。整段缺省即可：默认从 172.1.0.0/16 里按 /24 切分给各个组。
 	Vpn VpnConfig `mapstructure:"vpn"`
 }
 
-// VpnConfig 组网配置。主密钥不放这里，走环境变量 SYC_VPN_MASTER_KEY。
+// GuiConfig 是桌面控制台（syc-file-gui.exe）相关配置。
+//
+// 后端只读取 Enabled（启动后是否自动拉起控制台）与 UIPath（控制台程序位置）；
+// StartMinimized / BackendPath / BackendWorkdir 是控制台自己的配置，后端不解释。
+type GuiConfig struct {
+	// Enabled 为 true 时，后端启动成功后自动在交互式用户会话里拉起控制台。
+	// 缺省 false：headless 服务器（Docker/systemd）不会去起一个 GUI。
+	Enabled bool `mapstructure:"enabled"`
+	// UIPath 控制台程序路径；空 = 与后端可执行文件同目录的 syc-file-gui.exe，
+	// 相对路径按后端 exe 所在目录解析。
+	UIPath string `mapstructure:"ui_path"`
+	// StartMinimized 控制台启动时是否只驻留托盘（GUI 读取）。
+	StartMinimized bool `mapstructure:"start_minimized"`
+	// BackendPath 控制台「启动后端」时使用的后端程序路径（GUI 读取，空 = 同目录）。
+	BackendPath string `mapstructure:"backend_path"`
+	// BackendWorkdir 控制台拉起后端时的工作目录（GUI 读取，空 = 后端程序所在目录）。
+	BackendWorkdir string `mapstructure:"backend_workdir"`
+}
+
+// VpnConfig 组网配置：只从 config.yaml 读取（开发/生产各一份、均不入库），不提供环境变量入口。
 type VpnConfig struct {
 	// Pool 组网地址池（IPv4）。建组时未指定 subnet 就从池里自动分配一个 /24；
 	// 显式指定的 subnet 必须落在池内，避免不同环境之间地址重叠。
@@ -64,6 +86,9 @@ type VpnConfig struct {
 	// Host（含 X-Forwarded-Host）拼 <host>:ServerWGPort，这样从 LAN/DDNS/任何入口
 	// 进来的客户端都会拿到与入口一致的端点，不把组网绑死在某一个供应商。
 	ServerEndpoint string `mapstructure:"server_endpoint"`
+	// ServerLANEndpoints 服务器自身的局域网候选端点（如 192.168.31.100:51820），
+	// 让同 LAN 的客户端优先直连服务器。
+	ServerLANEndpoints []string `mapstructure:"server_lan_endpoints"`
 	// ServerWGPort 服务器 WireGuard 监听端口（默认 51820）。
 	ServerWGPort int `mapstructure:"server_wg_port"`
 	// ServerInterface 服务器本机的 WireGuard 接口名（如 syc0）。配置后后端会自己
@@ -275,7 +300,8 @@ func Init() error {
 	}
 	viper.AddConfigPath(cfgDir)
 
-	// 开启环境变量覆盖机制 (非常重要：用于生产环境覆盖 Secret 等敏感信息)
+	// 开启环境变量覆盖机制 (非常重要：用于生产环境覆盖 Secret 等敏感信息)。
+	// 组网配置（vpn.*）只从 config.yaml 读取，不提供环境变量入口。
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
@@ -286,31 +312,59 @@ func Init() error {
 		return fmt.Errorf("解析配置到结构体失败: %w", err)
 	}
 
+	// 归一化（环境变量覆盖 / 缺省值 / 大小写）。LoadFile 复用同一份逻辑，
+	// 保证“磁盘上读到的新配置”和“启动时读到的配置”语义完全一致。
+	if err := normalize(Conf); err != nil {
+		return err
+	}
+	return nil
+}
+
+// normalize 归一化配置：SYC_MODE 覆盖、组网缺省值、运行模式大小写与合法性。
+//
+// Init（启动路径）与 LoadText（GUI / 热重载读取路径）共用这一份逻辑，避免两处规则漂移。
+func normalize(c *Config) error {
+	// 环境变量里的 LAN 端点按逗号分隔（mapstructure 不会替每个元素去空格），
+	// 这里统一去空白、去空项、去重，避免把脏候选下发给客户端。
+	if len(c.Vpn.ServerLANEndpoints) > 0 {
+		seen := make(map[string]bool, len(c.Vpn.ServerLANEndpoints))
+		normalized := make([]string, 0, len(c.Vpn.ServerLANEndpoints))
+		for _, raw := range c.Vpn.ServerLANEndpoints {
+			endpoint := strings.TrimSpace(raw)
+			if endpoint == "" || seen[endpoint] {
+				continue
+			}
+			seen[endpoint] = true
+			normalized = append(normalized, endpoint)
+		}
+		c.Vpn.ServerLANEndpoints = normalized
+	}
+
 	if v := strings.TrimSpace(os.Getenv("SYC_MODE")); v != "" {
-		Conf.Server.Mode = v
+		c.Server.Mode = v
 	}
 
 	// 组网地址池：整段缺省时用 172.1.0.0/16，避免各环境各自写一份还写不一致。
-	if strings.TrimSpace(Conf.Vpn.Pool) == "" {
-		Conf.Vpn.Pool = "172.1.0.0/16"
+	if strings.TrimSpace(c.Vpn.Pool) == "" {
+		c.Vpn.Pool = "172.1.0.0/16"
 	}
-	if strings.TrimSpace(Conf.Vpn.ServerAddress) == "" {
-		Conf.Vpn.ServerAddress = "172.1.0.254"
+	if strings.TrimSpace(c.Vpn.ServerAddress) == "" {
+		c.Vpn.ServerAddress = "172.1.0.254"
 	}
-	if Conf.Vpn.StunPort == 0 {
-		Conf.Vpn.StunPort = 3478
+	if c.Vpn.StunPort == 0 {
+		c.Vpn.StunPort = 3478
 	}
-	if Conf.Vpn.ServerWGPort == 0 {
-		Conf.Vpn.ServerWGPort = 51820
-	}
-	Conf.Server.Mode = strings.ToLower(strings.TrimSpace(Conf.Server.Mode))
-	switch Conf.Server.Mode {
-	case "":
-		Conf.Server.Mode = ModeDev
-	case ModeDev, ModeProd:
-	default:
-		return fmt.Errorf("未知运行模式 %q（server.mode / SYC_MODE 只能是 dev 或 prod）", Conf.Server.Mode)
+	if c.Vpn.ServerWGPort == 0 {
+		c.Vpn.ServerWGPort = 51820
 	}
 
+	c.Server.Mode = strings.ToLower(strings.TrimSpace(c.Server.Mode))
+	switch c.Server.Mode {
+	case "":
+		c.Server.Mode = ModeDev
+	case ModeDev, ModeProd:
+	default:
+		return fmt.Errorf("未知运行模式 %q（server.mode / SYC_MODE 只能是 dev 或 prod）", c.Server.Mode)
+	}
 	return nil
 }

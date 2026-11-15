@@ -53,6 +53,8 @@ fun SettingsScreen(navController: NavController) {
             .verticalScroll(rememberScrollState())
         ) {
             SettingsGroup(label = "连接") {
+                SettingsNavItem(icon = Icons.Default.Dns, label = "P2P 组网", subtitle = "设备接入、握手与传输状态",
+                    onClick = { navController.navigate(com.sunyuanling.filesync.router.MeshDestination) })
                 SettingsNavItem(
                     icon = Icons.Default.Dns,
                     label = "服务器设置",

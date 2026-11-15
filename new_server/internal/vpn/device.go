@@ -3,18 +3,24 @@ package vpn
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"syc-file/config"
 	"syc-file/internal/model"
+	"syc-file/pkg/logger"
 	"syc-file/pkg/response"
 )
 
@@ -132,10 +138,7 @@ func (a *API) Register(c *gin.Context) {
 	var err error
 	switch req.KeySource {
 	case model.VPNKeySourceServer:
-		if _, err := MasterKey(); err != nil {
-			response.Fail(c, 503, err.Error())
-			return
-		}
+		// 私钥只由本次签发写入进程内存，不落库；服务重启后设备取身份会重新签发。
 		privateKey, pubKey, err = GenerateKeypair()
 		if err != nil {
 			response.Fail(c, 500, "生成密钥失败")
@@ -154,6 +157,7 @@ func (a *API) Register(c *gin.Context) {
 	}
 
 	var out gin.H
+	var savedDeviceID uint
 	err = a.db.Transaction(func(tx *gorm.DB) error {
 		// 地址分配：同组已用地址排除
 		var usedAddrs []string
@@ -184,14 +188,6 @@ func (a *API) Register(c *gin.Context) {
 				Endpoint:  strings.TrimSpace(req.Endpoint),
 				Status:    model.VPNDeviceActive,
 			}
-			if req.KeySource == model.VPNKeySourceServer {
-				master, _ := MasterKey()
-				enc, eerr := EncryptPrivate(master, privateKey, req.DeviceID)
-				if eerr != nil {
-					return eerr
-				}
-				dev.PrivKeyEnc = enc
-			}
 			now := time.Now()
 			exp := now.Add(sessionTTL())
 			dev.LastSeen = &now
@@ -211,17 +207,9 @@ func (a *API) Register(c *gin.Context) {
 				}
 				dev.PubKey = pubKey
 				dev.KeySource = req.KeySource
-				if req.KeySource == model.VPNKeySourceServer {
-					master, _ := MasterKey()
-					enc, eerr := EncryptPrivate(master, privateKey, req.DeviceID)
-					if eerr != nil {
-						return eerr
-					}
-					dev.PrivKeyEnc = enc
-				} else {
-					dev.PrivKeyEnc = ""
-				}
 			}
+			// 旧的加密私钥列不再使用，顺手清掉（私钥现在只在进程内存）。
+			dev.PrivKeyEnc = ""
 			dev.GroupID = group.ID
 			dev.Status = model.VPNDeviceActive
 			if ep := strings.TrimSpace(req.Endpoint); ep != "" {
@@ -235,6 +223,7 @@ func (a *API) Register(c *gin.Context) {
 				return err
 			}
 		}
+		savedDeviceID = dev.ID
 
 		now := time.Now()
 		if err := tx.Model(&issued).Update("used_at", now).Error; err != nil {
@@ -247,7 +236,7 @@ func (a *API) Register(c *gin.Context) {
 			"address":     dev.Address,
 			"pubkey":      dev.PubKey,
 			"key_source":  dev.KeySource,
-			"private_key": privateKey, // 仅 key_source=server 且本次生成时有值，只出现这一次
+			"private_key": privateKey, // 仅 key_source=server；私钥只在下发时出现，不落库
 		}
 		return nil
 	})
@@ -255,7 +244,135 @@ func (a *API) Register(c *gin.Context) {
 		response.Fail(c, 400, err.Error())
 		return
 	}
+	if savedDeviceID != 0 {
+		if req.KeySource == model.VPNKeySourceServer && privateKey != "" {
+			storeHostedKey(savedDeviceID, privateKey)
+		} else {
+			forgetHostedKey(savedDeviceID)
+		}
+	}
 	response.OK(c, out)
+}
+
+// ── 服务器侧实时端点与活跃度（打洞 / 组网在线）────────────────────
+
+type wgPeerLive struct {
+	Endpoint      string
+	LastHandshake time.Time
+	// LastActive 是服务器最后一次看到该 peer 的收发计数变化的时间。
+	// 客户端 PersistentKeepalive=5，会持续产生流量；用它判断「组网在线」
+	// 比 latest-handshake 更灵敏（握手每 2 分钟才刷新一次）。
+	LastActive time.Time
+	rx         uint64
+	tx         uint64
+}
+
+type wgPeerSeen struct {
+	rx, tx     uint64
+	observedAt time.Time
+	activeAt   time.Time
+}
+
+var (
+	liveEpMu  sync.Mutex
+	liveEpAt  time.Time
+	liveEpMap map[string]wgPeerLive
+	liveSeen  = map[string]wgPeerSeen{}
+	wgPathMu  sync.Mutex
+	wgPath    string
+	wgPathAt  time.Time
+)
+
+// cachedWgBinary 复用 ensureWgBinary 的副本，避免每次请求都复制一遍 wg。
+func cachedWgBinary() (string, error) {
+	wgPathMu.Lock()
+	defer wgPathMu.Unlock()
+	if wgPath != "" && time.Since(wgPathAt) < 10*time.Minute {
+		return wgPath, nil
+	}
+	p, err := ensureWgBinary()
+	if err != nil {
+		return "", err
+	}
+	wgPath, wgPathAt = p, time.Now()
+	return p, nil
+}
+
+// parseWgDump 解析 `wg show <iface> dump`：首行是接口信息，之后每行一个 peer。
+// 列：pubkey、preshared、endpoint、allowed-ips、latest-handshake、rx、tx、keepalive。
+// 空/(none)/回环端点不算可用直连地址（回环是经 frp 中继的客户端）。
+func parseWgDump(out string) map[string]wgPeerLive {
+	peers := make(map[string]wgPeerLive)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) < 7 {
+			continue
+		}
+		pub := strings.TrimSpace(f[0])
+		if pub == "" {
+			continue
+		}
+		ep := strings.TrimSpace(f[2])
+		if ep == "(none)" || strings.HasPrefix(ep, "127.0.0.1:") || strings.HasPrefix(ep, "[::1]:") {
+			ep = ""
+		}
+		hs, _ := strconv.ParseInt(strings.TrimSpace(f[4]), 10, 64)
+		rx, _ := strconv.ParseUint(strings.TrimSpace(f[5]), 10, 64)
+		tx, _ := strconv.ParseUint(strings.TrimSpace(f[6]), 10, 64)
+		p := wgPeerLive{Endpoint: ep, rx: rx, tx: tx}
+		if hs > 0 {
+			p.LastHandshake = time.Unix(hs, 0)
+		}
+		peers[pub] = p
+	}
+	return peers
+}
+
+// liveEndpoints 返回服务器 WireGuard 接口当前看到的每个 peer 的实时信息。
+// 这是打洞的关键：客户端直连服务器时，服务器能看到它的局域网/公网 IP:port，
+// 再通过 /peers 下发给其它客户端；经 frp 中继的客户端是 127.0.0.1，端点置空。
+func liveEndpoints() map[string]wgPeerLive {
+	iface := strings.TrimSpace(config.Conf.Vpn.ServerInterface)
+	if iface == "" {
+		return nil
+	}
+	liveEpMu.Lock()
+	defer liveEpMu.Unlock()
+	if liveEpMap != nil && time.Since(liveEpAt) < time.Second {
+		return liveEpMap
+	}
+	wgBin, err := cachedWgBinary()
+	if err != nil {
+		return nil
+	}
+	out, err := exec.Command(wgBin, "show", iface, "dump").Output()
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	parsed := parseWgDump(string(out))
+	for pub, p := range parsed {
+		prev, ok := liveSeen[pub]
+		active := now
+		if ok {
+			active = prev.activeAt
+			if (prev.rx != p.rx || prev.tx != p.tx) && now.Sub(prev.observedAt) <= 10*time.Second {
+				// 只有两次采样足够近，才能确定流量是刚刚发生的；
+				// 间隔太久时保守沿用旧时间，避免刷新页面把已断开设备误判为在线。
+				active = now
+			}
+		}
+		p.LastActive = active
+		liveSeen[pub] = wgPeerSeen{rx: p.rx, tx: p.tx, observedAt: now, activeAt: active}
+		parsed[pub] = p
+	}
+	liveEpMap = parsed
+	liveEpAt = now
+	return liveEpMap
 }
 
 // Peers 返回按 ACL 裁剪后的对端列表。
@@ -334,11 +451,27 @@ func (a *API) Peers(c *gin.Context) {
 	visible := VisiblePeers(selfRef, all, interops)
 
 	rows := make([]gin.H, 0, len(visible)+1)
+	lanByKey := make(map[string]string, len(devices))
+	for _, d := range devices {
+		lanByKey[d.PubKey] = d.LANEndpoints
+	}
+	live := liveEndpoints()
+	serverEP := serverEndpointFor(c, config.Conf.Vpn)
 	for _, p := range visible {
+		ep := p.Endpoint
+		if le, ok := live[p.PubKey]; ok && le.Endpoint != "" {
+			ep = le.Endpoint
+		}
+		mode := "direct"
+		if ep == "" || (serverEP != "" && ep == serverEP) {
+			mode = "relay"
+		}
 		rows = append(rows, gin.H{
 			"device_id":   p.DeviceID,
+			"candidates":  endpointCandidates(lanByKey[p.PubKey], ep, p.Endpoint),
 			"pubkey":      p.PubKey,
-			"endpoint":    p.Endpoint,
+			"endpoint":    ep,
+			"mode":        mode,
 			"address":     p.Address,
 			"allowed_ips": AllowedIPsOf(p.Address),
 			"role":        p.Role,
@@ -364,8 +497,9 @@ func (a *API) Peers(c *gin.Context) {
 }
 
 type heartbeatReq struct {
-	DeviceID string `json:"device_id"`
-	Endpoint string `json:"endpoint"`
+	DeviceID     string    `json:"device_id"`
+	Endpoint     string    `json:"endpoint"`
+	LANEndpoints *[]string `json:"lan_endpoints"`
 }
 
 // Heartbeat 更新端点与在线时间；WireGuard 的端点漫游依赖它。
@@ -380,13 +514,23 @@ func (a *API) Heartbeat(c *gin.Context) {
 		return
 	}
 	now := time.Now()
+	updates := map[string]any{"last_seen": now, "session_expires_at": now.Add(sessionTTL())}
+	// endpoint 是客户端诊断上报的探测端点：缺省或空值不能清掉已经确认的隧道端点。
+	if strings.TrimSpace(req.Endpoint) != "" {
+		updates["endpoint"] = strings.TrimSpace(req.Endpoint)
+	}
+	if req.LANEndpoints != nil {
+		lan, err := validateLANEndpoints(*req.LANEndpoints)
+		if err != nil {
+			response.Fail(c, 400, err.Error())
+			return
+		}
+		encoded, _ := json.Marshal(lan)
+		updates["lan_endpoints"] = string(encoded)
+	}
 	res := a.db.Model(&model.VPNDevice{}).
 		Where("user_id = ? AND device_id = ? AND status = ?", u.ID, req.DeviceID, model.VPNDeviceActive).
-		Updates(map[string]any{
-			"endpoint":           strings.TrimSpace(req.Endpoint),
-			"last_seen":          now,
-			"session_expires_at": now.Add(sessionTTL()),
-		})
+		Updates(updates)
 	if res.Error != nil {
 		response.Fail(c, 500, "更新失败")
 		return
@@ -422,6 +566,7 @@ func ServerPeer(c *gin.Context) gin.H {
 	addr := strings.TrimSpace(cfg.ServerAddress)
 	return gin.H{
 		"device_id":   "syc-server",
+		"candidates":  serverCandidates(cfg.ServerLANEndpoints, serverEndpointFor(c, cfg)),
 		"pubkey":      cfg.ServerPubKey,
 		"endpoint":    serverEndpointFor(c, cfg),
 		"address":     addr,
@@ -430,8 +575,10 @@ func ServerPeer(c *gin.Context) gin.H {
 	}
 }
 
-// Link 返回当前设备各对端的连通模式：direct=直连、relay=经服务器中继。
-// Windows 菜单栏的「直连/中继」指示器用它；也方便排查「为什么速度只有几百 KB」。
+// Link 返回当前设备各对端的端点信息，供客户端展示/排查组网路径。
+// 服务器无法确定两个客户端之间的真实路径（可能直连，也可能经 frp/NAT 中继），
+// 所以 peer 的 mode 统一返回 unknown，由客户端用自己的 WireGuard 握手时间判断；
+// 顶层 mode 只区分「有对端」unknown 与「没有对端」idle。
 func (a *API) Link(c *gin.Context) {
 	u, ok := a.currentUser(c)
 	if !ok {
@@ -480,23 +627,24 @@ func (a *API) Link(c *gin.Context) {
 	}
 	visible := VisiblePeers(selfRef, all, interops)
 
-	serverEP := serverEndpointFor(c, config.Conf.Vpn)
+	live := liveEndpoints()
 	rows := make([]gin.H, 0, len(visible)+1)
-	mode := "direct"
+	mode := "unknown"
 	for _, p := range visible {
-		m := "direct"
-		if serverEP != "" && strings.TrimSpace(p.Endpoint) == serverEP {
-			m, mode = "relay", "relay"
+		ep := p.Endpoint
+		if le, ok := live[p.PubKey]; ok && le.Endpoint != "" {
+			ep = le.Endpoint
 		}
-		rows = append(rows, gin.H{"device_id": p.DeviceID, "endpoint": p.Endpoint, "mode": m})
+		rows = append(rows, gin.H{"device_id": p.DeviceID, "pubkey": p.PubKey, "address": p.Address, "endpoint": ep, "mode": "unknown"})
 	}
 	// 服务器自身也是一个可用对端（172.1.0.254），否则界面会显示「暂无对端」
 	if sp := ServerPeer(c); sp != nil {
 		rows = append(rows, gin.H{
 			"device_id": "syc-server",
-			"endpoint":  sp["endpoint"],
-			"mode":      "direct",
-			"role":      "server",
+			"pubkey":    sp["pubkey"], "address": sp["address"],
+			"endpoint": sp["endpoint"],
+			"mode":     "direct",
+			"role":     "server",
 		})
 	}
 	if len(rows) == 0 {
@@ -551,6 +699,30 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		response.Fail(c, 400, "缺少 Device-Id")
 		return
 	}
+	var request struct {
+		PubKey string `json:"pubkey"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil && err != io.EOF {
+		response.Fail(c, 400, "请求体非法")
+		return
+	}
+	request.PubKey = strings.TrimSpace(request.PubKey)
+	if request.PubKey != "" {
+		if err := ValidatePubKey(request.PubKey); err != nil {
+			response.Fail(c, 400, err.Error())
+			return
+		}
+	}
+	makeIdentity := func() (priv, pub, source string, err error) {
+		if request.PubKey != "" {
+			return "", request.PubKey, model.VPNKeySourceClient, nil
+		}
+		priv, pub, err = GenerateKeypair()
+		if err != nil {
+			return "", "", "", err
+		}
+		return priv, pub, model.VPNKeySourceServer, nil
+	}
 	// 已登记：地址保持不变（IP 持久），被吊销的走重新激活
 	var existing model.VPNDevice
 	if err := a.db.Where("user_id = ? AND device_id = ?", u.ID, deviceID).First(&existing).Error; err == nil {
@@ -562,12 +734,15 @@ func (a *API) AutoEnroll(c *gin.Context) {
 			response.Fail(c, 403, "设备临时停用中，稍后再试")
 			return
 		}
-		if existing.Status == model.VPNDeviceActive && strings.TrimSpace(existing.PrivKeyEnc) != "" {
+		if existing.Status == model.VPNDeviceActive && ((request.PubKey == "" && existing.KeySource == model.VPNKeySourceServer) || (request.PubKey != "" && existing.PubKey == request.PubKey)) {
 			now := time.Now()
 			exp := now.Add(sessionTTL())
-			a.db.Model(&existing).Updates(map[string]any{
+			if err := a.db.Model(&existing).Updates(map[string]any{
 				"last_seen": now, "session_expires_at": exp,
-			})
+			}).Error; err != nil {
+				response.Fail(c, 500, "续期设备失败")
+				return
+			}
 			response.OK(c, gin.H{
 				"device_id": existing.DeviceID, "address": existing.Address,
 				"pubkey": existing.PubKey, "group_id": existing.GroupID, "existing": true,
@@ -575,22 +750,26 @@ func (a *API) AutoEnroll(c *gin.Context) {
 			return
 		}
 		// 被吊销过：保留原地址，重新生成密钥并激活
-		priv, pub, err := GenerateKeypair()
+		priv, pub, source, err := makeIdentity()
 		if err != nil {
 			response.Fail(c, 500, "生成密钥失败")
 			return
 		}
-		enc, err := EncryptPrivate(mustMasterKey(), priv, deviceID)
-		if err != nil {
-			response.Fail(c, 500, "加密私钥失败")
-			return
-		}
 		now := time.Now()
 		exp := now.Add(sessionTTL())
-		a.db.Model(&existing).Updates(map[string]any{
-			"pubkey": pub, "priv_key_enc": enc, "status": model.VPNDeviceActive,
-			"key_source": model.VPNKeySourceServer, "last_seen": now, "session_expires_at": exp,
-		})
+		if err := a.db.Model(&existing).Updates(map[string]any{
+			"pub_key": pub, "priv_key_enc": "", "status": model.VPNDeviceActive,
+			"endpoint": "", "lan_endpoints": "[]",
+			"key_source": source, "last_seen": now, "session_expires_at": exp,
+		}).Error; err != nil {
+			response.Fail(c, 500, "更新设备密钥失败")
+			return
+		}
+		if source == model.VPNKeySourceServer {
+			storeHostedKey(existing.ID, priv)
+		} else {
+			forgetHostedKey(existing.ID)
+		}
 		response.OK(c, gin.H{
 			"device_id": existing.DeviceID, "address": existing.Address, "pubkey": pub,
 			"group_id": existing.GroupID, "private_key": priv, "existing": true, "reactivated": true,
@@ -621,18 +800,9 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		response.Fail(c, 409, "所在组不存在")
 		return
 	}
-	if _, err := MasterKey(); err != nil {
-		response.Fail(c, 503, err.Error())
-		return
-	}
-	priv, pub, err := GenerateKeypair()
+	priv, pub, source, err := makeIdentity()
 	if err != nil {
 		response.Fail(c, 500, "生成密钥失败")
-		return
-	}
-	enc, err := EncryptPrivate(mustMasterKey(), priv, deviceID)
-	if err != nil {
-		response.Fail(c, 500, "加密私钥失败")
 		return
 	}
 	var used []string
@@ -650,7 +820,7 @@ func (a *API) AutoEnroll(c *gin.Context) {
 	exp := now.Add(sessionTTL())
 	dev := model.VPNDevice{
 		UserID: u.ID, GroupID: group.ID, DeviceID: deviceID,
-		PubKey: pub, PrivKeyEnc: enc, KeySource: model.VPNKeySourceServer,
+		PubKey: pub, KeySource: source,
 		Address: addr, Status: model.VPNDeviceActive,
 		LastSeen: &now, SessionExpiresAt: &exp,
 	}
@@ -658,15 +828,13 @@ func (a *API) AutoEnroll(c *gin.Context) {
 		response.Fail(c, 500, "登记设备失败")
 		return
 	}
+	if source == model.VPNKeySourceServer {
+		storeHostedKey(dev.ID, priv)
+	}
 	response.OK(c, gin.H{
 		"device_id": dev.DeviceID, "address": dev.Address, "pubkey": dev.PubKey,
 		"group_id": dev.GroupID, "subnet": group.Subnet, "private_key": priv, "existing": false,
 	})
-}
-
-func mustMasterKey() []byte {
-	k, _ := MasterKey()
-	return k
 }
 
 // ensureDefaultGroup 给没有组的管理员兜底：优先用系统里第一个组；一个组都没有就建默认机构+默认组。
@@ -720,11 +888,13 @@ func (a *API) ReleaseDevice(c *gin.Context) {
 		response.Fail(c, 500, "释放失败")
 		return
 	}
+	forgetHostedKey(dev.ID)
 	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }
 
-// Identity 用当前会话换取本设备的 WireGuard 身份（私钥由服务端解密后下发）。
-// 私钥只存服务端密文，客户端不落盘；身份生命周期跟 JWT/设备记录走。
+// Identity 用当前会话换取本设备的 WireGuard 身份。
+// 私钥只由服务端进程内存动态生成/托管，不落库、不进 Redis；客户端也不持久化。
+// 服务重启后内存为空时，本接口会重新生成并下发新身份（客户端下次连接即恢复），不做旧密钥兼容。
 func (a *API) Identity(c *gin.Context) {
 	u, ok := a.currentUser(c)
 	if !ok {
@@ -736,14 +906,18 @@ func (a *API) Identity(c *gin.Context) {
 		response.Fail(c, 404, "设备未登记")
 		return
 	}
-	if strings.TrimSpace(dev.PrivKeyEnc) == "" {
+	if dev.KeySource == model.VPNKeySourceClient {
 		response.Fail(c, 409, "该设备是客户端托管私钥，服务端无法下发")
 		return
 	}
-	priv, err := DecryptPrivate(mustMasterKey(), dev.PrivKeyEnc, dev.DeviceID)
-	if err != nil {
-		response.Fail(c, 500, "私钥解密失败（主密钥是否变更？）")
-		return
+	priv, ok := loadHostedKey(dev.ID)
+	if !ok {
+		var err error
+		priv, err = a.issueHostedIdentity(&dev)
+		if err != nil {
+			response.Fail(c, 500, "生成组网身份失败")
+			return
+		}
 	}
 	var group model.VPNGroup
 	a.db.First(&group, dev.GroupID)
@@ -751,4 +925,32 @@ func (a *API) Identity(c *gin.Context) {
 		"device_id": dev.DeviceID, "address": dev.Address, "pubkey": dev.PubKey,
 		"subnet": group.Subnet, "private_key": priv,
 	})
+}
+
+// issueHostedIdentity 为设备动态生成 WireGuard 身份：数据库只更新公钥，私钥只留在进程内存。
+// 旧公钥记入历史后覆盖；服务重启后内存为空，下一次取身份会再次签发。
+func (a *API) issueHostedIdentity(dev *model.VPNDevice) (string, error) {
+	priv, pub, err := GenerateKeypair()
+	if err != nil {
+		return "", err
+	}
+	if dev.PubKey != "" && dev.PubKey != pub {
+		if err := a.db.Create(&model.VPNDeviceHistory{
+			UserID: dev.UserID, DeviceID: dev.DeviceID, PubKey: dev.PubKey, Reason: "reissue",
+		}).Error; err != nil {
+			return "", err
+		}
+	}
+	if err := a.db.Model(dev).Updates(map[string]any{
+		"pub_key": pub, "priv_key_enc": "", "key_source": model.VPNKeySourceServer,
+	}).Error; err != nil {
+		return "", err
+	}
+	storeHostedKey(dev.ID, priv)
+	dev.PubKey = pub
+	dev.PrivKeyEnc = ""
+	dev.KeySource = model.VPNKeySourceServer
+	logger.Logger.Info("已为组网设备动态生成内存托管身份",
+		zap.String("device_id", dev.DeviceID), zap.String("pubkey", pub[:8]))
+	return priv, nil
 }

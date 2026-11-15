@@ -1,5 +1,5 @@
 // speedtest.rs
-// 节点测速：把多路径上传核心（sync_core::upload_planner）的探测决策搬到 UI 层。
+// 节点测速：把多路径上传核心（sys_core::upload_planner）的探测决策搬到 UI 层。
 //
 // 核心的探测循环一次只派一个任务（Wait 驱动），同一 planner 里没法并发；测速页要的是
 // 「多网同时测」，所以对每个节点各建一个单节点 planner 并发跑：探测任务本身仍由核心
@@ -16,7 +16,7 @@ use crate::logger;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use sync_core::upload_planner as planner;
+use sys_core::upload_planner as planner;
 use tauri::State;
 
 /// 单节点整体超时：RTT + 吞吐两趟，每趟 HTTP 自身 30s，留点余量。

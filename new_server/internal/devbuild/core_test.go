@@ -84,22 +84,23 @@ func TestEnsureCore(t *testing.T) {
 		buildErr           bool
 		wantBuild, wantErr bool
 	}{
-		{"matching-reused", coff, nil, false, false, false},
+		{"matching-still-checks-shared-sources", coff, nil, false, true, false},
 		{"missing-rebuilt", nil, coff, false, true, false},
 		{"foreign-rebuilt", elf, coff, false, true, false},
 		{"invalid-rebuilt", []byte("broken"), coff, false, true, false},
 		{"build-failure-stops", elf, nil, true, true, true},
+		{"matching-old-library-cannot-mask-build-failure", coff, nil, true, true, true},
 		{"wrong-rebuild-rejected", elf, elf, false, true, true},
 		{"missing-rebuild-rejected", nil, nil, false, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			libdir := filepath.Join(root, "sync_core", "lib")
+			root := filepath.Join(t.TempDir(), "new_server")
+			libdir := filepath.Join(root, "..", "sys_core", "lib")
 			if err := os.MkdirAll(libdir, 0700); err != nil {
 				t.Fatal(err)
 			}
 			write := func(b []byte) error {
-				return os.WriteFile(filepath.Join(libdir, "libsync_core.a"), append([]byte("!<arch>\n"), member("core.o/", b)...), 0600)
+				return os.WriteFile(filepath.Join(libdir, "libsys_core.a"), append([]byte("!<arch>\n"), member("core.o/", b)...), 0600)
 			}
 			if tc.initial != nil {
 				if err := write(tc.initial); err != nil {
@@ -121,5 +122,38 @@ func TestEnsureCore(t *testing.T) {
 				t.Fatalf("build=%v err=%v; want build=%v error=%v", called, err, tc.wantBuild, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestCoreLinkerFlagsTracksArchiveContent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "new_server")
+	libdir := filepath.Join(root, "..", "sys_core", "lib")
+	if err := os.MkdirAll(libdir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(libdir, "libsys_core.a")
+	if err := os.WriteFile(path, []byte("first native build"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := CoreLinkerFlags(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := CoreLinkerFlags(root)
+	if err != nil || first != same {
+		t.Fatalf("unchanged archive changed linker identity: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("Rust changed, Go source unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := CoreLinkerFlags(root)
+	if err != nil || first == changed {
+		t.Fatalf("Rust-only update did not change linker identity: %v", err)
+	}
+}
+
+func TestCoreLinkerFlagsRejectsMissingArchive(t *testing.T) {
+	if _, err := CoreLinkerFlags(filepath.Join(t.TempDir(), "new_server")); err == nil {
+		t.Fatal("missing shared core accepted")
 	}
 }

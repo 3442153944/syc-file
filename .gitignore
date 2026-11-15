@@ -54,6 +54,9 @@ new_server/deploy/**
 !new_server/deploy/.gitignore
 !new_server/deploy/README.md
 !new_server/deploy/**/*.example.*
+# Build/deployment source scripts are versioned; runtime configs stay ignored.
+!new_server/deploy/**/*.sh
+!new_server/deploy/**/*.ps1
 
 # dlv 调试产生的二进制
 __debug_bin*
@@ -65,6 +68,18 @@ __debug_bin*
 /new_server/syc-file.exe
 /new_server/cmd.exe
 
+# 桌面控制台（独立进程，-tags desktop 构建）的产物与运行时文件
+/new_server/gui.exe
+/new_server/syc-file-gui
+/new_server/syc-file-gui.exe
+# runtime.json 含本地管理接口的随机 token，绝不能入库
+/new_server/config/runtime.json
+/new_server/config/runtime.json.tmp
+
 # 内嵌 ffmpeg 归档已随仓库提交（见 new_server/internal/thumb/embedded/FFMPEG.lock）
 /new_server/internal/thumb/embedded/*/*.ready
 /new_server/internal/thumb/embedded/*/*.part
+
+# Qt 桌面控制台（server_ui/）构建产物与打包目录
+/server_ui/build/
+/server_ui/dist/

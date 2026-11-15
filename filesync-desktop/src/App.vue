@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { NMessageProvider, NDialogProvider, NNotificationProvider } from 'naive-ui'
-import { ensureVpnDevice, startEmbeddedTunnel } from './api/vpn'
+import { ensureVpnDevice, startEmbeddedTunnel, resumeEmbeddedTunnel, meshMaintenanceError } from './api/vpn'
 import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTransferStore } from './store/useTransferStore'
@@ -34,16 +34,24 @@ useTransferStore().initWs()
 onMounted(() => {
   if (!isTauri()) return
   const auto = () => localStorage.getItem('syc_vpn_auto_tunnel') === '1'
+  let attempting = false
   const attempt = async () => {
-    if (!auto() || !localStorage.getItem('token')) return
+    if (attempting || !localStorage.getItem('token')) return
+    attempting = true
     try {
       const {invoke} = await import('@tauri-apps/api/core')
-      if (await invoke<boolean>('vpn_tunnel_status')) return
-      const device = await ensureVpnDevice()
-      await startEmbeddedTunnel(device)
-    } catch {
-      // 未入组 / 无权限 / 非 Windows 时静默，等下一轮
-    }
+      if (await invoke<boolean>('vpn_tunnel_status')) {
+        const device = await ensureVpnDevice()
+        await resumeEmbeddedTunnel(device)
+        return
+      }
+      if (auto()) {
+        const device = await ensureVpnDevice()
+        await startEmbeddedTunnel(device)
+      }
+    } catch (e) {
+      meshMaintenanceError.value = String(e)
+    } finally { attempting = false }
   }
   setTimeout(attempt, 3000)
   setInterval(attempt, 60_000)

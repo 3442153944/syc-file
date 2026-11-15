@@ -498,23 +498,42 @@ func (a *API) Overview(c *gin.Context) {
 	}
 
 	now := time.Now()
+	live := liveEndpoints()
 	rows := make([]gin.H, 0, len(devices)+1)
 	// 服务器固定排在最上面，方便对照 172.1.0.254
 	rows = append(rows, gin.H{
 		"id": 0, "device_id": "syc-server", "user_id": 0, "username": "服务器",
 		"group": "-", "org": "-", "address": config.Conf.Vpn.ServerAddress,
-		"status": "active", "online": true, "endpoint": "",
+		"status": "active", "online": true, "endpoint": serverEndpointFor(c, config.Conf.Vpn),
 		"role": "server", "last_seen": now,
 	})
 	for _, d := range devices {
-		online := d.Status == model.VPNDeviceActive && d.LastSeen != nil &&
-			now.Sub(*d.LastSeen) < 90*time.Second &&
+		// 组网页的「在线」= 组网在线：服务器 WireGuard 接口最近还看到这个 peer 有流量。
+		// 不用 last_seen（那是客户端 HTTP 心跳，主页有自己的在线指示）。
+		online := d.Status == model.VPNDeviceActive &&
 			d.SessionExpiresAt != nil && d.SessionExpiresAt.After(now)
+		if online {
+			if le, ok := live[d.PubKey]; ok && !le.LastActive.IsZero() {
+				online = now.Sub(le.LastActive) < 20*time.Second
+			} else {
+				online = false
+			}
+		}
+		observed := ""
+		if le, ok := live[d.PubKey]; ok {
+			observed = le.Endpoint
+		}
+		candidates := endpointCandidates(d.LANEndpoints, observed, d.Endpoint)
+		endpoint := ""
+		if len(candidates) > 0 {
+			endpoint = candidates[0]
+		}
 		rows = append(rows, gin.H{
 			"id": d.ID, "device_id": d.DeviceID, "user_id": d.UserID, "username": userName[d.UserID],
 			"group": groupName[d.GroupID], "org": orgName[groupOrg[d.GroupID]],
 			"address": d.Address, "status": d.Status, "online": online,
-			"endpoint": d.Endpoint, "last_seen": d.LastSeen, "session_expires_at": d.SessionExpiresAt,
+			"endpoint": endpoint, "candidates": candidates, "pubkey": d.PubKey,
+			"last_seen": d.LastSeen, "session_expires_at": d.SessionExpiresAt,
 		})
 	}
 	response.OK(c, gin.H{"devices": rows, "server_address": config.Conf.Vpn.ServerAddress})
@@ -621,5 +640,6 @@ func (a *API) ReleaseAdminDevice(c *gin.Context) {
 		response.Fail(c, 500, "释放失败")
 		return
 	}
+	forgetHostedKey(dev.ID)
 	response.OK(c, gin.H{"released": true, "address": dev.Address})
 }

@@ -45,16 +45,19 @@ func sysDetailKey(t time.Time) string {
 	return "monitor:sysdetail:" + t.UTC().Format("20060102")
 }
 
+// detailInterval 采集间隔。monitor.sys_detail_interval_seconds 是热字段：
+// 从 Live 快照读，配置保存后 ticker 会在下一轮对齐到新间隔（见 StartSysDetailRecorder）。
 func detailInterval() time.Duration {
-	s := config.Conf.Monitor.SysDetailIntervalSeconds
+	s := config.Live().Monitor.SysDetailIntervalSeconds
 	if s <= 0 {
 		return defaultDetailInterval
 	}
 	return time.Duration(s) * time.Second
 }
 
+// detailTopN 每轮记录的进程条数上限。monitor.process_top_n 是热字段，读 Live 快照。
 func detailTopN() int {
-	n := config.Conf.Monitor.ProcessTopN
+	n := config.Live().Monitor.ProcessTopN
 	if n <= 0 {
 		return defaultTopN
 	}

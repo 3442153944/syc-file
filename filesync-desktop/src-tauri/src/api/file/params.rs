@@ -33,59 +33,10 @@ pub struct DownloadHistoryParams {
 // ==================== 分片上传 ====================
 
 /// 分片上传初始化描述信息。所有哈希均为 blake3 hex（与服务端 file_lib 一致）。
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UploadInitParams {
-    pub path: String,
-    pub name: String,
-    #[serde(rename = "total_size")]
-    pub total_size: i64,
-    #[serde(rename = "chunk_size")]
-    pub chunk_size: i64,
-    #[serde(rename = "chunk_count")]
-    pub chunk_count: i32,
-    /// blake3 Merkle 树根 hex
-    #[serde(rename = "merkle_root")]
-    pub merkle_root: String,
-    /// 整文件 blake3 hex（秒传/去重键）
-    #[serde(rename = "file_hash")]
-    pub file_hash: String,
-    /// 每片叶子哈希 hex，长度须等于 chunk_count
-    #[serde(rename = "leaf_hashes")]
-    pub leaf_hashes: Vec<String>,
-    /// 本机设备 id：秒传在 init 阶段直接完成，服务端同步派发需排除源设备
-    #[serde(rename = "device_id")]
-    #[serde(default)]
-    pub device_id: String,
-    /// 目标同名时的策略：""/"reject"=报错（默认，同步链路用这个），"timestamp"=服务端自动加时间戳
-    #[serde(rename = "on_conflict")]
-    #[serde(default)]
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub on_conflict: String,
-    /// 同步链路的覆盖式上传：目标已存在时服务端按 base_hash 做版本检查，
-    /// 一致则快进覆盖，不一致（或无基线）则返回 409 并转入冲突待办。
-    #[serde(default)]
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub sync: bool,
-    #[serde(default)]
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub base_hash: String,
-    /// 粘贴快传模式：服务端自算目标路径（quick_share.base_path/<userID>/<uuid><ext>）、
-    /// 按快传配额预检，complete 直接生成分享记录（响应为分享数据结构）
-    #[serde(rename = "quick_share")]
-    #[serde(default)]
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub quick_share: bool,
-}
+pub use sys_core::upload::protocol::UploadInitParams;
 
 /// 分片上传完成。
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UploadCompleteParams {
-    #[serde(rename = "upload_id")]
-    pub upload_id: String,
-    /// 本机设备 id，服务端派发同步任务时排除源设备
-    #[serde(rename = "device_id")]
-    pub device_id: String,
-}
+pub use sys_core::upload::protocol::UploadCompleteParams;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteDownloadHistoryParams {

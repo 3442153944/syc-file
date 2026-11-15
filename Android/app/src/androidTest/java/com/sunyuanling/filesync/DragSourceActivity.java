@@ -22,7 +22,7 @@ public class DragSourceActivity extends Activity {
         button.setText("长按拖放测试文件");
         button.setContentDescription("拖放测试源");
         button.setOnLongClickListener(view -> view.startDragAndDrop(
-            ClipData.newUri(getContentResolver(), "拖放文件", Uri.parse("content://com.sunyuanling.filesync.test.dragfiles/drag-source.txt")),
+            ClipData.newUri(getContentResolver(), "拖放文件", Uri.parse("content://" + getPackageName() + ".dragfiles/drag-source.txt")),
             new View.DragShadowBuilder(view), null, View.DRAG_FLAG_GLOBAL | View.DRAG_FLAG_GLOBAL_URI_READ));
         FrameLayout frame = new FrameLayout(this);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(600, 180, Gravity.TOP | Gravity.CENTER_HORIZONTAL);

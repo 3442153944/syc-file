@@ -296,6 +296,13 @@ object WebSocketManager {
         _connectionState.value = WsState.Disconnected
     }
 
+    /** 已启用的同步连接随入口切换；用户主动断开后不重新启动。 */
+    fun onEndpointChanged(context: Context) {
+        if (!shouldReconnect.get()) return
+        disconnect()
+        connect(context.applicationContext)
+    }
+
     /**
      * 检查是否已连接
      */

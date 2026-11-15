@@ -91,7 +91,7 @@ func handleAvatarUpload(c *gin.Context, userID uint) (string, error) {
 		}
 	}(file)
 
-	userCfg := config.Conf.User
+	userCfg := config.Live().User
 
 	if header.Size > userCfg.MaxSize {
 		return "", fmt.Errorf("头像文件超过最大限制 %dMB", userCfg.MaxSize/1024/1024)

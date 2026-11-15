@@ -4,11 +4,14 @@ Windows：在 `new_server` 目录执行 `./run.ps1`；只构建用 `./run.ps1 -B
 Linux：执行 `bash run.sh`；只构建用 `bash run.sh -build`。
 也可以直接执行 `go run ./cmd/dev`，或 `go run ./cmd/dev -prepare` 只准备核心库。
 
-启动器只依赖 Go 标准库，在编译实际服务之前读取
-`sync_core/lib/libsync_core.a` 内的 ELF / COFF 目标头，核对操作系统和 CPU 架构。
-文件缺失、无法识别或平台不匹配时，自动调用当前平台的 `sync_core/build.ps1`
-或 `sync_core/build.sh`，然后重新校验；构建或校验失败就停止，不启动服务。
-已匹配的库直接复用。修改 Rust 源码后仍需手动运行核心构建脚本。
+启动器只依赖 Go 标准库，在编译实际服务前调用根目录 `sys_core/build.ps1`（Windows）或
+`sys_core/build.sh`（Linux），由 Cargo 的增量缓存判断共享源码是否更新，再读取
+`sys_core/lib/libsys_core.a` 的 ELF / COFF 目标头，核对当前操作系统和 CPU。
+编译失败、库缺失、目标平台不匹配时均停止，不能复用同架构旧库掩盖源码编译失败。
+
+Go 的 cgo 直接使用根目录 `sys_core/include/sys_core.h` 和 `lib/libsys_core.a`。
+官方开发/部署/Docker入口将静态库 SHA256 写入 Go 链接参数，使只改 Rust 也会重新链接，
+避免外部 `.a` 不参与 Go 源码缓存检测而使用旧链接结果。
 
 Windows 需要 Rust 的 `x86_64-pc-windows-gnu` target 及 MinGW-w64 GCC；
 Linux 需要 Rust 和 GCC。自动重建不自动安装系统工具链。
@@ -39,5 +42,6 @@ Windows 的 `run.ps1` 会刷新 PATH；直接运行 Go 启动器时，如果找�
 开发启动器会构建并启动独立服务进程，因此在启动器上调试不会进入服务断点；
 需要调试服务时，先用 `go run ./cmd/dev -prepare` 准备核心，再调试原来的服务入口。
 
-自动重建会替换本地的 `sync_core/lib/libsync_core.a`。该文件目前仍被 Git 跟踪，
-跨系统同步可能覆盖它；下次经开发启动器启动时会再次检查并修复。
+共享库 `sys_core/lib/` 与兼容复制目录 `new_server/sync_core/lib/` 是当前平台的可重建产物，
+不应随 Git 跨系统同步。`new_server/sync_core/build.*` 仅作为旧命令的转发入口，
+当前 Go 构建不再链接旧目录。根目录的构建脚本必须随仓库跟踪。

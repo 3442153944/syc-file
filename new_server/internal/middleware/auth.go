@@ -67,13 +67,15 @@ func RequireLevel(min int8) gin.HandlerFunc {
 
 // isWhitelisted 判断请求路径是否命中配置文件中的白名单
 // 支持精确匹配，或以白名单项为前缀的子路径匹配（如 /v1/public 放行 /v1/public/xxx）
-func isWhitelisted(path string) bool {
+//
+// whitelist 是热字段：从 live 快照读，配置保存后无需重启即生效。
+func isWhitelisted(live *config.Config, path string) bool {
 	for _, p := range builtinWhitelist {
 		if path == p {
 			return true
 		}
 	}
-	for _, p := range config.Conf.Whitelist {
+	for _, p := range live.Whitelist {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
@@ -87,6 +89,10 @@ func isWhitelisted(path string) bool {
 func Auth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set("Auth", false)
+		// 本次请求读一次配置快照：热重载只原子换快照指针，同一请求内看到的值保持一致，
+		// 不会出现“白名单用新值、token 有效期用旧值”的撕裂。
+		// whitelist / auth.token_expire / auth.refresh_expire 都是热字段，保存后即时生效。
+		live := config.Live()
 
 		// 尽量解析 token 并注入用户信息（白名单路由如 /user/verify 也依赖此信息）
 		tokenStr := c.GetHeader("Token")
@@ -124,7 +130,7 @@ func Auth() gin.HandlerFunc {
 					}
 				}
 				remaining := time.Until(claims.ExpiresAt.Time)
-				refreshThreshold := time.Duration(config.Conf.Auth.RefreshExpire) * 24 * time.Hour
+				refreshThreshold := time.Duration(live.Auth.RefreshExpire) * 24 * time.Hour
 				// 访客账号自带有效期，token 不续期（续了就活过账号了）
 				if accountAlive && remaining < refreshThreshold && level > 0 {
 					roles := claims.Roles
@@ -147,7 +153,7 @@ func Auth() gin.HandlerFunc {
 							roles,
 							claims.DeviceID,
 							level,
-							config.Conf.Auth.TokenExpire,
+							live.Auth.TokenExpire,
 						)
 					}
 					if !canRefresh {
@@ -184,7 +190,7 @@ func Auth() gin.HandlerFunc {
 		}
 
 		// 白名单路由直接放行，无需登录
-		if isWhitelisted(c.Request.URL.Path) {
+		if isWhitelisted(live, c.Request.URL.Path) {
 			c.Next()
 			return
 		}

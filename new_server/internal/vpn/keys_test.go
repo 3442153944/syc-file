@@ -1,20 +1,9 @@
 package vpn
 
 import (
-	"crypto/rand"
 	"encoding/base64"
 	"testing"
 )
-
-func testMaster(t *testing.T) []byte {
-	t.Helper()
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(MasterKeyEnv, base64.StdEncoding.EncodeToString(key))
-	return key
-}
 
 func TestGenerateKeypair(t *testing.T) {
 	priv, pub, err := GenerateKeypair()
@@ -34,65 +23,39 @@ func TestGenerateKeypair(t *testing.T) {
 	}
 }
 
-func TestEncryptDecryptRoundtrip(t *testing.T) {
-	master := testMaster(t)
-	priv, _, err := GenerateKeypair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	enc, err := EncryptPrivate(master, priv, "device-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if enc == priv {
-		t.Fatal("密文不应等于明文")
-	}
-	got, err := DecryptPrivate(master, enc, "device-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != priv {
-		t.Fatalf("解密结果不一致")
-	}
-}
-
-func TestCiphertextBoundToDevice(t *testing.T) {
-	master := testMaster(t)
-	priv, _, _ := GenerateKeypair()
-	enc, err := EncryptPrivate(master, priv, "device-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := DecryptPrivate(master, enc, "device-2"); err == nil {
-		t.Fatal("换设备号必须解密失败（AAD 绑定）")
-	}
-}
-
-func TestWrongMasterKeyFails(t *testing.T) {
-	master := testMaster(t)
-	priv, _, _ := GenerateKeypair()
-	enc, _ := EncryptPrivate(master, priv, "d")
-	other := make([]byte, 32)
-	if _, err := DecryptPrivate(other, enc, "d"); err == nil {
-		t.Fatal("换了主密钥必须解密失败")
-	}
-}
-
-func TestMasterKeyFromEnv(t *testing.T) {
-	t.Setenv(MasterKeyEnv, "")
-	if _, err := MasterKey(); err == nil {
-		t.Fatal("未设置时应当报错，提示改用 client 模式")
-	}
-	t.Setenv(MasterKeyEnv, base64.StdEncoding.EncodeToString([]byte("short")))
-	if _, err := MasterKey(); err == nil {
-		t.Fatal("长度不足 32 字节应报错")
-	}
-}
-
 func TestValidatePubKeyRejectsGarbage(t *testing.T) {
 	for _, bad := range []string{"", "not-base64", base64.StdEncoding.EncodeToString([]byte("short"))} {
 		if err := ValidatePubKey(bad); err == nil {
 			t.Fatalf("%q 应被拒绝", bad)
 		}
+	}
+}
+
+// TestHostedKeyStore 覆盖进程内存托管的存取与清理。
+func TestHostedKeyStore(t *testing.T) {
+	clearHostedKeys()
+	t.Cleanup(clearHostedKeys)
+	storeHostedKey(42, "private-key")
+	if got, ok := loadHostedKey(42); !ok || got != "private-key" {
+		t.Fatalf("loadHostedKey = %q, %v", got, ok)
+	}
+	forgetHostedKey(42)
+	if _, ok := loadHostedKey(42); ok {
+		t.Fatal("forgetHostedKey 后不应还能取到")
+	}
+}
+
+// TestNewKeypairIsUnique 每次动态签发都应是新的密钥对（服务重启后重新签发依赖这一点）。
+func TestNewKeypairIsUnique(t *testing.T) {
+	priv, pub, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv2, pub2, err := GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if priv == priv2 || pub == pub2 {
+		t.Fatal("两次生成的密钥对应不同")
 	}
 }

@@ -68,46 +68,9 @@ where
 // ==================== 分片上传 ====================
 // 对应后端 upload_chunked.go / upload_chunk.go / upload_complete.go
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadInitData {
-    #[serde(rename = "upload_id")]
-    pub upload_id: String,
-    /// true=秒传，已直接完成，无需上传分片
-    #[serde(default)]
-    pub instant: bool,
-    #[serde(rename = "chunk_size")]
-    #[serde(default)]
-    pub chunk_size: i64,
-    #[serde(rename = "chunk_count")]
-    #[serde(default)]
-    pub chunk_count: i32,
-    /// 仍缺失（需上传）的分片索引
-    #[serde(default)]
-    pub missing: Vec<i32>,
-    /// 服务端最终采用的文件名。**可能与本地文件名不同**——同名冲突策略为 timestamp 时
-    /// 服务端会自动加时间戳。秒传/已存在分支才返回，普通分支为空。
-    #[serde(rename = "file_name")]
-    #[serde(default)]
-    pub file_name: String,
-    /// 服务端最终落盘的完整路径（同上，仅秒传/已存在分支返回）。
-    #[serde(rename = "storage_path")]
-    #[serde(default)]
-    pub storage_path: String,
-}
+pub use sys_core::upload::protocol::UploadInitData;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadChunkData {
-    #[serde(default)]
-    pub index: i32,
-    #[serde(default)]
-    pub received: i32,
-    #[serde(rename = "chunk_count")]
-    #[serde(default)]
-    pub chunk_count: i32,
-    /// 是否已收齐全部分片
-    #[serde(default)]
-    pub complete: bool,
-}
+pub use sys_core::upload::protocol::UploadChunkData;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadStatusData {
@@ -132,48 +95,8 @@ pub struct UploadStatusData {
 
 /// 分片上传 complete 的粘贴快传响应：服务端 finalizeShareLink 的 data 原样，
 /// 与旧单发快传接口（/file/quick-share/upload）响应形状一致，前端直接当 CreateShareLinkData 用。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QuickShareCompleteData {
-    /// 客户端确认可下载的入口，不使用上传启动时可能已失效的地址。
-    #[serde(default)]
-    pub entry_url: String,
-    #[serde(default)]
-    pub entry_candidates: Vec<String>,
-    #[serde(rename = "share_code")]
-    pub share_code: String,
-    #[serde(rename = "temp_name")]
-    pub temp_name: String,
-    #[serde(rename = "file_name")]
-    pub file_name: String,
-    #[serde(rename = "file_size")]
-    pub file_size: i64,
-    #[serde(rename = "is_dir")]
-    #[serde(default)]
-    pub is_dir: bool,
-    #[serde(rename = "expire_time")]
-    pub expire_time: String,
-    #[serde(rename = "url_path")]
-    pub url_path: String,
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UploadCompleteData {
-    #[serde(rename = "file_id")]
-    #[serde(default)]
-    pub file_id: u64,
-    #[serde(rename = "file_name")]
-    pub file_name: String,
-    #[serde(rename = "storage_path")]
-    pub storage_path: String,
-    #[serde(rename = "file_size")]
-    pub file_size: i64,
-    #[serde(rename = "file_hash")]
-    #[serde(default)]
-    pub file_hash: String,
-    /// 是否已触发同步派发（目标在同步目录内）
-    #[serde(default)]
-    pub synced: bool,
-}
+pub use sys_core::upload::protocol::UploadCompleteData;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DownloadHistoryItem {

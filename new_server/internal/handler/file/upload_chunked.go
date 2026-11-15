@@ -83,6 +83,9 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 		}
 		userID := uint(claims.(*token.Claims).UserID)
 
+		// file.upload.* 是热字段：本次请求读一次 Live 快照，保存后无需重启即生效。
+		live := config.Live()
+
 		var req uploadInitReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			response.WriteHTTP(c, http.StatusOK, 400, "参数解析失败", nil)
@@ -115,16 +118,16 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 				return
 			}
 			req.Path = filepath.Dir(fullPath)
-			if !config.Conf.IsExtensionAllowed(filepath.Ext(req.Name)) {
+			if !live.IsExtensionAllowed(filepath.Ext(req.Name)) {
 				response.WriteHTTP(c, http.StatusOK, 400, "不允许上传该类型的文件", nil)
 				return
 			}
-			if len(req.Name) > config.Conf.File.Upload.MaxFilenameLength {
+			if len(req.Name) > live.File.Upload.MaxFilenameLength {
 				response.WriteHTTP(c, http.StatusOK, 400, "文件名过长", nil)
 				return
 			}
 		}
-		if req.TotalSize <= 0 || (!req.QuickShare && req.TotalSize > config.Conf.File.Upload.MaxFileSize) {
+		if req.TotalSize <= 0 || (!req.QuickShare && req.TotalSize > live.File.Upload.MaxFileSize) {
 			response.WriteHTTP(c, http.StatusOK, 400, "文件大小超出限制", nil)
 			return
 		}
@@ -248,8 +251,9 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 			if tempErr == nil && sess.MerkleRoot == req.MerkleRoot && sess.FileHash == req.FileHash &&
 				sess.TotalSize == req.TotalSize && sess.ChunkSize == req.ChunkSize {
 				_ = upload_store.Global.Touch(ctx, id, uploadSessionTTL)
-				bitmap, _ := upload_store.Global.Bitmap(ctx, id)
-				missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
+				// receiver 在线时用 Rust accepted 位图：内存里已接受但尚未落盘/快照的片
+				// 不能在续传时被误判缺失而让客户端重传。
+				missing := receiverMissingChunks(ctx, id, sess.ChunkCount)
 				logger.Logger.Info("上传续传", zap.String("upload_id", id), zap.Int("missing", len(missing)))
 				response.WriteHTTP(c, http.StatusOK, 200, "续传", gin.H{
 					"upload_id": id, "instant": false, "chunk_size": sess.ChunkSize,
@@ -257,11 +261,17 @@ func HandlerFuncUploadInit(db *gorm.DB, _ *redis.Client, engine *sync.Engine) gi
 				})
 				return
 			}
-			// 描述对不上或临时文件已丢 → 丢弃旧会话，重新开始（客户端整份重传）
+			// 描述对不上或临时文件已丢 → 丢弃旧会话，重新开始（客户端整份重传）。
+			// 同一 id 重用时不能残留旧的接收器状态（accepted/abandoned 缓冲）。
+			_ = synccore.ReceiverClose(id)
 			_ = upload_store.Global.Delete(ctx, id)
 			_ = synccore.Evict(sess.TempPath) // 先关 Rust 侧缓存句柄再删文件
 			_ = os.Remove(sess.TempPath)
 		}
+
+		// 防御性清理：会话在 Redis 里已不存在，但进程内可能还有同 id 的旧 receiver
+		// （例如上一轮会话过期但接收器未到 TTL 回收）。新建会话前必须清掉，避免沿用旧接收状态。
+		_ = synccore.ReceiverClose(id)
 
 		// 新建会话：内容进临时文件（与目标同盘，便于原子 rename）。普通路径预分配占位；
 		// 快传命中秒传源时直接复制进临时文件（复制失败回退预分配，照常分片上传）。
@@ -362,8 +372,7 @@ func HandlerFuncUploadStatus(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 		now := time.Now()
 		_ = os.Chtimes(sess.TempPath, now, now)
 		_ = upload_store.Global.Touch(ctx, id, uploadSessionTTL)
-		bitmap, _ := upload_store.Global.Bitmap(ctx, id)
-		missing := upload_store.MissingChunks(bitmap, sess.ChunkCount)
+		missing := receiverMissingChunks(ctx, id, sess.ChunkCount)
 		response.WriteHTTP(c, http.StatusOK, 200, "ok", gin.H{
 			"found": true, "status": sess.Status, "chunk_size": sess.ChunkSize,
 			"chunk_count": sess.ChunkCount, "received": sess.ChunkCount - len(missing),
@@ -373,6 +382,24 @@ func HandlerFuncUploadStatus(db *gorm.DB, _ *redis.Client) gin.HandlerFunc {
 }
 
 // ---- helpers ----
+
+// receiverMissingChunks 计算缺失分片索引，供 init 续传分支与 status 使用。
+//
+//   - receiver 在线：用 Rust 的 accepted 位图。内存里已接受、尚未落盘或尚未快照的片也算已收，
+//     否则客户端会在续传时被误判成缺失而白重传（这些片最终由 complete 的 flush 落盘）。
+//   - receiver 不在线（进程重启后还没收过片 / 首次 init）：退回 Redis 的 persisted 位图，
+//     只有落过盘的片才算已收，与崩溃恢复语义一致。
+func receiverMissingChunks(ctx context.Context, id string, chunkCount int) []int {
+	if synccore.ReceiverExists(id) {
+		if bits, err := synccore.ReceiverBitmapAccepted(id, chunkCount); err == nil {
+			return upload_store.MissingChunks(bits, chunkCount)
+		} else {
+			logger.Logger.Warn("导出接收器位图失败，回退 Redis 位图", zap.String("upload_id", id), zap.Error(err))
+		}
+	}
+	bitmap, _ := upload_store.Global.Bitmap(ctx, id)
+	return upload_store.MissingChunks(bitmap, chunkCount)
+}
 
 // respondInstant 「内容已经在目标位置了」的统一收尾：登记 file 记录 / 交同步引擎派发 /
 // 写上传历史，然后按秒传形状返回（instant=true，客户端**不得**再调 complete）。
@@ -454,6 +481,7 @@ func uniqueNameWithTimestamp(reqPath, name string) (string, string, error) {
 // quickShareTargetPath 快传分片上传的目标路径：quick_share.base_path/<userID>/<uuid><ext>。
 // 与旧单发快传接口同一套落地规则。BasePath 未配置返回错误（调用方回 500）。
 func quickShareTargetPath(userID uint, name string) (string, error) {
+	// quick_share.base_path 是冷字段（启动时装配），按设计继续读 Conf。
 	qs := config.Conf.QuickShare
 	if qs.BasePath == "" {
 		return "", errors.New("未配置粘贴快传目录 quick_share.base_path")
@@ -466,8 +494,9 @@ func quickShareTargetPath(userID uint, name string) (string, error) {
 }
 
 // quickShareRemainingBytes 快传剩余配额 = 容量上限（config 未配时 10GB 兜底）- 已用。
+// quick_share.max_capacity_bytes 是热字段：读 Live 快照。
 func quickShareRemainingBytes(db *gorm.DB, userID uint) (int64, error) {
-	maxCapacity := config.Conf.QuickShare.MaxCapacityBytes
+	maxCapacity := config.Live().QuickShare.MaxCapacityBytes
 	if maxCapacity <= 0 {
 		maxCapacity = defaultQuickShareCapacityBytes
 	}

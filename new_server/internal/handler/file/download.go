@@ -235,7 +235,8 @@ func serveRangeFile(c *gin.Context, file *os.File, fileSize int64, rangeHeader s
 }
 
 func isPathAllowedDownload(path string) bool {
-	return config.Conf.IsPathAllowed(path)
+	// file.allowed_paths 是热字段：读 Live 快照，保存后无需重启。
+	return config.Live().IsPathAllowed(path)
 }
 
 func getMimeType(filename string) string {

@@ -4,7 +4,7 @@
 #
 # 用法：  bash deploy.sh [--build-only] [--no-sync_core|--no-filecore] [--ffmpeg-source PATH]
 #   --build-only   只构建并校验能编译，不替换二进制、不重启服务
-#   --no-sync_core  跳过 Rust 核心库（libsync_core.a）重建；sync_core 没改过时可加，省一点时间
+#   --no-sync_core  跳过统一 Rust 核心重建；sys_core 没改过时可加，省一点时间
 #   --ffmpeg-source PATH  指定 ffmpeg 目录或压缩包；不指定时校验仓库内置的固定版本归档
 #
 # 说明：
@@ -66,8 +66,8 @@ fi
 
 # ── 1. 构建 ──────────────────────────────────────────────────
 if [ "$FILECORE" = 1 ]; then
-    step "构建 Rust 核心库 libsync_core.a"
-    bash sync_core/build.sh
+    step "构建统一 Rust 核心 sys_core/lib/libsys_core.a"
+    bash ../sys_core/build.sh
 fi
 step "校验内嵌 ffmpeg 归档（固定版本）"
 if [[ -n "$FFMPEG_SOURCE" ]]; then
@@ -76,7 +76,8 @@ else
     bash tools/fetch-ffmpeg.sh linux
 fi
 step "构建后端（go build）"
-CGO_ENABLED=1 CC=gcc go build -trimpath -o "$BIN.new" ./cmd
+core_sha="$(sha256sum ../sys_core/lib/libsys_core.a | cut -d' ' -f1)"
+CGO_ENABLED=1 CC=gcc go build -ldflags "-X syc-file/pkg/synccore.CoreArchiveSHA256=$core_sha" -trimpath -o "$BIN.new" ./cmd
 echo "构建完成：$(pwd)/$BIN.new ($(du -h "$BIN.new" | cut -f1))"
 
 if [ "$BUILD_ONLY" = 1 ]; then

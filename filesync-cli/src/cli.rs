@@ -67,9 +67,15 @@ pub enum Cmd {
         device: Option<String>,
         #[arg(long, default_value_t = 3478)]
         stun_port: u16,
-        /// 探测后立即上报端点，方便对端直连
+        /// 通过 heartbeat 上报已实测的 WG 外部端点（必须给 --observed-wg-endpoint）
         #[arg(long)]
         report: bool,
+        /// 本机 WireGuard 的 ListenPort，仅用于诊断；NAT 外部端口可能不同。
+        #[arg(long)]
+        wg_port: Option<u16>,
+        /// 服务端从真实 WG 流量观察到的外部 ip:port；不能由 STUN IP + 本地端口拼接。
+        #[arg(long)]
+        observed_wg_endpoint: Option<String>,
     },
     /// 一键体检：STUN 探测 + 链路状态 + 对端列表
     Netcheck {

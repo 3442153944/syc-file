@@ -1,16 +1,18 @@
-import fs, { ReadOptions } from '@ohos.file.fs';
+import fileCoreNative from 'libfilecore.so';
 import { FileApi } from '../../api/file/FileApi';
-import { SessionGoneException, ChunkVerifyException, ResponseException } from '../../net/Response';
-import type { UploadInitData, UploadCompleteData, UploadInitParams } from '../../api/file/FileTypes';
-import { describe as fileCoreDescribe, type Description } from '../../core/FileCore';
+import { ResponseException } from '../../net/Response';
+import type { ApiResponseData } from '../../net/Response';
+import { Request } from '../../net/Request';
+import type {
+  DeleteFileParams,
+  UploadCompleteData,
+  UploadInitData
+} from '../../api/file/FileTypes';
 import { appConfig } from '../../app/AppConfig';
 
-// ===== 内部接口（ArkTS 不允许把对象字面量当类型用） =====
 export interface CancelSignal {
   cancelled: boolean;
 }
-interface MutableNumber { value: number; }
-interface MutableString { value: string; }
 
 export interface UploadRequest {
   filePath: string;
@@ -31,33 +33,65 @@ export interface UploadResult {
   instant?: boolean;
 }
 
-// ===== 模块级辅助函数 =====
-async function runPool(
-  tasks: number[],
-  worker: (item: number, index: number) => Promise<void>,
-  concurrency: number
-): Promise<void> {
-  if (tasks.length === 0) return;
-  let cursor: number = 0;
-  const runners: Promise<void>[] = [];
-  const n: number = Math.min(concurrency, tasks.length);
-  const runOne: () => Promise<void> = async (): Promise<void> => {
-    while (cursor < tasks.length) {
-      const idx: number = cursor;
-      cursor += 1;
-      await worker(tasks[idx], idx);
-    }
-  };
-  for (let i = 0; i < n; i++) {
-    runners.push(runOne());
-  }
-  await Promise.all(runners);
+interface UploadNode {
+  id: string;
+  url: string;
 }
 
-function rangeArray(n: number): number[] {
-  const arr: number[] = [];
-  for (let i = 0; i < n; i++) arr.push(i);
-  return arr;
+interface UploadPlannerState {
+  nodes: Object[];
+}
+
+interface UploadStartInput {
+  file: string;
+  remote_dir: string;
+  base_url: string;
+  device_id: string;
+  quick_share: boolean;
+  chunk_size: number | null;
+  concurrency: number | null;
+  nodes: UploadNode[];
+  main_node: string;
+  state: UploadPlannerState;
+  resume: UploadInitData | null;
+}
+
+interface UploadBody {
+  kind: string;
+  value?: Object | null;
+}
+
+interface UploadEvent {
+  type: string;
+  id?: number;
+  base_url?: string;
+  path?: string;
+  query?: string[][];
+  body?: UploadBody;
+  timeout_ms?: number;
+  url?: string;
+  sent?: number;
+  total?: number;
+  upload_id?: string;
+  state?: Object;
+  level?: string;
+  source?: string;
+  message?: string;
+  data?: UploadCompleteData;
+  error?: string;
+}
+
+interface UploadReply {
+  response?: Object;
+  error?: string;
+}
+
+interface UploadPumpState {
+  closed: boolean;
+}
+
+interface UploadHostCall {
+  cancelled: boolean;
 }
 
 function toError(e: Object): Error {
@@ -65,141 +99,183 @@ function toError(e: Object): Error {
   return new Error(JSON.stringify(e));
 }
 
-/**
- * ChunkedUploader
- * 分片上传器，对标 Android api/file/ChunkedUploader.kt + 桌面端 chunked_uploader.rs。
- *
- * 流程（描述计算走 FileCore Rust 内核，无内核时回退纯 ArkTS Blake3Util）：
- *   描述 → init →（秒传则完成）→ 并发补传缺失分片 → complete。
- *
- * 失败处理：SessionGone 自动重新 init 一次；ChunkVerify 重传该片；其余失败抛出。
- */
+function isCancelled(req: UploadRequest): boolean {
+  return req.cancelSignal !== undefined && req.cancelSignal.cancelled;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve: () => void): void => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/** sys_core 负责上传状态机；ArkTS 只提供 HTTP、进度和生命周期适配。 */
 export class ChunkedUploader {
   static async upload(req: UploadRequest): Promise<UploadResult> {
-    const chunkSize: number = req.chunkSize !== undefined && req.chunkSize > 0
-      ? req.chunkSize
-      : appConfig.uploadChunkSize;
-    const concurrency: number = req.maxConcurrent !== undefined && req.maxConcurrent > 0
-      ? req.maxConcurrent
-      : appConfig.maxConcurrentUploads;
+    if (isCancelled(req)) throw new Error('上传已取消');
 
-    // 1. 算描述（走 Rust 内核 fc_describe，无则回退纯 ArkTS blake3）
-    const desc: Description = await fileCoreDescribe(req.filePath, chunkSize);
-
-    // 2. delete-before-upload（同步覆盖上传前置，服务端 init 拒收已存在文件）
     if (req.deleteBeforeUpload === true) {
+      const deleteParams: DeleteFileParams = { path: req.remotePath, name: req.fileName };
       try {
-        await FileApi.deleteFile({ path: req.remotePath, name: req.fileName });
+        await FileApi.deleteFile(deleteParams);
       } catch (e) {
         if (e instanceof ResponseException && (e as ResponseException).isNotFound()) {
-          // 文件不存在，正常情况
+          // 覆盖上传时目标不存在属于正常情况。
         } else {
           console.warn(`[ChunkedUploader] delete-before-upload failed: ${toError(e as Object).message}`);
         }
       }
     }
 
-    // 3. init
-    const initDesc: UploadInitParams = {
-      path: req.remotePath,
-      name: req.fileName,
-      total_size: desc.totalSize,
-      chunk_size: desc.chunkSize,
-      chunk_count: desc.chunkCount,
-      merkle_root: desc.merkleRootHex,
-      file_hash: desc.fileHashHex,
-      leaf_hashes: desc.leafHashesHex,
+    const baseUrl: string = appConfig.getBaseUrl();
+    const chunkSize: number | null = req.chunkSize !== undefined && req.chunkSize > 0
+      ? req.chunkSize
+      : null;
+    const concurrency: number | null = req.maxConcurrent !== undefined && req.maxConcurrent > 0
+      ? req.maxConcurrent
+      : null;
+    const node: UploadNode = { id: 'active', url: baseUrl };
+    const plannerState: UploadPlannerState = { nodes: [] };
+    const input: UploadStartInput = {
+      file: req.filePath,
+      remote_dir: req.remotePath,
+      base_url: baseUrl,
       device_id: req.deviceId,
+      quick_share: false,
+      chunk_size: chunkSize,
+      concurrency: concurrency,
+      nodes: [node],
+      main_node: 'active',
+      state: plannerState,
+      resume: null,
     };
-    let initResp: UploadInitData = (await FileApi.uploadInit(initDesc)).data as UploadInitData;
+    const job: number = fileCoreNative.startUpload(JSON.stringify(input));
+    if (job === 0) throw new Error('sys_core 上传任务创建失败');
 
-    // 秒传：init 阶段已复制落盘 + 同步派发，无会话——不能调 complete，就地合成结果
-    if (initResp.instant) {
-      if (req.onProgress !== undefined) {
-        req.onProgress(desc.totalSize, desc.totalSize);
-      }
-      const r: UploadResult = { ok: true, message: 'instant', instant: true };
-      return r;
-    }
-
-    // 4. 并发上传缺失分片
-    let missing: number[] = initResp.missing !== undefined && initResp.missing !== null
-      ? initResp.missing
-      : rangeArray(desc.chunkCount);
-
-    const totalSentCounter: MutableNumber = { value: 0 };
-    const uploadIdHolder: MutableString = { value: initResp.upload_id };
-
-    const uploadOne: (idx: number) => Promise<void> = async (idx: number): Promise<void> => {
-      if (req.cancelSignal !== undefined && req.cancelSignal.cancelled) return;
-      // 读出该片字节：每次 openSync 拿到独立 fd（指针=0），offset=chunkStart 作为绝对位置读取
-      // ArkTS fs.ReadOptions 自 API 11 起仅 offset+length（offset 是「相对当前指针的偏移」，
-      // 新 fd 指针=0，故 offset 等同绝对位置）。
-      const thisChunkSize: number = idx < desc.chunkCount - 1 ? desc.chunkSize : lastChunkLen(desc, idx);
-      const chunkBuf: ArrayBuffer = new ArrayBuffer(thisChunkSize);
-      const readPos: number = idx * desc.chunkSize;
-      const chunkFile: fs.File = fs.openSync(req.filePath, fs.OpenMode.READ_ONLY);
-      try {
-        const readOpts: ReadOptions = { offset: readPos, length: thisChunkSize };
-        const readLen: number = fs.readSync(chunkFile.fd, chunkBuf, readOpts);
-        const chunkData: Uint8Array = new Uint8Array(chunkBuf, 0, readLen);
-        try {
-          await FileApi.uploadChunk(uploadIdHolder.value, idx, chunkData);
-          totalSentCounter.value += thisChunkSize;
-          if (req.onProgress !== undefined) {
-            req.onProgress(totalSentCounter.value, desc.totalSize);
-          }
-        } catch (e) {
-          if (e instanceof SessionGoneException) {
-            // 重新 init 一次（描述不变）
-            const reInit: UploadInitData = (await FileApi.uploadInit(initDesc)).data as UploadInitData;
-            uploadIdHolder.value = reInit.upload_id;
-            const newMissing: number[] = reInit.missing !== undefined && reInit.missing !== null
-              ? reInit.missing
-              : [];
-            totalSentCounter.value = 0;
-            await runPool(newMissing, uploadOne, concurrency);
-            return;
-          }
-          if (e instanceof ChunkVerifyException) {
-            // 重试该片一次
-            try {
-              await FileApi.uploadChunk(uploadIdHolder.value, idx, chunkData);
-              totalSentCounter.value += thisChunkSize;
-              if (req.onProgress !== undefined) {
-                req.onProgress(totalSentCounter.value, desc.totalSize);
-              }
-            } catch (e2) {
-              throw toError(e2 as Object);
+    const pumpState: UploadPumpState = { closed: false };
+    const calls: Map<number, UploadHostCall> = new Map<number, UploadHostCall>();
+    try {
+      while (true) {
+        if (isCancelled(req)) throw new Error('上传已取消');
+        const payload: string | null = fileCoreNative.pollUpload(job);
+        if (payload === null) throw new Error('sys_core 上传事件读取失败');
+        const events = JSON.parse(payload) as UploadEvent[];
+        for (let i = 0; i < events.length; i++) {
+          const event: UploadEvent = events[i];
+          switch (event.type) {
+            case 'request':
+            case 'probe_share': {
+              if (event.id === undefined) throw new Error('上传请求事件缺少 id');
+              const call: UploadHostCall = { cancelled: false };
+              calls.set(event.id, call);
+              ChunkedUploader.executeHostCall(job, event, call, pumpState);
+              break;
             }
-          } else {
-            throw toError(e as Object);
+            case 'cancel_request': {
+              if (event.id === undefined) break;
+              const call = calls.get(event.id);
+              if (call !== undefined) call.cancelled = true;
+              calls.delete(event.id);
+              break;
+            }
+            case 'progress': {
+              if (req.onProgress !== undefined && event.sent !== undefined && event.total !== undefined) {
+                req.onProgress(event.sent, event.total);
+              }
+              break;
+            }
+            case 'session': {
+              console.info(`[ChunkedUploader] session: ${event.upload_id ?? ''}`);
+              break;
+            }
+            case 'state': {
+              // 当前 HarmonyOS UploadRequest 没有持久化规划状态的入口。
+              break;
+            }
+            case 'log': {
+              const message: string = event.message ?? '';
+              if (event.level === 'warn') {
+                console.warn(`[sys_core] ${message}`);
+              } else {
+                console.info(`[sys_core] ${message}`);
+              }
+              break;
+            }
+            case 'done': {
+              if (event.data === undefined) throw new Error('上传完成事件缺少数据');
+              const instant: boolean = event.data.file_id === 0;
+              const result: UploadResult = {
+                ok: true,
+                message: instant ? 'instant' : 'ok',
+                data: event.data,
+                instant: instant,
+              };
+              return result;
+            }
+            case 'failed': {
+              throw new Error(event.error ?? 'sys_core 上传失败');
+            }
+            default:
+              break;
           }
         }
-      } finally {
-        try { fs.closeSync(chunkFile); } catch (e) { /* ignore */ }
+        if (events.length === 0) await delay(10);
       }
-    };
-
-    try {
-      await runPool(missing, uploadOne, concurrency);
-    } catch (e) {
-      throw toError(e as Object);
+    } finally {
+      pumpState.closed = true;
+      calls.forEach((call: UploadHostCall): void => {
+        call.cancelled = true;
+      });
+      calls.clear();
+      fileCoreNative.cancelUpload(job);
     }
-
-    // 5. complete
-    const completeResp: UploadCompleteData = (await FileApi.uploadComplete({
-      upload_id: uploadIdHolder.value,
-      device_id: req.deviceId,
-    })).data as UploadCompleteData;
-
-    const finalResult: UploadResult = { ok: true, message: 'ok', data: completeResp };
-    return finalResult;
   }
-}
 
-/** 末片长度（totalSize 不是 chunkSize 整数倍时） */
-function lastChunkLen(desc: Description, idx: number): number {
-  const rem: number = desc.totalSize - idx * desc.chunkSize;
-  return rem < desc.chunkSize ? rem : desc.chunkSize;
+  private static async executeHostCall(
+    job: number,
+    event: UploadEvent,
+    call: UploadHostCall,
+    pumpState: UploadPumpState
+  ): Promise<void> {
+    if (event.id === undefined) return;
+    let reply: UploadReply;
+    try {
+      let response: ApiResponseData<Object>;
+      if (event.type === 'probe_share') {
+        if (event.url === undefined) throw new Error('分享探测事件缺少 url');
+        await Request.probeShare(event.url);
+        response = { code: 200, message: '', data: null };
+      } else {
+        if (event.base_url === undefined || event.path === undefined || event.query === undefined ||
+          event.body === undefined || event.timeout_ms === undefined) {
+          throw new Error('上传请求事件字段不完整');
+        }
+        let jsonBody: Object | null = null;
+        let bytes: Uint8Array | null = null;
+        if (event.body.kind === 'bytes') {
+          bytes = fileCoreNative.takeUploadBody(job, event.id);
+          if (bytes === null) throw new Error('读取上传二进制体失败');
+        } else if (event.body.kind === 'json') {
+          if (event.body.value === undefined) throw new Error('上传 JSON 请求缺少 body.value');
+          jsonBody = event.body.value;
+        } else {
+          throw new Error(`未知上传 body 类型: ${event.body.kind}`);
+        }
+        response = await Request.uploadEnvelope(
+          event.base_url,
+          event.path,
+          event.query,
+          jsonBody,
+          bytes,
+          event.timeout_ms
+        );
+      }
+      reply = { response };
+    } catch (e) {
+      reply = { error: toError(e as Object).message };
+    }
+    if (!pumpState.closed && !call.cancelled) {
+      fileCoreNative.replyUpload(job, event.id, JSON.stringify(reply));
+    }
+  }
 }

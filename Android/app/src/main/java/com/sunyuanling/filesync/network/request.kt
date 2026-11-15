@@ -91,6 +91,7 @@ object Request {
             preferences[TOKEN_KEY] = token
         }
         Log.d(TAG, "Token 已保存")
+        com.sunyuanling.filesync.mesh.MeshController.afterAuthentication()
     }
 
     suspend fun getToken(): String? {
@@ -100,6 +101,7 @@ object Request {
     }
 
     suspend fun clearToken() {
+        com.sunyuanling.filesync.mesh.MeshController.disconnect()
         com.sunyuanling.filesync.share.QuickShareController.cancelAll()
         appContext?.dataStore?.edit { preferences ->
             preferences.remove(TOKEN_KEY)

@@ -9,6 +9,7 @@ export async function login(username: string, password: string): Promise<LoginDa
     const data = await invoke<LoginData>('login', { username, password })
     // 同步写一份到 localStorage，供 web 模式的 http.ts 复用
     setToken(data.token)
+    await import('@/api/vpn').then(m => m.afterMeshAuthentication(data.token))
     return data
   }
   const data = await httpPost<LoginData>('/user/login', { username, password, device_id: getDeviceId() })
@@ -26,7 +27,9 @@ export async function verify(): Promise<VerifyData> {
     // 退出后它被清掉，就不会被恢复回去。
     const token = localStorage.getItem('token')
     if (token) await invoke('restore_token', { token })
-    return invoke<VerifyData>('verify')
+    const data = await invoke<VerifyData>('verify')
+    await import('@/api/vpn').then(m => m.afterMeshAuthentication(data.token || token || ''))
+    return data
   }
   return httpPost<VerifyData>('/user/verify')
 }

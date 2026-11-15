@@ -214,6 +214,122 @@ export class Request {
   }
 
   /**
+   * sys_core 上传桥专用宿主请求。只处理传输与鉴权，业务信封原样返回给内核。
+   */
+  static async uploadEnvelope(
+    baseUrl: string,
+    path: string,
+    query: string[][],
+    jsonBody: Object | null,
+    bytes: Uint8Array | null,
+    timeoutMs: number
+  ): Promise<ApiResponseData<Object>> {
+    const instance: Request = Request.getInstance();
+    let url: string = `${baseUrl.replace(/\/+$/, '')}/v1${path}`;
+    for (let i = 0; i < query.length; i++) {
+      const pair: string[] = query[i];
+      if (pair.length !== 2) throw new ResponseException(-1, '上传 query 参数无效');
+      url += (url.includes('?') ? '&' : '?') +
+        `${encodeURIComponent(pair[0])}=${encodeURIComponent(pair[1])}`;
+    }
+    const headers: Record<string, string> = instance.buildHeaders({
+      'Content-Type': bytes !== null ? 'application/octet-stream' : 'application/json',
+    });
+    let extraData: string | ArrayBuffer | undefined;
+    if (bytes !== null) {
+      extraData = bytes.buffer;
+    } else if (jsonBody !== null) {
+      extraData = JSON.stringify(jsonBody);
+    }
+
+    const httpRequest = http.createHttp();
+    try {
+      const reqOpts: http.HttpRequestOptions = {
+        method: http.RequestMethod.POST,
+        header: headers,
+        extraData,
+        expectDataType: http.HttpDataType.STRING,
+        connectTimeout: timeoutMs,
+        readTimeout: timeoutMs,
+      };
+      if (appConfig.caPath.length > 0) {
+        reqOpts.caPath = appConfig.caPath;
+      }
+      const response = await httpRequest.request(url, reqOpts);
+      await instance.tryRefreshTokenFromHeader(response);
+      if (response.responseCode === 401) {
+        await TokenManager.getInstance().clear();
+        authManager.notifyTokenExpired();
+        throw new ResponseException(401, '认证失败');
+      }
+      if (response.responseCode !== 200) {
+        throw new ResponseException(response.responseCode, `HTTP ${response.responseCode}`);
+      }
+      const text = response.result as string;
+      if (text === null || text.length === 0) {
+        throw new ResponseException(500, '响应体为空');
+      }
+      const envelope = JSON.parse(text) as ApiResponseData<Object>;
+      if (envelope.code === 401) {
+        await TokenManager.getInstance().clear();
+        authManager.notifyTokenExpired();
+      }
+      return envelope;
+    } catch (err) {
+      if (err instanceof ResponseException) throw err;
+      throw new ResponseException(-1, (err as Error)?.message ?? JSON.stringify(err));
+    } finally {
+      instance.safeDestroy(httpRequest);
+    }
+  }
+
+  /** 校验快速分享入口确实支持带附件响应头的 Range 下载。 */
+  static async probeShare(url: string): Promise<void> {
+    const instance: Request = Request.getInstance();
+    const httpRequest = http.createHttp();
+    try {
+      const reqOpts: http.HttpRequestOptions = {
+        method: http.RequestMethod.GET,
+        header: { 'Range': 'bytes=0-0' },
+        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        connectTimeout: 10000,
+        readTimeout: 10000,
+      };
+      if (appConfig.caPath.length > 0) {
+        reqOpts.caPath = appConfig.caPath;
+      }
+      const response = await httpRequest.request(url, reqOpts);
+      if (response.responseCode !== 206) {
+        throw new ResponseException(response.responseCode, `HTTP ${response.responseCode}`);
+      }
+      const headers = response.header as Record<string, string>;
+      let attachment = false;
+      let byteRange = false;
+      if (headers !== null && headers !== undefined) {
+        const keys = Object.keys(headers);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i].toLowerCase();
+          const value = headers[keys[i]];
+          if (key === 'content-disposition') {
+            attachment = value.toLowerCase().includes('attachment');
+          } else if (key === 'content-range') {
+            byteRange = value.startsWith('bytes 0-0/');
+          }
+        }
+      }
+      const data = response.result as ArrayBuffer;
+      if (!attachment || !byteRange || data === null || data.byteLength === 0) {
+        throw new ResponseException(-1, '分享入口不可下载');
+      }
+    } catch (err) {
+      if (err instanceof ResponseException) throw err;
+      throw new ResponseException(-1, (err as Error)?.message ?? JSON.stringify(err));
+    } finally {
+      instance.safeDestroy(httpRequest);
+    }
+  }
+
+  /**
    * 分片上传单分片：POST application/octet-stream，query 带 upload_id + index。
    *  - code 200 → 成功（返回 UploadChunkData）
    *  - code 422 → ChunkVerifyException

@@ -1,7 +1,7 @@
 /*
  * filecore NAPI wrapper for HarmonyOS.
  *
- * 与服务端 file_lib（Rust libfilecore.a）/ 桌面端 Rust blake3 / Android filecore_jni 逐字节一致。
+ * 所有文件与上传实现来自仓库根 sys_core；本文件只负责 NAPI 参数封送。
  * ArkTS 侧通过 `import filecore from 'libfilecore.so'` 调用本模块导出的函数。
  *
  * 导出（对标 Android filecore_jni/src/lib.rs 的 JNI 函数）：
@@ -9,11 +9,11 @@
  *   - hashChunk(data: Uint8Array): Uint8Array | null     (32 bytes blake3)
  *   - merkleRoot(leaves: Uint8Array): Uint8Array | null   (32 bytes，leaves 长度须为 32 倍数)
  *   - describeFile(path: string, chunkSize: number): Uint8Array | null
- *       返回 packed [file_hash(32) || merkle_root(32) || leaves(n*32)]，
- *       失败返回 null，ArkTS 侧回退纯 ArkTS Blake3Util（仅性能差）。
+ *       返回 packed [file_hash(32) || merkle_root(32) || leaves(n*32)]，失败返回 null。
  *
- * 失败一律返回 null（对标 Android JNI 失败语义）。file_lib 内所有导出已包 ffi_guard
- * （catch_unwind），panic 不会跨 FFI 展开；此处再防一道参数校验。
+ * 文件函数失败返回 null；上传 start 失败返回 0，reply 返回 C ABI 状态码。
+ * sys_core 内所有导出已包 ffi_guard（catch_unwind），panic 不会跨 FFI 展开；
+ * 此处再防一道参数校验。
  */
 
 #include "napi/native_api.h"
@@ -67,6 +67,38 @@ napi_value NullValue(napi_env env) {
     napi_value v = nullptr;
     napi_get_null(env, &v);
     return v;
+}
+
+bool ReadString(napi_env env, napi_value val, std::string* out) {
+    size_t len = 0;
+    if (napi_get_value_string_utf8(env, val, nullptr, 0, &len) != napi_ok) return false;
+    std::vector<char> buf(len + 1, 0);
+    if (napi_get_value_string_utf8(env, val, buf.data(), buf.size(), &len) != napi_ok) return false;
+    *out = std::string(buf.data(), len);
+    return true;
+}
+
+bool ReadU64(napi_env env, napi_value val, uint64_t* out) {
+    double value = 0;
+    if (napi_get_value_double(env, val, &value) != napi_ok) return false;
+    if (value != value || value < 0 || value > 9007199254740991.0 ||
+        static_cast<double>(static_cast<uint64_t>(value)) != value) {
+        return false;
+    }
+    *out = static_cast<uint64_t>(value);
+    return true;
+}
+
+napi_value MakeU64(napi_env env, uint64_t value) {
+    napi_value result = nullptr;
+    napi_create_double(env, static_cast<double>(value), &result);
+    return result;
+}
+
+napi_value MakeI32(napi_env env, int32_t value) {
+    napi_value result = nullptr;
+    napi_create_int32(env, value, &result);
+    return result;
 }
 
 napi_value AbiVersion(napi_env env, napi_callback_info info) {
@@ -171,12 +203,88 @@ napi_value DescribeFile(napi_env env, napi_callback_info info) {
     return NullValue(env);
 }
 
+napi_value StartUpload(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 1) {
+        return MakeU64(env, 0);
+    }
+    std::string input;
+    if (!ReadString(env, args[0], &input)) return MakeU64(env, 0);
+    return MakeU64(env, fc_upload_start(input.c_str()));
+}
+
+napi_value PollUpload(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    uint64_t id = 0;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok ||
+        argc < 1 || !ReadU64(env, args[0], &id)) {
+        return NullValue(env);
+    }
+    char* events = fc_upload_poll(id);
+    if (events == nullptr) return NullValue(env);
+    napi_value result = nullptr;
+    napi_status status = napi_create_string_utf8(env, events, NAPI_AUTO_LENGTH, &result);
+    fc_free_string(events);
+    return status == napi_ok ? result : NullValue(env);
+}
+
+napi_value TakeUploadBody(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    uint64_t id = 0;
+    uint64_t request = 0;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 2 ||
+        !ReadU64(env, args[0], &id) || !ReadU64(env, args[1], &request)) {
+        return NullValue(env);
+    }
+    uint8_t* data = nullptr;
+    size_t len = 0;
+    if (fc_upload_take_body(id, request, &data, &len) != FC_OK) return NullValue(env);
+    napi_value result = MakeBytes(env, data, len);
+    fc_upload_body_free(data, len);
+    return result;
+}
+
+napi_value ReplyUpload(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value args[3];
+    uint64_t id = 0;
+    uint64_t request = 0;
+    std::string result;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 3 ||
+        !ReadU64(env, args[0], &id) || !ReadU64(env, args[1], &request) ||
+        !ReadString(env, args[2], &result)) {
+        return MakeI32(env, FC_ERR_ARG);
+    }
+    return MakeI32(env, fc_upload_reply(id, request, result.c_str()));
+}
+
+napi_value CancelUpload(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    uint64_t id = 0;
+    if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) == napi_ok &&
+        argc >= 1 && ReadU64(env, args[0], &id)) {
+        fc_upload_cancel(id);
+    }
+    napi_value result = nullptr;
+    napi_get_undefined(env, &result);
+    return result;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
-        {"abiVersion",   nullptr, AbiVersion,   nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"hashChunk",    nullptr, HashChunk,    nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"merkleRoot",   nullptr, MerkleRoot,   nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"describeFile", nullptr, DescribeFile, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"abiVersion",     nullptr, AbiVersion,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"hashChunk",      nullptr, HashChunk,      nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"merkleRoot",     nullptr, MerkleRoot,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"describeFile",   nullptr, DescribeFile,   nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startUpload",    nullptr, StartUpload,    nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"pollUpload",     nullptr, PollUpload,     nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"takeUploadBody", nullptr, TakeUploadBody, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"replyUpload",    nullptr, ReplyUpload,    nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"cancelUpload",   nullptr, CancelUpload,   nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(props) / sizeof(props[0]), props);
     return exports;

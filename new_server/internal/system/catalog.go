@@ -47,6 +47,7 @@ var defaultRoutes = []model.Route{
 	{Code: "admin.guests", ParentCode: "admin", Path: "/admin/guests", Name: "AdminGuests", Component: "views/admin/GuestManage.vue", Title: "访客管理", Icon: "setting", Sort: 82, MinLevel: 2},
 	{Code: "admin.routes", ParentCode: "admin", Path: "/admin/routes", Name: "AdminRoutes", Component: "views/admin/RouteManage.vue", Title: "路由管理", Icon: "setting", Sort: 83, MinLevel: 3},
 	{Code: "admin.dsh", ParentCode: "admin", Path: "/admin/dsh", Name: "AdminDshTokens", Component: "views/admin/DshTokenManage.vue", Title: "DSH 访问令牌", Icon: "setting", Sort: 84, MinLevel: 3},
+	{Code: "admin.vps", ParentCode: "admin", Path: "/admin/vps", Name: "AdminVpsNodes", Component: "views/admin/VpsNodeManage.vue", Title: "节点面板", Icon: "setting", Sort: 85, MinLevel: 3},
 
 	{Code: "vpn", Path: "/vpn", Title: "组网", Icon: "sync", Sort: 55, MinLevel: 2},
 	{Code: "vpn.mesh", ParentCode: "vpn", Path: "/vpn/mesh", Name: "VpnMesh", Component: "views/vpn/Mesh.vue", Title: "组网总览", Icon: "sync", Sort: 56, MinLevel: 2},
